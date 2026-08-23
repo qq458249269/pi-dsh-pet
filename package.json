@@ -1,6 +1,6 @@
 {
   "name": "pi-dsh-pet",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "description": "Floating desktop deepseek chan for the pi coding agent: idle breathing, random actions, screen wandering, and pi event reactivity (thinking/coding/idle → matching animations).",
   "keywords": [
     "pi",
