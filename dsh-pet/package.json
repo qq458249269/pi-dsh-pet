@@ -1,17 +1,21 @@
 {
   "name": "dsh-pet",
-  "version": "0.1.7",
-  "description": "A floating desktop pet for the DeepSeek Harness Web UI: idle breathing, occasional direction turns, random actions, and screen wandering.",
+  "version": "0.1.9",
+  "description": "A floating desktop pet for the DeepSeek Harness Web UI and pi coding agent: idle breathing, occasional direction turns, random actions, screen wandering, and pi event reactivity.",
   "keywords": [
     "dsh",
     "dsh-plugin",
     "deepseek-harness",
+    "pi",
+    "pi-plugin",
+    "pi-extension",
     "desktop-pet",
     "pet",
     "floating-widget",
     "web-ui",
     "cordis",
-    "react"
+    "react",
+    "pi-package"
   ],
   "homepage": "https://github.com/PC2005-cloud/dsh-pet#readme",
   "repository": {
@@ -54,7 +58,8 @@
     "src",
     "assets/thumb",
     "assets/config.jsonc",
-    "cordis.patch.yml"
+    "cordis.patch.yml",
+    "pi"
   ],
   "scripts": {
     "bundle": "tsdown",
@@ -67,6 +72,11 @@
     "format:check": "prettier --check ."
   },
   "license": "MIT",
+  "pi": {
+    "extensions": [
+      "./pi/extensions"
+    ]
+  },
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
@@ -98,5 +108,8 @@
     "tsdown": "^0.8.0",
     "typescript": "^5.5.0",
     "typescript-eslint": "^8.67.0"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
   }
 }

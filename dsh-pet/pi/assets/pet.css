@@ -1,0 +1,70 @@
+/* pi-dsh-pet — pet overlay styles (extracted from DSH dsh-pet inline CSS) */
+
+/* Root: fixed full-viewport overlay, click-through by default */
+#pet-root {
+  position: fixed;
+  inset: 0;
+  z-index: 2147483647;
+  pointer-events: none;
+  user-select: none;
+  overflow: hidden;
+}
+
+/* Individual pet container */
+.pet-container {
+  position: absolute;
+  pointer-events: none;
+}
+
+/* 16:9 stage */
+.pet-stage {
+  position: relative;
+  pointer-events: none;
+}
+
+/* Dual video buffers */
+.pet-video {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.18s ease;
+}
+.pet-video.is-front {
+  opacity: 1;
+}
+
+/* Click/drag hit area */
+.pet-hit {
+  position: absolute;
+  pointer-events: auto;
+  cursor: grab;
+  z-index: 1;
+}
+.pet-hit:active {
+  cursor: grabbing;
+}
+
+/* Disconnected banner */
+.pet-disconnected {
+  position: fixed;
+  top: 8px;
+  right: 8px;
+  z-index: 999;
+  background: rgba(255, 80, 80, 0.9);
+  color: #fff;
+  padding: 4px 10px;
+  border-radius: 6px;
+  font-size: 12px;
+  font-family: system-ui, sans-serif;
+  pointer-events: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pet-video {
+    transition: none;
+  }
+}

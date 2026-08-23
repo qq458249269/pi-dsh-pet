@@ -44,3 +44,6 @@ dsh-pet/lib/*.js
 .DS_Store
 Thumbs.db
 desktop.ini
+
+# ── Windows 保留设备名（Git 无法索引）──
+nul
