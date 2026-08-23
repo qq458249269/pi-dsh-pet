@@ -1,113 +1,37 @@
 {
-  "name": "dsh-pet",
-  "version": "0.1.9",
-  "description": "A floating desktop pet for the DeepSeek Harness Web UI and pi coding agent: idle breathing, occasional direction turns, random actions, screen wandering, and pi event reactivity.",
+  "name": "pi-dsh-pet",
+  "version": "0.1.0",
+  "description": "Floating desktop pet for the pi coding agent: idle breathing, random actions, screen wandering, and pi event reactivity (thinking/coding/idle → matching animations).",
   "keywords": [
-    "dsh",
-    "dsh-plugin",
-    "deepseek-harness",
     "pi",
     "pi-plugin",
     "pi-extension",
+    "pi-package",
     "desktop-pet",
     "pet",
-    "floating-widget",
-    "web-ui",
-    "cordis",
-    "react",
-    "pi-package"
+    "electron",
+    "floating-widget"
   ],
-  "homepage": "https://github.com/PC2005-cloud/dsh-pet#readme",
+  "homepage": "https://github.com/SOMWHY/pi-dsh-pet#readme",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/PC2005-cloud/dsh-pet.git"
+    "url": "git+https://github.com/SOMWHY/pi-dsh-pet.git"
   },
   "bugs": {
-    "url": "https://github.com/PC2005-cloud/dsh-pet/issues"
+    "url": "https://github.com/SOMWHY/pi-dsh-pet/issues"
   },
-  "_comment": [
-    "=============== dsh-pet 包清单说明 ===============",
-    "type: module —— 本包是 ESM",
-    "main: lib/index.js —— 宿主半侧入口（Cordis 插件：name/inject/apply）",
-    "exports['./client'] —— 浏览器半侧入口，DSH 模块系统按它提供 /plugins/dsh-pet/client.js",
-    "dsh.bundle.patch —— 声明本包是 bundle，patch 文件是 cordis.patch.yml（安装后自动进层栈）",
-    "dsh.client —— 声明浏览器半侧的注入依赖和平台（web）",
-    "files —— npm publish 只发这些目录/文件（assets/thumb 播放资源；assets/preview 的 GIF 仅 README 展示、不入包）",
-    "scripts.encode:thumbs —— 转码管线（step03 母版 → assets/thumb 360×360）",
-    "scripts.prepack —— 发布前自动健康检查",
-    "peerDependencies —— 运行时由宿主（DSH）提供的模块，本包不打包它们",
-    "================================================"
-  ],
   "type": "module",
-  "main": "lib/index.js",
-  "exports": {
-    ".": {
-      "types": "./lib/types/index.d.ts",
-      "default": "./lib/index.js"
-    },
-    "./client": {
-      "types": "./lib/types/client/index.d.ts",
-      "default": "./lib/client.js"
-    },
-    "./src/*": "./src/*",
-    "./cordis.patch.yml": "./cordis.patch.yml",
-    "./package.json": "./package.json"
-  },
   "files": [
-    "lib",
-    "src",
+    "pi",
     "assets/thumb",
-    "assets/config.jsonc",
-    "cordis.patch.yml",
-    "pi"
+    "assets/config.jsonc"
   ],
-  "scripts": {
-    "bundle": "tsdown",
-    "watch": "tsdown --watch",
-    "prepare": "npm run bundle",
-    "prepack": "npm run typecheck && npm run lint && npm run format:check && npm run bundle && node scripts/prepack-check.js",
-    "typecheck": "tsc --noEmit",
-    "lint": "eslint .",
-    "format": "prettier --write .",
-    "format:check": "prettier --check ."
-  },
+  "scripts": {},
   "license": "MIT",
   "pi": {
     "extensions": [
       "./pi/extensions"
     ]
-  },
-  "dsh": {
-    "bundle": {
-      "patch": "./cordis.patch.yml"
-    },
-    "client": {
-      "inject": [
-        "@deepseek-ai/dsh-client-runtime"
-      ],
-      "platform": "web"
-    }
-  },
-  "peerDependencies": {
-    "@deepseek-ai/cordis": "^4.0.1",
-    "@deepseek-ai/dsh-client-runtime": "^0.1.1-rc.1",
-    "@deepseek-ai/dsh-client-ui-slots": "^0.1.1-rc.1",
-    "@deepseek-ai/dsh-home-paths": "^0.1.1-rc.1",
-    "@deepseek-ai/dsh-host-webserver": "^0.1.1-rc.1",
-    "react": "^18.2.0"
-  },
-  "devDependencies": {
-    "@eslint/js": "^10.0.1",
-    "@types/node": "^26.2.0",
-    "@types/react": "^18.2.0",
-    "@types/react-dom": "^18.2.0",
-    "eslint": "^10.9.0",
-    "eslint-plugin-react-hooks": "^7.1.1",
-    "prettier": "^3.9.6",
-    "rolldown": "^1.0.0-beta.7",
-    "tsdown": "^0.8.0",
-    "typescript": "^5.5.0",
-    "typescript-eslint": "^8.67.0"
   },
   "dependencies": {
     "ws": "^8.18.0"

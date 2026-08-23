@@ -202,6 +202,7 @@
     stage.appendChild(videoA);
     stage.appendChild(videoB);
     stage.appendChild(hit);
+
     container.appendChild(stage);
     rootEl.appendChild(container);
 
@@ -491,7 +492,6 @@
     });
 
     hit.addEventListener("pointercancel", function (e) {
-      setPassthrough(true);
       hit.dispatchEvent(new PointerEvent("pointerup", e));
     });
 
@@ -583,6 +583,29 @@
   var OVERRIDE_DURATION_MS = 5000;
 
   var pets = []; // PetCard instances
+  var addPetSeq = 0; // counter for auto-generated pet ids
+
+  /** Maps size arg to px width */
+  var SIZE_MAP = { small: 260, normal: 400, large: 540 };
+
+  /** Create a new pet at a random corner (called on /pet when window already running) */
+  function addPet(sizeArg) {
+    if (!config) return;
+    sizeArg = sizeArg || "normal";
+    addPetSeq++;
+    var corners = ["top-left", "top-right", "bottom-left", "bottom-right"];
+    var corner = corners[Math.floor(Math.random() * corners.length)];
+    var size = SIZE_MAP[sizeArg] || SIZE_MAP.normal;
+    var cfg = {
+      id: "auto-" + addPetSeq,
+      size: size,
+      position: { corner: corner, marginX: 30 + Math.floor(Math.random() * 60), marginY: 30 + Math.floor(Math.random() * 120) }
+    };
+    var root = document.getElementById("pet-root");
+    var pet = new PetCard(cfg, root);
+    pets.push(pet);
+    pet.init();
+  }
 
   /** Apply an event override to all pets */
   function applyEventOverride(anim) {
@@ -648,6 +671,15 @@
         applyEventOverride(anim);
       } else if (msg === "agent_idle") {
         // pets return to chain naturally via override timeout
+      } else if (msg === "add_pet") {
+        addPet();
+      } else if (msg.startsWith("add_pet:")) {
+        addPet(msg.slice("add_pet:".length));
+      } else if (msg === "shutdown") {
+        if (window.__petElectron__ && window.__petElectron__.closeWindow) {
+          window.__petElectron__.closeWindow();
+        }
+        return;
       }
     };
 

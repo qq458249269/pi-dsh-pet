@@ -1,126 +1,100 @@
-# dsh-pet 🐾
+# pi-dsh-pet 🐾
+
+[中文](./README.md)
 
 <p align="center">
-  <a href="https://www.npmjs.com/package/dsh-pet"><img alt="npm version" src="https://img.shields.io/npm/v/dsh-pet?label=npm&color=blue"></a>
-  <a href="https://www.npmjs.com/package/dsh-pet"><img alt="npm monthly downloads" src="https://img.shields.io/npm/dm/dsh-pet?label=monthly&color=brightgreen"></a>
-  <a href="https://www.npmjs.com/package/dsh-pet"><img alt="total downloads" src="https://img.shields.io/npm/dt/dsh-pet?label=total&color=success"></a>
-  <a href="https://github.com/PC2005-cloud/dsh-pet"><img alt="stars" src="https://img.shields.io/github/stars/PC2005-cloud/dsh-pet?style=social"></a>
-  <a href="https://github.com/PC2005-cloud/dsh-pet/blob/master/LICENSE"><img alt="license" src="https://img.shields.io/github/license/PC2005-cloud/dsh-pet?color=orange"></a>
-  <a href="https://awesome-dsh-plugin.com"><img alt="awesome dsh plugin" src="https://awesome-dsh-plugin.com/badge.svg"></a>
-  <img alt="platform" src="https://img.shields.io/badge/platform-DeepSeek%20Harness%20Web-8A2BE2">
-  <img alt="pi" src="https://img.shields.io/badge/platform-pi%20coding%20agent-6C5CE7">
-  <img alt="assets" src="https://img.shields.io/badge/assets-dynamic%20animations-ff69b4">
+  <a href="https://www.npmjs.com/package/pi-dsh-pet"><img alt="npm version" src="https://img.shields.io/npm/v/pi-dsh-pet?label=npm&color=blue"></a>
+  <a href="https://www.npmjs.com/package/pi-dsh-pet"><img alt="npm monthly downloads" src="https://img.shields.io/npm/dm/pi-dsh-pet?label=downloads&color=brightgreen"></a>
+  <a href="https://github.com/SOMWHY/pi-dsh-pet"><img alt="stars" src="https://img.shields.io/github/stars/SOMWHY/pi-dsh-pet?style=social"></a>
+  <a href="https://github.com/SOMWHY/pi-dsh-pet/blob/master/LICENSE"><img alt="license" src="https://img.shields.io/github/license/SOMWHY/pi-dsh-pet?color=orange"></a>
+  <img alt="platform" src="https://img.shields.io/badge/platform-pi%20coding%20agent-8A2BE2">
+  <img alt="assets" src="https://img.shields.io/badge/assets-91%20animations-ff69b4">
 </p>
 
-> 🙏 **Thanks to the original project**
-> This project is forked from [PC2005-cloud/dsh-pet](https://github.com/PC2005-cloud/dsh-pet). Huge thanks to the original author for the beautiful hand-drawn transparent animation assets (91 WebM files) and the polished animation engine. The pi extension builds on this foundation, adding Electron fullscreen transparent overlay, pi event reactivity (thinking/coding/idle states mapped to animations), and cross-session persistence — so the pet can keep you company not just inside DSH Web, but also in your pi terminal coding agent.
-
-> A floating desktop pet for the [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) Web UI **and** the [pi coding agent](https://github.com/pi): idle breathing, random actions, screen wandering, and pi event reactivity.
+> 🙏 Forked from [dsh-pet](https://github.com/PC2005-cloud/dsh-pet) ([npm](https://www.npmjs.com/package/dsh-pet)), with gratitude to the original author for the 91 hand-drawn transparent animations and animation engine. This repo adapts it for the pi coding agent with Electron overlay windows and pi event reactivity.
 
 ---
 
-## 📦 Installation
-
-| Platform             | Install                                         |
-| -------------------- | ----------------------------------------------- |
-| **DeepSeek Harness** | `dsh plugin --profile web add dsh-pet`          |
-| **pi coding agent**  | `npm install -g dsh-pet`, then run `/pet` in pi |
-
-> 💡 Want to craft your own pet? Clone [PC2005-cloud/dsh-pet](https://github.com/PC2005-cloud/dsh-pet) and use the bundled asset pipeline to generate one from scratch — fully reproducible.
-
-## 🚀 pi Platform Quick Start
+## Quick Start
 
 ```sh
-npm install -g dsh-pet
+npm install -g pi-dsh-pet
 ```
 
 In pi:
 
 ```
-/pet      →  Open the pet window (Electron fullscreen transparent overlay; first run downloads Electron ≈100MB)
-/pet-stop →  Close the pet window
+/pet             →  normal size (400px)
+/pet small       →  small size (260px)
+/pet large       →  large size (540px)
+/pet-stop        →  close all pet windows
 ```
 
-The pet reacts to pi's working state:
+> 💡 First launch downloads Electron ~100MB; subsequent launches are instant.
 
-- 🧠 **Deep thinking** — plays "deep thinking" animation when the agent is reasoning
-- 💻 **Coding** — plays "writing code" animation on bash/edit/write tool calls
-- 😴 **Idle** — returns to the random animation chain when the agent settles
+The pet reacts to pi's agent state:
 
-> The pet persists across sessions within the pi process lifetime.
+- 🧠 **Thinking** — "deep thought" animation
+- 💻 **Coding** — "writing code" animation when tools (bash/edit/write) are called
+- 😴 **Idle** — resumes random animation chain
 
-## ✨ Features
+> The pet persists across pi sessions within the same process.
 
-- **A pure pet, nothing else**: just a companion. Zero core changes, zero model cost
-- **Dual-platform**: DSH Web UI (React component) + pi terminal agent (Electron fullscreen overlay)
-- **pi event reactivity**: senses agent thinking/tool-call/idle states and switches animations
-- **Hand-drawn transparent animations** (91 total): idle breathing, dozing, Rubik's cube, humming, coding, seasonal actions — all seamlessly chained
-- **Never-ending animation chain**: next animation picked by probability (30% idle / 10% turn / 40% action / 20% move)
-- **Screen wandering**: walks toward facing direction, never walks off screen
-- **Click / drag**: random reaction animations, draggable anywhere
-- **Left/right facing**: all animations CSS-mirrored
-- **Ground alignment**: unified foot line
-- **Smooth transitions**: double-buffered video cross-fade
-- **Accessibility-friendly**: supports `prefers-reduced-motion`
+## Features
 
-## ⚙️ Configuration
+- **Just a deepseek chan**: no weather, no system monitor, no API calls — just company.
+- **pi event reactivity**: auto-detects agent state (thinking/coding/idle) and plays matching animations.
+- **91 hand-drawn transparent animations**: idle breathing, napping, cube solving, humming, coding, seasonal…
+- **Endless animation chain**: weighted random selection after each clip.
+- **Screen roaming**: walks within screen bounds.
+- **Click / drag**: random response on click, draggable anywhere.
+- **Multi-window**: each `/pet` opens a new independent window; `/pet-stop` closes all.
+- **Mirrored facing**: all animations CSS-flippable.
+- **Ground-aligned feet**: consistent baseline across animations.
+- **Smooth transitions**: dual-buffer video cross-fade.
 
-| Key        | Description                                   |
-| ---------- | --------------------------------------------- |
-| `size`     | Stage width (px); pet height ≈ width×9/16×74% |
-| `position` | Default corner position                       |
+## Configuration
 
-> Note: the plugin works out of the box; all config above is optional. Settings saved to `$DSH_HOME/dsh-pet/main-config.json`.
+Default config: `assets/config.jsonc`
 
-### 📄 Advanced Customization
+```jsonc
+"pets": [
+  { "id": "main", "size": 462, "position": { "corner": "top-right", "marginX": 24, "marginY": 100 } }
+]
+```
 
-All user data lives under `$DSH_HOME/dsh-pet/`:
+| Field | Description |
+|-------|-------------|
+| `size` | Pet width in px (height = width × 9/16) |
+| `position.corner` | Screen corner: top-left / top-right / bottom-left / bottom-right |
+| `position.marginX/Y` | Distance from corner in px |
 
-| Layer                      | Path                                 | Purpose                                              |
-| -------------------------- | ------------------------------------ | ---------------------------------------------------- |
-| Default config (read-only) | `assets/config.jsonc` in the package | Complete reference: pets / animation pools / weights |
-| User config                | `$DSH_HOME/dsh-pet/main-config.json` | Override fragment                                    |
-| User animations (optional) | `$DSH_HOME/dsh-pet/main-animation/`  | Drop `.webm` files here — takes precedence           |
+Edit `assets/config.jsonc` and re-run `/pet` to apply.
 
-- Format: `.webm` only; **transparent animations require VP9 Alpha encoding**
+### Customizing Pet Size
 
-## 🗑️ Uninstall
+The size map is defined in `dsh-pet/pi/assets/pet.js` line 589:
+
+```js
+var SIZE_MAP = { small: 260, normal: 400, large: 540 };
+```
+
+- **Change values** — edit the px widths (height = width × 9/16)
+- **Add tiers** — add `tiny`, `xlarge`, etc., e.g. `{ tiny: 180, ..., xlarge: 720 }`
+
+Save and re-run `/pet` — new commands like `/pet tiny`, `/pet xlarge` work automatically.
+
+## Uninstall
 
 ```sh
-# DSH
-dsh plugin --profile web remove dsh-pet
-
-# pi
-npm uninstall -g dsh-pet
+npm uninstall -g pi-dsh-pet
 ```
 
-## 🎬 Animation Previews
+## Links
 
-> Animations have transparent backgrounds; GIF previews show page background color where transparent.
+- **GitHub**: [github.com/SOMWHY/pi-dsh-pet](https://github.com/SOMWHY/pi-dsh-pet)
 
-<p>
-  <img src="https://raw.githubusercontent.com/PC2005-cloud/dsh-pet/main/dsh-pet/assets/preview/daiji-huxi-xiuxian.gif" width="160" alt="Idle breathing & chill" title="Idle breathing & chill">
-  <img src="https://raw.githubusercontent.com/PC2005-cloud/dsh-pet/main/dsh-pet/assets/preview/dongzhangxiwang.gif" width="160" alt="Looking around" title="Looking around">
-  <img src="https://raw.githubusercontent.com/PC2005-cloud/dsh-pet/main/dsh-pet/assets/preview/yuandi-piaofu-tabu.gif" width="160" alt="Floating in place" title="Floating in place">
-  <img src="https://raw.githubusercontent.com/PC2005-cloud/dsh-pet/main/dsh-pet/assets/preview/yuandi-xiaoqi-chenmian.gif" width="160" alt="Napping" title="Napping">
-  <img src="https://raw.githubusercontent.com/PC2005-cloud/dsh-pet/main/dsh-pet/assets/preview/dianji-huiying-kaixin-yuedong.gif" width="160" alt="Click response - happy bounce" title="Click response - happy bounce">
-  <img src="https://raw.githubusercontent.com/PC2005-cloud/dsh-pet/main/dsh-pet/assets/preview/beishubiao-tuozhuai-xuankong-fankui.gif" width="160" alt="Dragged by the mouse" title="Dragged by the mouse">
-</p>
-
-All animations in `dsh-pet/assets/thumb/`.
-
-## 🔗 Links
-
-- **npm**: [npmjs.com/package/dsh-pet](https://www.npmjs.com/package/dsh-pet)
-- **GitHub**: [github.com/PC2005-cloud/dsh-pet](https://github.com/PC2005-cloud/dsh-pet)
-- **Original project**: [PC2005-cloud/dsh-pet](https://github.com/PC2005-cloud/dsh-pet) (thank you!)
-
-## 🔎 Discover More DSH Plugins
-
-- Community plugin catalog: [awesome-dsh-plugin.com](https://awesome-dsh-plugin.com)
-- DSH official repository: [deepseek-ai/DeepSeek-Harness](https://github.com/deepseek-ai/deepseek-harness)
-
-## 📄 License
+## License
 
 - Code: MIT
-- Assets (animations/prompts/source videos): open-source use permitted, **no commercial use**
+- Assets (animations/prompts/source videos): allowed for open-source use, **no commercial use**

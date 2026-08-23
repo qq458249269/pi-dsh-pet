@@ -46,6 +46,9 @@ let httpSvr: HttpServer | null = null;
 let wss: WsServer | null = null;
 let broadcast: ((msg: string) => void) | null = null;
 
+// ---- Size map (shared with Electron pet for /pet args) ----
+const SIZE_MAP: Record<string, number> = { small: 260, normal: 400, large: 540 };
+
 // ---- Helpers ----
 
 /** Encode an asset path to prevent path traversal */
@@ -75,14 +78,15 @@ async function sendFile(res: ServerResponse, filePath: string): Promise<void> {
   }
 }
 
-// ---- Electron launcher (npx electron → transparent always-on-top window) ----
+// ---- Electron launcher (single window, all pets render inside) ----
 
 let electronProc: ChildProcess | null = null;
 const ELECTRON_SCRIPT = join(ASSETS_DIR, 'pet-electron.cjs');
 
 function launchElectron(port: number): void {
+  // Only one window — all pets share it. If already running, skip.
   if (electronProc && electronProc.exitCode === null) {
-    console.log('[pi-dsh-pet] Pet is already running.');
+    console.log('[pi-dsh-pet] Pet window already running — skipped.');
     return;
   }
 
@@ -120,20 +124,19 @@ function launchElectron(port: number): void {
 }
 
 function killElectron(): void {
-  if (electronProc && electronProc.exitCode === null) {
-    console.log('[pi-dsh-pet] Closing pet…');
-    if (process.platform === 'win32') {
-      // shell:true → proc.pid is cmd.exe; taskkill /t kills whole tree
-      try {
-        execSync(`taskkill /pid ${electronProc.pid} /f /t`, { stdio: 'ignore' });
-      } catch {
-        /* ignore */
-      }
-    } else {
-      electronProc.kill();
+  if (!electronProc || electronProc.exitCode !== null) return;
+  console.log('[pi-dsh-pet] Closing pet window…');
+  if (process.platform === 'win32') {
+    try {
+      execSync(`taskkill /pid ${electronProc.pid} /f /t`, { stdio: 'ignore' });
+    } catch {
+      /* ignore */
     }
-    electronProc = null;
+  } else {
+    electronProc.kill();
   }
+  electronProc = null;
+  console.log('[pi-dsh-pet] Pet window closed.');
 }
 
 // ---- Port finder ----
@@ -287,10 +290,14 @@ export default function (pi: ExtensionAPI) {
   });
 
   // Pet survives session boundaries — only shut down when the pi process exits.
-  process.on('exit', () => {
-    killElectron();
-    stopServer();
-  });
+  function shutdown() {
+    broadcast?.('shutdown');
+    setTimeout(function () { killElectron(); stopServer(); }, 200);
+  }
+  process.on('beforeExit', shutdown);
+  process.on('SIGINT', shutdown);
+  process.on('SIGTERM', shutdown);
+  process.on('exit', function () { killElectron(); stopServer(); });
 
   // ---- Agent events → WebSocket ----
   let thinkingThrottle: ReturnType<typeof setInterval> | null = null;
@@ -328,7 +335,12 @@ export default function (pi: ExtensionAPI) {
   // ---- Commands ----
   pi.registerCommand('pet', {
     description: 'Open desktop pet in Electron',
-    handler: async (_args, ctx) => {
+    getArgumentCompletions: (prefix: string) => {
+      const sizes = ['normal', 'small', 'large'];
+      const items = sizes.filter(s => s.startsWith(prefix)).map(s => ({ value: s, label: `${s} (${SIZE_MAP[s]}px)` }));
+      return items.length > 0 ? items : null;
+    },
+    handler: async (args, ctx) => {
       if (!serverActive || !port) {
         try {
           port = await startServer();
@@ -338,7 +350,18 @@ export default function (pi: ExtensionAPI) {
           return;
         }
       }
-      ctx.ui.notify('Launching pet…  First run downloads Electron (~100MB), please wait', 'info');
+
+      var sizeArg = (args || '').trim().toLowerCase();
+      if (!(sizeArg in SIZE_MAP)) sizeArg = 'normal'; // default if unknown
+
+      // If window is already running, add a pet via WebSocket
+      if (electronProc && electronProc.exitCode === null) {
+        broadcast?.('add_pet:' + sizeArg);
+        ctx.ui.notify('Pet added (' + sizeArg + ')!', 'info');
+        return;
+      }
+
+      ctx.ui.notify('Launching pet (' + sizeArg + ')…  First run downloads Electron (~100MB), please wait', 'info');
       launchElectron(port);
     },
   });
