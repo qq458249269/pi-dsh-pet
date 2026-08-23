@@ -47,12 +47,16 @@ The pet reacts to pi's agent state:
 ## Project Structure
 
 ```
-├── dsh-pet/                 # pi extension package
-│   ├── pi/extensions/       #   pi extension entry (HTTP + WebSocket + Electron overlay)
-│   ├── pi/assets/           #   Electron window UI (pet.html + pet.js + pet.css)
-│   └── assets/thumb/        #   91 transparent WebM animations
-├── DESIGN.md                # Design & architecture docs
-└── LICENSE                  # MIT
+pi-dsh-pet/
+├── pi/extensions/       # pi extension entry (HTTP + WebSocket + Electron launcher)
+├── pi/assets/           # Electron window UI (pet.html + pet.js + pet.css + preload)
+├── assets/preview/      # 91 preview GIFs
+├── assets/thumb/        # 91 transparent WebM animations
+├── assets/config.jsonc  # animation → event / tag mapping
+├── package.json         # npm package manifest
+├── DESIGN.md            # design & architecture doc
+├── LICENSE              # MIT
+└── README.md
 ```
 
 ## Animations Preview
@@ -63,7 +67,7 @@ All 91 animations — see the [main README](./README.md) for the full gallery.
 
 ## Customizing Size
 
-The size map is in `dsh-pet/pi/assets/pet.js` line 589:
+The size map is in `pi/assets/pet.js` line 589:
 
 ```js
 var SIZE_MAP = { small: 260, normal: 400, large: 540 };

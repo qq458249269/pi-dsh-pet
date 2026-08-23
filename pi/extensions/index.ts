@@ -23,8 +23,8 @@ import { randomInt } from 'node:crypto';
 
 // ---- Paths (fileURLToPath needed on Windows; new URL(...).pathname adds leading /) ----
 const __filename = fileURLToPath(import.meta.url);
-const PI_DIR = dirname(dirname(__filename)); // dsh-pet/pi/
-const PACKAGE_ROOT = dirname(PI_DIR); // dsh-pet/
+const PI_DIR = dirname(dirname(__filename)); // pi/
+const PACKAGE_ROOT = dirname(PI_DIR); // repo root
 const ASSETS_DIR = join(PI_DIR, 'assets');
 const PET_THUMB = join(PACKAGE_ROOT, 'assets', 'thumb');
 const PET_CONFIG = join(PACKAGE_ROOT, 'assets', 'config.jsonc');
