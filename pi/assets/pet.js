@@ -166,6 +166,8 @@
     this.dragging = false;
     this.overrideAnim = null;  // WS-driven temporary override
     this.overrideTimer = null;
+    this.currentOverrideAnim = null; // Name of active WS override (for click-during-override)
+    this.clickFromOverride = false;  // flag: click happened during override
 
     // ---- Refs ----
     this.gen = 0;
@@ -335,8 +337,13 @@
         self.facing = nextF;
         self.facingRef = nextF;
       }
-      // Drag/click anims → return to idle
+      // Drag/click anims → return to idle (or re-enter override if click was during override)
       if (anims.drag.indexOf(self.anim) >= 0 || anims.clicks.indexOf(self.anim) >= 0) {
+        if (self.clickFromOverride && self.currentOverrideAnim) {
+          self.clickFromOverride = false;
+          self.playOverride(self.currentOverrideAnim, OVERRIDE_DURATION_MS);
+          return;
+        }
         if (anims.idle.length) self.anim = pick(anims.idle, self.anim);
         self.once = true;
         self.seq++;
@@ -499,6 +506,20 @@
       if (dragState.active || dragState.dragging || self.justDragged) return;
       if (self.once && config.animations.idle.indexOf(self.anim) < 0) return;
       self.stopMove();
+
+      // Click during WS override (thinking/coding): cancel timer,
+      // play 傲娇生气, then re-enter override on end
+      if (self.currentOverrideAnim) {
+        if (self.overrideTimer) clearTimeout(self.overrideTimer);
+        self.overrideTimer = null;
+        self.clickFromOverride = true;
+        self.anim = "点击回应-傲娇生气";
+        self.once = true;
+        self.seq++;
+        self.switchTo(self.anim, true);
+        return;
+      }
+
       self.once = true;
       if (config.animations.clicks.length) {
         self.anim = pick(config.animations.clicks);
@@ -517,6 +538,9 @@
     this.playOverride = function (animName, durationMs) {
       self.stopMove();
       if (self.overrideTimer) clearTimeout(self.overrideTimer);
+      self.currentOverrideAnim = animName; // always update so re-entry picks latest state
+      // Don't interrupt a click-response that's playing during override
+      if (self.clickFromOverride) return;
       self.anim = animName;
       self.once = false; // loop while override active
       self.seq++;
@@ -531,6 +555,8 @@
     function resetToChain() {
       if (self.overrideTimer) clearTimeout(self.overrideTimer);
       self.overrideTimer = null;
+      self.currentOverrideAnim = null;
+      self.clickFromOverride = false;
       self.stopMove();
       // Return to idle, then pickNext will fire on ended
       if (config.animations.idle.length) {

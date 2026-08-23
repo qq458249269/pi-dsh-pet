@@ -42,6 +42,8 @@ The pet reacts to pi's agent state:
 | Tool calls (bash/edit/write) | Writing code |
 | Idle | Random animation chain |
 
+> 💡 During thinking/coding state, clicking the pet → plays the full "Angry Pout" response → returns to the current state animation when finished.
+
 ---
 
 ## Project Structure
