@@ -223,12 +223,20 @@ pi-pet config           # 看/改 config.json
     → 整个发布红、release 里什么都没有。跨 job 传 commit SHA，tag 只在最后当结果用。
 14. **打包后不能再查 npm 依赖。** `doctor` 曾经在成品里查 `ws`，而 exe 目录根本没有
     `node_modules`，于是永远报「✗ 依赖不可解析」。自检项必须对着「打进包里的东西」写。
+15. **`gh` 在非仓库目录里会先去问 git。** `gh release create` 不给 `--repo` 时，
+    它先跑 `git` 解析「当前是哪个仓库」，不在仓库里就报
+    `failed to run git: fatal: not a git repository` —— 看着像 git 坏了，其实是 gh 缺参数。
+    发布 job 故意不 checkout（只要 `download-artifact` 拉下来的文件），所以**每条
+    `gh release` 都必须显式 `--repo "$GITHUB_REPOSITORY"`**。
+16. **CI 断言不能拿别人规范化过的字符串当契约。** 断言过「产物名里必须有版本号」，
+    结果挂在 electron-builder 把 `2026.09.30.0002` 规范化成 `2026.9.3-0.2` 上。
+    断言只能钉在**我们自己定的契约**上（固定文件名、asar 存在且够大）。
 
 ## 10. 版本号与发布
 
 规则 `YYYY.MM.DD.NNNN`（UTC 日期 + 当天第几个流水号），例：`2026.09.30.0001`。三个 job：`version`（算号 + 跑测试 + source zip + 建 tag）→ `exe`（Windows 打 portable + nsis）→ `release`（挂资产、发说明）。
 
-### 10.1 打包链上的三个硬约束
+### 10.1 打包链上的硬约束
 
 1. **`permissions: contents: write` 不能省。** 缺了它，`GITHUB_TOKEN` 会被削成一个只读的
    token，发布那一步报出来的却是

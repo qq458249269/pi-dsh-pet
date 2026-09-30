@@ -334,6 +334,8 @@ jobs:
           path: artifacts
           merge-multiple: true
 
+      # 这个 job 故意不 checkout（只要 download-artifact 拉下来的文件），
+      # 代价是工作区不是 git 仓库 → gh 命令必须自己说清是哪个仓库（见下面那步）
       - name: 校验 token（别让「token 是空的」再伪装成别的错）
         run: |
           set -euo pipefail
@@ -363,9 +365,17 @@ jobs:
           cat notes.md
 
       # 用 gh CLI 而不是第三方 action：少一层「token 从哪来」的玄学，报错也更直白。
+      # ⚠️ 每条 gh release 都必须带 --repo：这个 job 故意不 checkout（只需要
+      # download-artifact 拉下来的文件），工作区是空的、不是 git 仓库。而 gh 在没给
+      # --repo 时会先跑 git 去问「当前是哪个仓库」，问不到就：
+      #   failed to run git: fatal: not a git repository (or any of the parent directories): .git
+      # 看着像 git 坏了，其实是 gh 缺参数。$GITHUB_REPOSITORY 是 runner 自带的
+      # owner/repo，不 checkout 也能用。
       - name: 发 Release
         run: |
           set -euo pipefail
+          REPO="${GITHUB_REPOSITORY}"
+          echo "发布到 ${REPO}"
           # exe job 挂了也发：只要有文件就传（fail_on_unmatched_files 那套）
           mapfile -d '' FILES < <(find artifacts -type f -print0 | sort -z)
           if [ "${#FILES[@]}" -eq 0 ]; then
@@ -375,13 +385,13 @@ jobs:
           echo "待发布 ${#FILES[@]} 个文件："
           printf '  %s\n' "${FILES[@]}"
 
-          if gh release view "$TAG" >/dev/null 2>&1; then
+          if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
             echo "release $TAG 已存在 → 覆盖同名资产"
-            gh release upload "$TAG" "${FILES[@]}" --clobber
-            gh release edit "$TAG" --title "pi-dsh-pet ${VERSION}" --notes-file notes.md
+            gh release upload "$TAG" "${FILES[@]}" --repo "$REPO" --clobber
+            gh release edit "$TAG" --repo "$REPO" --title "pi-dsh-pet ${VERSION}" --notes-file notes.md
           else
-            gh release create "$TAG" "${FILES[@]}" --verify-tag \
+            gh release create "$TAG" "${FILES[@]}" --repo "$REPO" --verify-tag \
               --title "pi-dsh-pet ${VERSION}" --notes-file notes.md
           fi
 
-          echo "发布完成：$(gh release view "$TAG" --json url -q .url)"
+          echo "发布完成：$(gh release view "$TAG" --repo "$REPO" --json url -q .url)"
