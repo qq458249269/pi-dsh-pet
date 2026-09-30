@@ -420,7 +420,7 @@ jobs:
           cat > notes.md <<EOF
           版本 \`${VERSION}\`（规则 \`YYYY.MM.DD.NNNN\`）
 
-| 文件 | 说明 |
+          | 文件 | 说明 |
           |------|------|
           | \`pi-dsh-pet.exe\` | 免安装单文件，**双击即用**（唯一产物，推荐） |
           | \`pi-dsh-pet-${VERSION}-source.zip\` | 源码 |
