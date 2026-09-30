@@ -167,6 +167,7 @@
     this.overrideAnim = null;  // WS-driven temporary override
     this.overrideTimer = null;
     this.currentOverrideAnim = null; // Name of active WS override (for click-during-override)
+    this.overrideActive = null;     // Name currently looping as override (anti-replay)
     this.clickFromOverride = false;  // flag: click happened during override
 
     // ---- Refs ----
@@ -263,6 +264,103 @@
     }
     hit.addEventListener("mouseenter", function () { setPassthrough(false); });
     hit.addEventListener("mouseleave", function () { setPassthrough(true); });
+
+    // ---- Right-click → menu ----
+    // The menu itself is native (built in the main process) because the window is a
+    // transparent click-through overlay — an in-page menu would fight the passthrough.
+    // It only needs to say "what state am I in"; every action goes through the host's
+    // control API, so the menu and pi/dsh/curl all drive the same state owner.
+    hit.addEventListener("contextmenu", function (e) {
+      e.preventDefault();
+      if (!window.__petElectron__ || !window.__petElectron__.openMenu) return;
+      bubbleTarget = self;
+      window.__petElectron__.openMenu({
+        state: describeState(self),
+        size: self.size,
+        facing: self.facing,
+        pets: pets.length,
+      });
+    });
+
+    // ---- Speech bubble + manual input ----
+    // The bubble hangs above the pet and is reused for every message (state text and
+    // anything a human types). It is NOT part of the v1 wire format: the host sends
+    // {"type":"bubble",...} and we only render it, so an old window ignores the frame.
+    var bubble = document.createElement("div");
+    bubble.className = "pet-bubble";
+    bubble.style.display = "none";
+    container.appendChild(bubble);
+
+    var bubbleTimer = null;
+    self.showBubble = function (text, opts) {
+      opts = opts || {};
+      var t = String(text == null ? "" : text);
+      if (!t) return;
+      if (bubble.textContent !== t) bubble.textContent = t;
+      bubble.classList.add("show");
+      bubble.classList.toggle("sticky", opts.sticky === true);
+      bubble.style.display = "";
+      if (bubbleTimer) clearTimeout(bubbleTimer);
+      var ms = Number(opts.ms) || 0;
+      // sticky = 状态还在：不清计时器，靠宿主每 10s 的续期帧接着
+      if (!opts.sticky && ms > 0) {
+        bubbleTimer = setTimeout(function () {
+          bubble.classList.remove("show");
+          bubbleTimer = null;
+        }, ms);
+      }
+    };
+    self.hideBubble = function () {
+      if (bubbleTimer) clearTimeout(bubbleTimer);
+      bubbleTimer = null;
+      bubble.classList.remove("show");
+    };
+
+    // 「说点什么…」：输入框就长在气泡里。Enter 提交，Esc 取消。
+    // 提交走主进程 → 宿主 /control（只有主进程手里有 token）。
+    var input = document.createElement("input");
+    input.className = "pet-bubble-input";
+    input.type = "text";
+    input.maxLength = 80;
+    input.placeholder = "说点什么…（Enter 发送）";
+    input.style.display = "none";
+    bubble.appendChild(input);
+    bubble.classList.add("has-input");
+
+    function submitInput() {
+      var v = input.value.trim();
+      input.value = "";
+      input.style.display = "none";
+      self.hideBubble();
+      if (!v) return;
+      if (window.__petElectron__ && window.__petElectron__.say) window.__petElectron__.say(v);
+      else self.showBubble(v, { ms: 5000 });
+    }
+
+    self.askSay = function () {
+      bubble.classList.add("show");
+      bubble.style.display = "";
+      input.style.display = "";
+      input.focus();
+      input.select();
+    };
+    input.addEventListener("keydown", function (e) {
+      e.stopPropagation();
+      if (e.key === "Enter") submitInput();
+      else if (e.key === "Escape") {
+        input.value = "";
+        input.style.display = "none";
+        self.hideBubble();
+      }
+    });
+    // 点输入框时别触发宠物的点击/拖拽逻辑
+    input.addEventListener("mousedown", function (e) { e.stopPropagation(); });
+    input.addEventListener("click", function (e) { e.stopPropagation(); });
+
+    // 右键菜单里的「说点什么…」→ 主进程叫这一声
+    if (window.__petElectron__ && window.__petElectron__.onAskSay) {
+      window.__petElectron__.onAskSay(function () { self.askSay(); });
+    }
 
     // ---- Switch to animation (dual buffer crossfade) ----
     this.switchTo = function (next, nextOnce) {
@@ -541,6 +639,16 @@
       self.currentOverrideAnim = animName; // always update so re-entry picks latest state
       // Don't interrupt a click-response that's playing during override
       if (self.clickFromOverride) return;
+      // Same animation already looping → **don't replay it**. Producers keep saying
+      // "still thinking" (every 2s); restarting the video each time looks like a stutter.
+      // The override animation loops by itself, so all we do here is extend the timer.
+      if (self.overrideActive === animName) {
+        if (durationMs && durationMs > 0 && isFinite(durationMs)) {
+          self.overrideTimer = setTimeout(function () { resetToChain(); }, durationMs);
+        }
+        return;
+      }
+      self.overrideActive = animName;
       self.anim = animName;
       self.once = false; // loop while override active
       self.seq++;
@@ -556,6 +664,7 @@
       if (self.overrideTimer) clearTimeout(self.overrideTimer);
       self.overrideTimer = null;
       self.currentOverrideAnim = null;
+      self.overrideActive = null;
       self.clickFromOverride = false;
       self.stopMove();
       // Return to idle, then pickNext will fire on ended
@@ -608,8 +717,23 @@
   /** How long overrides stay before returning to normal chain */
   var OVERRIDE_DURATION_MS = 5000;
 
+  /** Menu labels: animation name → what the user sees in the right-click menu */
+  var STATE_LABEL = {
+    "深度思考碎碎念": "思考中",
+    "写代码": "写代码中",
+    "搜寻中": "搜索中",
+  };
+
+  /** Human-readable current state (for the right-click menu) */
+  function describeState(pet) {
+    var anim = pet && pet.currentOverrideAnim;
+    if (!anim) return "待机（随机动画）";
+    return STATE_LABEL[anim] || anim;
+  }
+
   var pets = []; // PetCard instances
   var addPetSeq = 0; // counter for auto-generated pet ids
+  var bubbleTarget = null; // 最近一次被右键的宠物：手动输入与气泡优先出现在它头上
 
   /** Maps size arg to px width */
   var SIZE_MAP = { small: 260, normal: 400, large: 540 };
@@ -638,6 +762,14 @@
     pets.forEach(function (pet) {
       pet.playOverride(anim, OVERRIDE_DURATION_MS);
     });
+  }
+
+  /** Show a bubble (state text or a typed message) on the pet the user is talking to. */
+  function applyBubble(obj) {
+    if (!pets.length) return;
+    var target = bubbleTarget && bubbleTarget.showBubble ? bubbleTarget : pets[0];
+    if (obj.sticky !== true && !(Number(obj.ms) > 0)) obj.ms = 5000;
+    target.showBubble(obj.text, { ms: obj.ms, sticky: obj.sticky === true });
   }
 
   /** Apply a tool override */
@@ -687,6 +819,11 @@
         var obj = JSON.parse(msg);
         if (obj.type === "tool_call") {
           applyToolOverride(obj.tool);
+          return;
+        }
+        if (obj.type === "bubble") {
+          // v1.1: state text and anything a human typed. Old windows ignore this frame.
+          applyBubble(obj);
           return;
         }
       } catch (_) { /* plain string */ }

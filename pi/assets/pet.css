@@ -49,6 +49,69 @@
 }
 
 
+/* Speech bubble — floats above the pet, shows the current state text or something
+   a human typed. Lives inside .pet-container, so it follows drag/position for free. */
+.pet-bubble {
+  position: absolute;
+  bottom: 100%;
+  left: 50%;
+  transform: translate(-50%, 6px);
+  margin-bottom: 10px;
+  max-width: 320px;
+  padding: 7px 12px;
+  border-radius: 12px;
+  background: rgba(28, 30, 38, 0.92);
+  color: #f2f4f8;
+  font: 13px/1.45 system-ui, "Microsoft YaHei", sans-serif;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  opacity: 0;
+  pointer-events: none;
+  z-index: 2;
+  transition: opacity 0.18s ease, transform 0.18s ease;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35);
+}
+.pet-bubble.show {
+  opacity: 1;
+  transform: translate(-50%, 0);
+}
+/* Little tail pointing down at the pet */
+.pet-bubble::after {
+  content: "";
+  position: absolute;
+  top: 100%;
+  left: 50%;
+  margin-left: -6px;
+  border: 6px solid transparent;
+  border-top-color: rgba(28, 30, 38, 0.92);
+}
+/* State is still live (the host re-sends it every 10s): keep it fully lit */
+.pet-bubble.sticky {
+  border: 1px solid rgba(120, 190, 255, 0.55);
+}
+.pet-bubble.has-input {
+  pointer-events: auto;
+}
+.pet-bubble-input {
+  display: none;
+  margin: 0 0 6px;
+  width: 240px;
+  padding: 4px 8px;
+  border: 1px solid rgba(255, 255, 255, 0.25);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.1);
+  color: #fff;
+  font: 13px system-ui, "Microsoft YaHei", sans-serif;
+  outline: none;
+}
+.pet-bubble-input:focus {
+  border-color: rgba(120, 190, 255, 0.8);
+}
+.pet-bubble-input::placeholder {
+  color: rgba(255, 255, 255, 0.45);
+}
+
 /* Disconnected banner */
 .pet-disconnected {
   position: fixed;
@@ -65,7 +128,8 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .pet-video {
+  .pet-video,
+  .pet-bubble {
     transition: none;
   }
 }

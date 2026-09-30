@@ -1,376 +1,339 @@
 /**
- * pi-dsh-pet — Pi extension entry point
+ * pi-dsh-pet — pi extension (thin client)
  *
- * Starts an HTTP+WebSocket server on a random localhost port at session start.
- * Serves the pet page, WebM assets, and relays pi agent events to the browser
- * so the pet reacts in real time (thinking → 深度思考碎碎念, bash → 写代码, etc.).
+ * This file is intentionally **self-contained** (no relative imports): pi may load
+ * extensions from the package dir or copy a single .ts file into
+ * ~/.pi/agent/extensions/. A relative `../../app/x.cjs` import would break in the
+ * second case, so the few lines of client code we need are inlined here.
+ *
+ * The pet itself is a **standalone app** (`pi-pet start`, also shipped as a
+ * single .exe). This extension is only a producer:
+ *
+ *   pi events  ──▶  ws://127.0.0.1:<port>/feed?source=pi   (up: state frames)
+ *   commands    ──▶  POST /control                         (down: control plane)
+ *
+ * If no host is running, the extension starts one (detached, so the pet outlives
+ * this pi session). The host is never killed by the extension — that is the
+ * whole point of moving it out of the extension: pi restarts no longer make the
+ * pet flicker, and dsh can drive the very same pet at the same time.
  *
  * Commands:
- *   /pet       — launch pet in transparent Electron window
- *   /pet-stop  — close Electron window + stop server
+ *   /pet [small|normal|large]  — show the window / resize / add a pet
+ *   /pet-stop                  — hide the window (service keeps running)
+ *   /pet-say <text>            — make the pet say something
+ *   /pet-status                — where is the host, is it reachable
  */
 
 import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
-import type { Server as WsServer } from 'ws';
-import type { Server as HttpServer, IncomingMessage, ServerResponse } from 'node:http';
-import { createServer } from 'node:http';
-import { createReadStream } from 'node:fs';
-import { readFile, stat } from 'node:fs/promises';
-import { join, extname, normalize, dirname } from 'node:path';
+import { spawn, execFile } from 'node:child_process';
+import { existsSync } from 'node:fs';
+import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { spawn, execSync, type ChildProcess } from 'node:child_process';
-import { randomInt } from 'node:crypto';
 
-// ---- Paths (fileURLToPath needed on Windows; new URL(...).pathname adds leading /) ----
+// ---- Where the CLI is ----
 const __filename = fileURLToPath(import.meta.url);
-const PI_DIR = dirname(dirname(__filename)); // pi/
-const PACKAGE_ROOT = dirname(PI_DIR); // repo root
-const ASSETS_DIR = join(PI_DIR, 'assets');
-const PET_THUMB = join(PACKAGE_ROOT, 'assets', 'thumb');
-const PET_CONFIG = join(PACKAGE_ROOT, 'assets', 'config.jsonc');
+const PACKAGE_ROOT = dirname(dirname(dirname(__filename))); // repo root (…/pi/extensions/index.ts)
+const LOCAL_CLI = join(PACKAGE_ROOT, 'bin', 'pi-pet.cjs');
 
-// ---- MIME ----
-const MIME: Record<string, string> = {
-  '.html': 'text/html; charset=utf-8',
-  '.js': 'application/javascript; charset=utf-8',
-  '.css': 'text/css; charset=utf-8',
-  '.webm': 'video/webm',
-  '.json': 'application/json; charset=utf-8',
-  '.jsonc': 'application/json; charset=utf-8',
-};
-
-// ---- Global state (one server per session) ----
-let port = 0;
-let serverActive = false;
-let httpSvr: HttpServer | null = null;
-let wss: WsServer | null = null;
-let broadcast: ((msg: string) => void) | null = null;
-
-// ---- Size map (shared with Electron pet for /pet args) ----
 const SIZE_MAP: Record<string, number> = { small: 260, normal: 400, large: 540 };
+const SOURCE = 'pi';
 
-// ---- Helpers ----
+/* ============================== CLI plumbing ============================== */
 
-/** Encode an asset path to prevent path traversal */
-function safeAsset(root: string, rel: string): string | undefined {
-  if (!rel || rel.includes('..')) return undefined;
-  const candidate = normalize(join(root, rel));
-  if (!candidate.startsWith(root)) return undefined;
-  return candidate;
+/** [cmd, args] to run the CLI: the in-repo one if present, otherwise the PATH shim. */
+function cliSpec(args: string[]): { cmd: string; argv: string[]; shell: boolean } {
+  if (existsSync(LOCAL_CLI)) return { cmd: process.execPath, argv: [LOCAL_CLI, ...args], shell: false };
+  // npm -g / exe install: on Windows this is a .cmd shim, which needs shell:true
+  return { cmd: 'pi-pet', argv: args, shell: process.platform === 'win32' };
 }
 
-/** Stream a file as HTTP response */
-async function sendFile(res: ServerResponse, filePath: string): Promise<void> {
-  try {
-    const st = await stat(filePath);
-    const ext = extname(filePath).toLowerCase();
-    const mime = MIME[ext] ?? 'application/octet-stream';
-    res.writeHead(200, {
-      'content-type': mime,
-      'content-length': st.size,
-      'cache-control': 'public, max-age=3600',
-      'access-control-allow-origin': '*',
-    });
-    createReadStream(filePath).pipe(res);
-  } catch {
-    res.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' });
-    res.end('Not found');
-  }
-}
-
-// ---- Electron launcher (single window, all pets render inside) ----
-
-let electronProc: ChildProcess | null = null;
-const ELECTRON_SCRIPT = join(ASSETS_DIR, 'pet-electron.cjs');
-
-function launchElectron(port: number): void {
-  // Only one window — all pets share it. If already running, skip.
-  if (electronProc && electronProc.exitCode === null) {
-    console.log('[pi-dsh-pet] Pet window already running — skipped.');
-    return;
-  }
-
-  const isWin = process.platform === 'win32';
-  const cmd = isWin ? 'npx.cmd' : 'npx';
-  const env = { ...process.env };
-
-  // Use npmmirror for users in mainland China (GitHub + S3 are inaccessible)
-  if (isWin && !env.ELECTRON_MIRROR) {
-    env.ELECTRON_MIRROR = 'https://npmmirror.com/mirrors/electron/';
-    env.NPM_CONFIG_REGISTRY = 'https://registry.npmmirror.com';
-  }
-
-  console.log(`[pi-dsh-pet] Launching Electron (port ${port})…`);
-  const npxArgs = ['--yes', 'electron', ELECTRON_SCRIPT, String(port)];
-  electronProc = spawn(cmd, npxArgs, {
-    cwd: PACKAGE_ROOT,
-    stdio: 'ignore',
-    detached: false,
-    windowsHide: true,
-    shell: isWin,
-    env,
-  });
-  electronProc.unref();
-
-  electronProc.on('error', (err) => {
-    console.error('[pi-dsh-pet] Electron failed:', err.message);
-    electronProc = null;
-  });
-
-  electronProc.on('exit', (code) => {
-    if (code !== 0) console.error('[pi-dsh-pet] Electron exited with code', code);
-    electronProc = null;
-  });
-}
-
-function killElectron(): void {
-  if (!electronProc || electronProc.exitCode !== null) return;
-  console.log('[pi-dsh-pet] Closing pet window…');
-  if (process.platform === 'win32') {
+/** Run the CLI and resolve its stdout (empty string on failure — never throw). */
+function runCli(args: string[], timeoutMs = 8000): Promise<string> {
+  const { cmd, argv, shell } = cliSpec(args);
+  return new Promise((resolve) => {
     try {
-      execSync(`taskkill /pid ${electronProc.pid} /f /t`, { stdio: 'ignore' });
-    } catch {
-      /* ignore */
-    }
-  } else {
-    electronProc.kill();
-  }
-  electronProc = null;
-  console.log('[pi-dsh-pet] Pet window closed.');
-}
-
-// ---- Port finder ----
-
-/** Find a random free port between 10240 and 49151 */
-function findFreePort(): number {
-  return randomInt(10240, 49152);
-}
-
-// ---- HTTP request handler ----
-async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {
-  const url = new URL(req.url ?? '/', 'http://127.0.0.1');
-  const pathname = decodeURIComponent(url.pathname);
-
-  // WebSocket upgrade — handled by ws library, ignore here
-  if (pathname === '/ws' && req.headers.upgrade?.toLowerCase() === 'websocket') {
-    req.destroy();
-    return;
-  }
-
-  // Health check
-  if (pathname === '/health') {
-    res.writeHead(200, { 'content-type': 'application/json' });
-    res.end(JSON.stringify({ ok: true, port }));
-    return;
-  }
-
-  // Config
-  if (pathname === '/config.jsonc' || pathname === '/config') {
-    await sendFile(res, PET_CONFIG);
-    return;
-  }
-
-  // Thumb assets (webm)
-  if (pathname.startsWith('/thumb/')) {
-    const rel = pathname.slice('/thumb/'.length);
-    const file = safeAsset(PET_THUMB, rel);
-    if (!file) {
-      res.writeHead(400, { 'content-type': 'text/plain; charset=utf-8' });
-      res.end('Bad path');
-      return;
-    }
-    await sendFile(res, file);
-    return;
-  }
-
-  // Pet page and static assets
-  if (pathname === '/' || pathname === '/index.html') {
-    const html = await readFile(join(ASSETS_DIR, 'pet.html'), 'utf8');
-    res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
-    res.end(html);
-    return;
-  }
-
-  if (pathname === '/pet.js') {
-    await sendFile(res, join(ASSETS_DIR, 'pet.js'));
-    return;
-  }
-
-  if (pathname === '/pet.css') {
-    await sendFile(res, join(ASSETS_DIR, 'pet.css'));
-    return;
-  }
-
-  // 404
-  res.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' });
-  res.end('pi-dsh-pet: not found');
-}
-
-// ---- Start HTTP+WS server ----
-async function startServer(): Promise<number> {
-  let p = 0;
-  const server = createServer(handleRequest);
-
-  // Find a free port
-  for (let i = 0; i < 20; i++) {
-    p = findFreePort();
-    await new Promise<void>((resolve, reject) => {
-      server.once('error', (err: NodeJS.ErrnoException) => {
-        if (err.code === 'EADDRINUSE') resolve();
-        else reject(err);
+      execFile(cmd, argv, { shell, timeout: timeoutMs, windowsHide: true, maxBuffer: 1 << 20 }, (err, stdout) => {
+        resolve(err ? '' : String(stdout));
       });
-      server.listen(p, '127.0.0.1', () => resolve());
-    });
-    if (server.listening) break;
-  }
-
-  if (!server.listening) {
-    throw new Error('pi-dsh-pet: could not find a free port');
-  }
-
-  httpSvr = server;
-
-  // Attach WebSocket server
-  const WebSocket = (await import('ws')).WebSocketServer;
-  wss = new WebSocket({ noServer: true });
-
-  const clients = new Set<import('ws').WebSocket>();
-
-  wss.on('connection', (ws) => {
-    clients.add(ws);
-    ws.on('close', () => clients.delete(ws));
-    ws.on('error', () => clients.delete(ws));
-  });
-
-  broadcast = (msg: string) => {
-    for (const ws of clients) {
-      if (ws.readyState === ws.OPEN) ws.send(msg);
+    } catch {
+      resolve('');
     }
+  });
+}
+
+/** Start the host detached: it must outlive this pi process. */
+function spawnCli(args: string[]): void {
+  const { cmd, argv, shell } = cliSpec(args);
+  try {
+    const child = spawn(cmd, argv, {
+      shell,
+      detached: true,
+      stdio: 'ignore',
+      windowsHide: true,
+    });
+    child.unref();
+  } catch {
+    /* /pet will report the failure; nothing else we can do here */
+  }
+}
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/* ============================== host discovery ============================== */
+
+type HostInfo = { port: number; token: string; pid?: number };
+
+/** Ask the CLI where the host is. Returns null when it is not running. */
+async function findHost(): Promise<HostInfo | null> {
+  const raw = await runCli(['status', '--json']);
+  if (!raw) return null;
+  try {
+    const data = JSON.parse(raw);
+    if (!data?.running) return null;
+    const port = Number(data.state?.port);
+    const token = String(data.state?.token ?? '');
+    if (!port || !token) return null;
+    return { port, token, pid: Number(data.state?.pid) || undefined };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Make sure a host exists and answers. This is the "宿主没跑就自动拉起" path —
+ * a fresh `pi` session must be enough to get a pet, no manual `pi-pet start`.
+ */
+async function ensureHost(startTimeoutMs = 12000): Promise<HostInfo | null> {
+  let host = await findHost();
+  if (host) return host;
+  spawnCli(['start']);
+  const deadline = Date.now() + startTimeoutMs;
+  while (Date.now() < deadline) {
+    await sleep(400);
+    host = await findHost();
+    if (host) return host;
+  }
+  return null;
+}
+
+/* ============================== producer feed ============================== */
+
+type Frame =
+  | { type: 'thinking'; task?: string }
+  | { type: 'tool_call'; tool: string; detail?: string; task?: string }
+  | { type: 'done'; summary?: string }
+  | { type: 'say'; text: string; ms?: number };
+
+let sock: WebSocket | null = null;
+let sockHost: HostInfo | null = null;
+let retry: ReturnType<typeof setTimeout> | null = null;
+let everConnected = false;
+
+/** Push one frame upstream. Silent no-op when we are not connected. */
+function send(frame: Frame): void {
+  if (sock && sock.readyState === 1) {
+    try {
+      sock.send(JSON.stringify(frame));
+    } catch {
+      /* socket died between the check and the send; the close handler reconnects */
+    }
+  }
+}
+
+/** (Re)connect the /feed socket. Keeps at most one live connection. */
+function connect(host: HostInfo, notify?: (msg: string) => void): void {
+  if (sock && (sock.readyState === 0 || sock.readyState === 1)) return;
+  sockHost = host;
+  const url = `ws://127.0.0.1:${host.port}/feed?source=${encodeURIComponent(SOURCE)}&token=${encodeURIComponent(host.token)}`;
+  let ws: WebSocket;
+  try {
+    ws = new WebSocket(url);
+  } catch {
+    scheduleReconnect(notify);
+    return;
+  }
+  sock = ws;
+  ws.addEventListener('open', () => {
+    everConnected = true;
+    if (retry) {
+      clearTimeout(retry);
+      retry = null;
+    }
+  });
+  ws.addEventListener('close', () => {
+    if (sock === ws) sock = null;
+    // A pet that silently stops reacting is worse than a noisy log line.
+    console.log('[pi-dsh-pet] /feed 连接断开，2s 后重连');
+    scheduleReconnect(notify);
+  });
+  ws.addEventListener('error', () => {
+    /* close follows error; reconnection is handled there */
+  });
+}
+
+/** Reconnect forever (2s), re-resolving the host each time — its port may change. */
+function scheduleReconnect(notify?: (msg: string) => void): void {
+  if (retry) return;
+  retry = setTimeout(async () => {
+    retry = null;
+    const host = await ensureHost();
+    if (host) connect(host, notify);
+    else scheduleReconnect(notify);
+  }, 2000);
+  if (typeof retry.unref === 'function') retry.unref();
+}
+
+/* ============================== control plane ============================== */
+
+async function control(host: HostInfo, action: string, extra: Record<string, unknown> = {}): Promise<boolean> {
+  try {
+    const res = await fetch(`http://127.0.0.1:${host.port}/control`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${host.token}` },
+      body: JSON.stringify({ action, ...extra }),
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+/* ============================== extension ============================== */
+
+export default function (pi: ExtensionAPI) {
+  const notify = (ctx: { ui?: { notify?: (m: string, l?: string) => void } } | undefined, msg: string, level = 'info') => {
+    try {
+      ctx?.ui?.notify?.(msg, level);
+    } catch {
+      /* ui shape may differ across pi versions; the console is the fallback */
+    }
+    console.log(`[pi-dsh-pet] ${msg}`);
   };
 
-  server.on('upgrade', (req, socket, head) => {
-    const url = new URL(req.url ?? '/', 'http://127.0.0.1');
-    if (url.pathname === '/ws') {
-      wss?.handleUpgrade(req, socket, head, (ws) => {
-        wss?.emit('connection', ws, req);
-      });
-    } else {
-      socket.destroy();
-    }
-  });
-
-  return p;
-}
-
-/** Stop the HTTP server + WebSocket server */
-function stopServer(): void {
-  if (httpSvr) {
-    httpSvr.close();
-    httpSvr = null;
-  }
-  wss?.close();
-  wss = null;
-  broadcast = null;
-  serverActive = false;
-  port = 0;
-}
-
-// ---- Pi extension ----
-export default function (pi: ExtensionAPI) {
-  // ---- Lifecycle ----
   pi.on('session_start', async (_event, ctx) => {
-    if (serverActive) return; // already running from a previous session
-    try {
-      port = await startServer();
-      serverActive = true;
-      ctx.ui.notify(`pet server on :${port}  — /pet to open`, 'info');
-    } catch (e) {
-      ctx.ui.notify(`pet server start failed: ${(e as Error).message}`, 'error');
+    const host = await ensureHost();
+    if (!host) {
+      notify(ctx, '没能拉起宠物宿主（pi-pet start 失败？）— /pet-status 看诊断', 'error');
+      return;
+    }
+    connect(host, (m) => notify(ctx, m));
+    // The window is intentionally NOT auto-opened here: the standalone app owns
+    // its own window lifetime, and opening it from every pi session used to be
+    // the source of "pet popped up again" complaints. Use /pet.
+  });
+
+  // pi 会话结束（退出/重载/换会话）时只关掉我们的 socket，
+  // **绝不关宿主** —— 桌宠要活得比 pi 会话长（dsh 也还在用它）。
+  pi.on('session_shutdown', async () => {
+    // Let the pet live: close only our feed socket, never the host.
+    if (sock) {
+      try {
+        sock.close();
+      } catch {
+        /* ignore */
+      }
+      sock = null;
     }
   });
 
-  // Pet survives session boundaries — only shut down when the pi process exits.
-  function shutdown() {
-    broadcast?.('shutdown');
-    setTimeout(function () { killElectron(); stopServer(); }, 200);
-  }
-  process.on('beforeExit', shutdown);
-  process.on('SIGINT', shutdown);
-  process.on('SIGTERM', shutdown);
-  process.on('exit', function () { killElectron(); stopServer(); });
-
-  // ---- Agent events → WebSocket ----
-  let thinkingThrottle: ReturnType<typeof setInterval> | null = null;
+  /* ---- pi events → frames (v1.1 shapes; the host dedupes repeats) ---- */
 
   pi.on('agent_start', () => {
-    broadcast?.('agent_start');
+    send({ type: 'thinking' });
+  });
+
+  // pi 的 turn_start 只有 turnIndex，没有任务文本；任务名交给宿主那侧猜（/pet-say 可手填）
+  pi.on('turn_start', () => {
+    send({ type: 'thinking' });
+  });
+
+  // tool_call 给的是 toolName + input（bash 是 {command}，read/edit/write 是 {path}…）
+  pi.on('tool_call', (event: any) => {
+    const tool = String(event?.toolName ?? event?.tool ?? 'other');
+    const input = event?.input;
+    const detail =
+      typeof input === 'string'
+        ? input
+        : (input?.command ?? input?.path ?? input?.filePath ?? input?.pattern ?? input?.description);
+    send({ type: 'tool_call', tool, detail: detail === undefined ? undefined : String(detail) });
   });
 
   pi.on('agent_settled', () => {
-    if (thinkingThrottle) {
-      clearInterval(thinkingThrottle);
-      thinkingThrottle = null;
-    }
-    broadcast?.('agent_idle');
+    send({ type: 'done' });
   });
 
-  pi.on('turn_start', () => {
-    // Send "thinking" at most once per 2s during active agent turns
-    if (!thinkingThrottle) {
-      broadcast?.('thinking');
-      thinkingThrottle = setInterval(() => {
-        broadcast?.('thinking');
-      }, 2000);
-    }
-  });
+  /* ---- commands ---- */
 
-  pi.on('turn_end', () => {
-    // Throttle keeps running during multi-turn tool-call sequences
-  });
-
-  pi.on('tool_call', (event) => {
-    broadcast?.(JSON.stringify({ type: 'tool_call', tool: event.toolName }));
-  });
-
-  // ---- Commands ----
   pi.registerCommand('pet', {
-    description: 'Open desktop pet in Electron',
+    description: 'Show the desktop pet (start the host if needed)',
     getArgumentCompletions: (prefix: string) => {
-      const sizes = ['normal', 'small', 'large'];
-      const items = sizes.filter(s => s.startsWith(prefix)).map(s => ({ value: s, label: `${s} (${SIZE_MAP[s]}px)` }));
+      const items = Object.keys(SIZE_MAP)
+        .filter((s) => s.startsWith(prefix))
+        .map((s) => ({ value: s, label: `${s} (${SIZE_MAP[s]}px)` }));
       return items.length > 0 ? items : null;
     },
     handler: async (args, ctx) => {
-      if (!serverActive || !port) {
-        try {
-          port = await startServer();
-          serverActive = true;
-        } catch (e) {
-          ctx.ui.notify(`pet server start failed: ${(e as Error).message}`, 'error');
-          return;
-        }
-      }
-
-      var sizeArg = (args || '').trim().toLowerCase();
-      if (!(sizeArg in SIZE_MAP)) sizeArg = 'normal'; // default if unknown
-
-      // If window is already running, add a pet via WebSocket
-      if (electronProc && electronProc.exitCode === null) {
-        broadcast?.('add_pet:' + sizeArg);
-        ctx.ui.notify('Pet added (' + sizeArg + ')!', 'info');
+      const host = await ensureHost();
+      if (!host) {
+        notify(ctx, '宠物宿主起不来，先跑 pi-pet doctor 看看', 'error');
         return;
       }
-
-      ctx.ui.notify('Launching pet (' + sizeArg + ')…  First run downloads Electron (~100MB), please wait', 'info');
-      launchElectron(port);
+      connect(host, (m) => notify(ctx, m));
+      const size = (args || '').trim().toLowerCase();
+      if (size && size in SIZE_MAP) await control(host, 'set-ctrl', { size });
+      const ok = await control(host, 'show-window');
+      notify(ctx, ok ? `桌宠已显示${size ? `（${size}）` : ''}` : '显示桌宠失败', ok ? 'info' : 'error');
     },
   });
 
   pi.registerCommand('pet-stop', {
-    description: 'Close pet window',
+    description: 'Hide the pet window (the service keeps running for dsh/other tools)',
     handler: async (_args, ctx) => {
-      killElectron();
-      ctx.ui.notify('Pet closed', 'info');
+      const host = await findHost();
+      if (!host) {
+        notify(ctx, '宠物宿主没在跑', 'error');
+        return;
+      }
+      const ok = await control(host, 'hide-window');
+      notify(ctx, ok ? '窗已隐藏（服务还在）' : '隐藏失败', ok ? 'info' : 'error');
+    },
+  });
+
+  pi.registerCommand('pet-say', {
+    description: 'Make the pet say something',
+    handler: async (args, ctx) => {
+      const text = (args || '').trim();
+      if (!text) {
+        notify(ctx, '用法：/pet-say 你今天摸鱼了吗', 'error');
+        return;
+      }
+      const host = await findHost();
+      if (!host) {
+        notify(ctx, '宠物宿主没在跑', 'error');
+        return;
+      }
+      const ok = await control(host, 'say', { text });
+      notify(ctx, ok ? `已说话：${text}` : '说话失败', ok ? 'info' : 'error');
+    },
+  });
+
+  pi.registerCommand('pet-status', {
+    description: 'Where is the pet host, and is it reachable',
+    handler: async (_args, ctx) => {
+      const host = await findHost();
+      if (!host) {
+        notify(ctx, '宠物宿主没在跑（pi-pet status 也可以）', 'error');
+        return;
+      }
+      let rtt = '?';
+      try {
+        const t0 = Date.now();
+        await fetch(`http://127.0.0.1:${host.port}/health`);
+        rtt = `${Date.now() - t0}ms`;
+      } catch {
+        rtt = '不通';
+      }
+      notify(ctx, `宠物宿主 pid ${host.pid ?? '?'} :${host.port}  探活 ${rtt}  ${everConnected ? '已接入' : '未接入'}`);
     },
   });
 }

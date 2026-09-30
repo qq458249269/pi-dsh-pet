@@ -13,6 +13,9 @@
 
 一只住在 **pi 终端编程助手**里的大肥鱼：待机呼吸、随机动作（含打瞌睡）、偶尔转向、屏幕漫游、点击反应、可拖拽。
 
+> 现在它是一个**独立应用**：自己带一个 127.0.0.1 的 HTTP/WS 端口，pi、dsh、curl 都能驱动同一只宠物。
+> 下行协议完全没变，老版本窗照旧能跑。
+
 > Fork 自 [dsh-pet](https://github.com/PC2005-cloud/dsh-pet)（[npm](https://www.npmjs.com/package/dsh-pet)），本项目专为 pi 平台适配 —— 响应 pi agent 工作状态（思考/写代码/空闲），通过 Electron 全屏透明浮窗渲染。原 dsh-pet 用户请使用 npm 原版。
 
 ---
@@ -21,28 +24,45 @@
 
 ```sh
 npm install -g pi-dsh-pet
+pi-pet start          # 起桌宠（自带服务 + 窗）
 ```
 
-在 pi 中运行：
+在 pi 中运行（扩展会**自动**把宿主拉起来，不用手动 start）：
 
 ```
-/pet             →  正常大小（400px）
+/pet             →  显示桌宠（正常大小 400px）
 /pet small       →  小号（260px）
 /pet large       →  大号（540px）
-/pet-stop        →  关闭所有宠物窗口
+/pet-stop        →  隐藏桌宠（服务留着，pi/dsh 还能用）
+/pet-say 摸鱼中  →  让它说句话
+/pet-status      →  宿主在哪、探活多少毫秒
 ```
 
-> 💡 首次运行时需下载 Electron ≈100MB，后续启动秒开。
+不想装 pi 扩展也行，纯当本地服务用：
+
+```sh
+pi-pet status                 # 端口 / token / 生产者一览
+pi-pet say 起来干活了          # 手动冒个泡
+curl -X POST 127.0.0.1:47653/event -H "authorization: Bearer $(pi-pet token)" \
+     -H 'content-type: application/json' -d '{"type":"thinking","task":"写代码"}'
+```
+
+也提供免安装单文件 exe（`pi-dsh-pet-<版本>-portable.exe`），双击即可，不用 Node。
+
+> 💡 首次运行需下载 Electron ≈100MB，后续启动秒开。
 
 宠物会出现在屏幕右下角，开始动画链。当你在 pi 里写代码或提问时，宠物会自动响应：
 
-| pi agent 状态 | 宠物动画 |
-|---------------|----------|
-| 开始思考 | 深度思考碎碎念 |
-| 调用工具（bash/edit/write） | 写代码 |
-| 空闲 | 恢复随机动画链 |
+| pi agent 状态 | 宠物动画 | 气泡 |
+|---------------|----------|------|
+| 开始思考 | 深度思考碎碎念 | 「任务」思考中… |
+| 调用工具（bash/edit/write） | 写代码 | 执行中：npm test |
+| 完成 | 回到随机动画链 | 完成：xxx ✓ |
+| 空闲 | 恢复随机动画链 | 待命中… |
 
 > 💡 思考/写代码状态中点击宠物 → 播放「点击回应-傲娇生气」→ 完整播完后自动回到当前状态动画。
+> 💡 **右键桌宠** = 原生菜单：当前状态、事件来源、暂停响应、说点什么、换一只、尺寸、
+> 添加一只、隐藏宠物、在浏览器打开、复制服务地址、打开数据文件夹、关于、退出。
 
 ---
 
@@ -50,14 +70,18 @@ npm install -g pi-dsh-pet
 
 ```
 pi-dsh-pet/
-├── pi/extensions/       # pi 扩展入口（HTTP + WebSocket + Electron 浮窗启动器）
-├── pi/assets/           # Electron 窗口 UI（pet.html + pet.js + pet.css + preload）
-├── assets/preview/      # 91 个预览 GIF
-├── assets/thumb/        # 91 个透明 WebM 动画
-├── assets/config.jsonc  # 动画到事件/标签的映射
-├── package.json         # npm 包清单
-├── DESIGN.md            # 设计与实现文档
-├── LICENSE              # MIT
+├── app/                # 宿主：协议 / 状态机 / HTTP+WS 服务 / 窗看护 / 单例锁 / CLI
+├── bin/pi-pet.cjs      # 命令行入口（pi-pet = dsh-pet）
+├── pi/extensions/      # pi 侧薄客户端（自动起宿主、事件 → 状态帧）
+├── dsh/pi-pet.mjs      # dsh 侧适配（cordis 风格）
+├── pi/assets/          # Electron 窗口 UI（pet.html + pet.js + pet.css + preload + 主进程）
+├── assets/preview/     # 91 个预览 GIF
+├── assets/thumb/       # 91 个透明 WebM 动画
+├── assets/config.jsonc # 动画到事件/标签的映射
+├── electron-builder.yml# 打单文件 exe 用（日常开发不需要）
+├── package.json        # npm 包清单
+├── DESIGN.md           # 架构、协议、状态机、互斥、已知坑
+├── LICENSE             # MIT
 └── README.md
 ```
 
@@ -199,20 +223,46 @@ pi-dsh-pet/
 
 ## 自定义大小
 
-大小映射定义在 `pi/assets/pet.js` 第 589 行：
+大小映射定义在 `pi/assets/pet.js`（`SIZE_MAP`）与 `app/protocol.cjs`（`SIZES`）里，**两边必须一致**：
 
 ```js
 var SIZE_MAP = { small: 260, normal: 400, large: 540 };
 ```
 
 - **改数字** — 修改小/中/大的 px 宽度（高度自动 = 宽 × 9/16）
-- **加档位** — 添加 `tiny`、`xlarge` 等新条目，例如 `{ tiny: 180, ..., xlarge: 720 }`
+- **加档位** — 添加 `tiny`、`xlarge` 等新条目，例如 `{ tiny: 180, ..., xlarge: 720 }`（记得两处都改）
 
-修改后重新 `/pet` 生效，新增命令（如 `/pet tiny`、`/pet xlarge`）自动可用。
+修改后 `/pet` 生效，新增命令（如 `/pet tiny`、`/pet xlarge`）自动可用。已开着的窗需要
+`/pet` 或右键菜单换尺寸（换窗生效）。
+
+## 接自己的程序
+
+宿主只听 127.0.0.1，token 在 `%APPDATA%/pi-dsh-pet/token`（`pi-pet token` 打印）。
+上行只有两种方式，语义完全一样：
+
+```js
+// 1) WS（推荐，能一直连着，每个来源独立一份会话状态）
+const ws = new WebSocket(`ws://127.0.0.1:47653/feed?source=my-tool&token=${token}`);
+ws.onopen = () => {
+  ws.send(JSON.stringify({ type: "thinking", task: "拉取数据" }));
+  ws.send(JSON.stringify({ type: "tool_call", tool: "bash", detail: "npm run build" }));
+  ws.send(JSON.stringify({ type: "done", summary: "构建完成" }));
+};
+
+// 2) REST（一次性）
+await fetch("http://127.0.0.1:47653/event", {
+  method: "POST",
+  headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
+  body: JSON.stringify({ type: "thinking", task: "拉取数据" }),
+});
+```
+
+`dsh/pi-pet.mjs` 就是这么接的（直接 `import` 丢进 dsh 插件目录即可）。协议细节（下行 v1/v1.1
+帧格式、状态机、多会话语义）见 [DESIGN.md](./DESIGN.md)。
 
 ## 文档
 
-- [设计与实现](DESIGN.md) —— 架构、pi 事件映射、素材链
+- [设计与实现](DESIGN.md) —— 架构、协议 v1/v1.1、状态机与气泡、互斥四层、运维命令、已知坑
 
 ## 许可
 

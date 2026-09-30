@@ -1,0 +1,169 @@
+name: release
+
+# 什么时候跑：
+#   - 手动触发（workflow_dispatch）
+#   - 打 tag（tag 本身就是版本号时）
+#   - 推 main（自动算一个当天版本号）
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "只算版本号、跑测试、传源码，不打 exe、不建 tag"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # ---------------------------------------------------------------- 1. 版本号 + 源码包
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      tag: ${{ steps.v.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # 要数 tag，浅克隆不够
+
+      - id: v
+        name: 算版本号 YYYY.MM.DD.NNNN
+        run: |
+          set -euo pipefail
+          TODAY="$(date -u +%Y.%m.%d)"
+          # 推 tag 时就用 tag 上的版本；推 main / 手动时按当天序号往后排
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            VER="${GITHUB_REF_NAME#v}"
+          else
+            N=$(git tag --list "v${TODAY}.*" | wc -l | tr -d ' ')
+            VER="$(printf '%s.%04d' "$TODAY" $((N + 1)))"
+          fi
+          echo "version=${VER}" >> "$GITHUB_OUTPUT"
+          echo "tag=v${VER}" >> "$GITHUB_OUTPUT"
+          {
+            echo "## 版本号 $VER"
+            echo ""
+            echo "- 规则：\`YYYY.MM.DD.NNNN\`（UTC 日期 + 当天第几个）"
+            echo "- tag：\`v${VER}\`"
+            echo "- 当天已有 tag 数：$(git tag --list "v${TODAY}.*" | tr '\n' ' ')"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: 装依赖（宿主零依赖，这一步基本是空跑）
+        run: npm install --no-audit --no-fund
+
+      - name: 跑测试
+        run: npm test
+
+      - name: 把 package.json 的 version 写成算出来的版本号
+        run: |
+          node -e "
+            const fs=require('fs');
+            const p=JSON.parse(fs.readFileSync('package.json','utf8'));
+            p.version=process.env.VERSION;
+            fs.writeFileSync('package.json', JSON.stringify(p,null,2)+'\n');
+          "
+        env:
+          VERSION: ${{ steps.v.outputs.version }}
+
+      - name: 打包 source code
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          git add -A
+          git diff --cached --quiet || git commit -m "chore: release ${VERSION}" || true
+          git archive --format=zip --prefix="pi-dsh-pet-${VERSION}/" -o "dist/pi-dsh-pet-${VERSION}-source.zip" HEAD
+          ls -l dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pi-dsh-pet-${{ steps.v.outputs.version }}-source
+          path: dist/pi-dsh-pet-*-source.zip
+
+      - name: 建 tag 并推
+        if: ${{ github.ref_type != 'tag' }}
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "${{ steps.v.outputs.tag }}" -m "release ${{ steps.v.outputs.version }}"
+          git push origin "${{ steps.v.outputs.tag }}"
+
+  # ---------------------------------------------------------------- 2. 打 Windows exe
+  exe:
+    needs: version
+    if: ${{ inputs.dry_run != true }}
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.version.outputs.tag }}
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: 同步版本号
+        run: |
+          node -e "
+            const fs=require('fs');
+            const p=JSON.parse(fs.readFileSync('package.json','utf8'));
+            p.version='${{ needs.version.outputs.version }}';
+            fs.writeFileSync('package.json', JSON.stringify(p,null,2)+'\n');
+          "
+
+      # electron / electron-builder 只在这一步装，仓库本身保持零依赖
+      - name: 装打包工具
+        run: |
+          npm install --no-audit --no-fund --no-save electron@33 electron-builder@25
+
+      - name: 打 exe
+        run: npx electron-builder --win --config electron-builder.yml
+
+      - name: 传产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: pi-dsh-pet-${{ needs.version.outputs.version }}-win-x64
+          path: |
+            dist/*.exe
+            dist/*.blockmap
+            dist/latest*.yml
+
+  # ---------------------------------------------------------------- 3. 发 Release
+  release:
+    needs: [version, exe]
+    if: ${{ always() && needs.version.result == 'success' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: 组装 release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.version.outputs.tag }}
+          name: pi-dsh-pet ${{ needs.version.outputs.version }}
+          body: |
+            版本 `${{ needs.version.outputs.version }}`（规则 `YYYY.MM.DD.NNNN`）
+
+            - 📦 源码：`*source.zip`
+            - 🖥 独立 exe（Windows x64，免安装）：`*portable.exe`
+            - 💾 安装包（带快捷方式）：`*x64.exe`
+
+            用法：`pi-dsh-pet.exe` 双击即可（自带服务+窗）；pi/dsh 侧用 `pi-pet start` 或
+            让 pi 扩展自动拉起，端口/token 见 `pi-pet status`。
+          files: |
+            artifacts/**/*
+          fail_on_unmatched_files: false

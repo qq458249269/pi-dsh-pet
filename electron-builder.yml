@@ -1,0 +1,43 @@
+# electron-builder 配置（只在打 exe 时用；日常开发/测试完全不需要它）
+#
+# 装 electron 不会写进 package.json 的 dependencies：宿主是零依赖的，
+# electron 只在「打包这一步」由 CI 临时安装（见 .github/workflows/release.yml）。
+appId: com.somwhy.pidshpet
+productName: pi-dsh-pet
+copyright: MIT
+
+directories:
+  output: dist
+  buildResources: build
+
+asar: true
+# 只带运行时要的东西：宿主代码 + 窗代码 + 91 个 webm 素材
+files:
+  - app/**/*.cjs
+  - bin/**/*.cjs
+  - pi/assets/**
+  - assets/thumb/**
+  - assets/config.jsonc
+  - package.json
+
+win:
+  # portable = 单文件 exe（双击即用，免安装）；nsis = 带快捷方式的安装包
+  target:
+    - target: portable
+      arch: [x64]
+    - target: nsis
+      arch: [x64]
+  artifactName: pi-dsh-pet-${version}-${arch}.${ext}
+  # 素材是 webm，asar 里读没问题；但 webm 有 91 个，别让压缩把 CI 拖死
+  compression: normal
+
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: pi-dsh-pet
+
+portable:
+  artifactName: pi-dsh-pet-${version}-portable.${ext}

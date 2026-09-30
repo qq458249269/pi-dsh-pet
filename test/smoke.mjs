@@ -1,0 +1,274 @@
+/**
+ * test/smoke.mjs — 无头端到端自测
+ *
+ * 起一个真宿主（临时 PI_PET_HOME、serve 模式、不起窗），用 WebSocket 冒充那扇窗，
+ * 逐条验证：握手、状态机去重、状态文案、气泡、暂停、单只闸门、token 鉴权、锁心跳、
+ * 以及「第二个宿主起不来」这条互斥红线。
+ *
+ * 跑：npm test
+ */
+
+import { spawn } from "node:child_process";
+import { mkdtempSync, rmSync, readFileSync, existsSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, dirname } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
+const WebSocket = globalThis.WebSocket;
+
+const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
+const HOME = mkdtempSync(join(tmpdir(), "pi-pet-smoke-"));
+const PORT = 47699;
+
+let pass = 0;
+let fail = 0;
+const failures = [];
+
+function check(name, cond, extra = "") {
+	if (cond) {
+		pass++;
+		console.log(`  ✓ ${name}`);
+	} else {
+		fail++;
+		failures.push(name);
+		console.log(`  ✗ ${name}${extra ? ` — ${extra}` : ""}`);
+	}
+}
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/** 收集下行帧（用 Node 内置的 WebSocket 客户端，零依赖） */
+function fakeWindow(port) {
+	const ws = new WebSocket(`ws://127.0.0.1:${port}/ws`);
+	const frames = [];
+	ws.addEventListener("message", (e) => frames.push(typeof e.data === "string" ? e.data : String(e.data)));
+	const ready = new Promise((res, rej) => {
+		ws.addEventListener("open", res);
+		ws.addEventListener("error", rej);
+	});
+	return { ws, frames, ready, close: () => ws.close() };
+}
+
+async function post(port, path, body, token) {
+	const res = await fetch(`http://127.0.0.1:${port}${path}`, {
+		method: "POST",
+		headers: { "content-type": "application/json", ...(token ? { authorization: `Bearer ${token}` } : {}) },
+		body: JSON.stringify(body),
+	});
+	return { status: res.status, body: await res.json().catch(() => null) };
+}
+
+async function get(port, path, token) {
+	try {
+		const res = await fetch(`http://127.0.0.1:${port}${path}`, {
+			headers: token ? { authorization: `Bearer ${token}` } : {},
+		});
+		return { status: res.status, body: await res.json().catch(() => null) };
+	} catch {
+		// 连不上 = 没人在这个端口上
+		return { status: 0, body: null };
+	}
+}
+
+const isBubble = (f) => f.startsWith("{\"type\":\"bubble\"");
+/** 动画帧（把气泡帧滤掉）：thinking / agent_idle / tool_call / add_pet / shutdown */
+const animFrames = (frames) => frames.filter((f) => !isBubble(f));
+const bubbleFrames = (frames) => frames.filter(isBubble).map((f) => JSON.parse(f).text);
+
+console.log(`\npi-dsh-pet 冒烟测试  (home=${HOME} port=${PORT})\n`);
+
+// ---------------------------------------------------------------- 互斥：外部宿主
+// 先看看本机有没有别的宿主（尤其是旧版 pi 扩展起的那个）：默认必须拒绝共存。
+// PI_PET_SKIP_FOREIGN=1 只对本测试自己起的进程生效，它只关「外部状态文件」这一层。
+const hostMod = await import(pathToFileURL(join(ROOT, "app", "host.cjs")).href);
+const foreign = hostMod.probeExistingHosts();
+console.log(`外部宿主探测：${foreign.length ? foreign.map((h) => `pid ${h.state.pid}:${h.state.port}`).join(", ") : "无"}`);
+
+// ---------------------------------------------------------------- 起宿主
+console.log("启动宿主（serve 模式，无窗）…");
+const host = spawn(process.execPath, [join(ROOT, "bin", "pi-pet.cjs"), "serve", "--port", String(PORT)], {
+	env: { ...process.env, PI_PET_HOME: HOME, PI_PET_SKIP_FOREIGN: "1" },
+	stdio: ["ignore", "pipe", "pipe"],
+});
+let hostLog = "";
+host.stdout.on("data", (d) => (hostLog += d));
+host.stderr.on("data", (d) => (hostLog += d));
+
+let health = null;
+for (let i = 0; i < 60; i++) {
+	try {
+		health = (await get(PORT, "/health")).body;
+		if (health && health.role === "pi-pet-host") break;
+	} catch {
+		/* 还没起来 */
+	}
+	await sleep(150);
+}
+check("宿主起来了且 /health 自报 role", !!(health && health.role === "pi-pet-host"), JSON.stringify(health));
+if (!health) {
+	console.log(hostLog);
+	host.kill();
+	process.exit(1);
+}
+
+const token = readFileSync(join(HOME, "token"), "utf8").trim();
+check("token 文件已生成", token.length >= 16);
+
+// ---------------------------------------------------------------- 鉴权
+console.log("\n鉴权…");
+check("/event 无 token → 401", (await post(PORT, "/event", { type: "thinking" }, "")).status === 401);
+check("/control 错 token → 401", (await post(PORT, "/control", { action: "state" }, "nope")).status === 401);
+check("/health 免鉴权", (await get(PORT, "/health")).status === 200);
+
+// ---------------------------------------------------------------- 窗接入
+console.log("\n窗接入 + 状态机…");
+const win = fakeWindow(PORT);
+await win.ready;
+await sleep(120);
+
+// thinking 连发 5 次：动画只能播一次，气泡也只出一条（但会被续期）
+for (let i = 0; i < 5; i++) {
+	await post(PORT, "/event", { type: "thinking", task: "修复登录" }, token);
+	await sleep(30);
+}
+await sleep(200);
+check("重复 thinking 只产生 1 个动画帧", animFrames(win.frames).filter((f) => f === "thinking").length === 1, JSON.stringify(win.frames));
+check("气泡是 sticky（不按时消失）", win.frames.some((f) => f.includes('"sticky":true')));
+
+// 再来一次 thinking（文案没变）→ 依然不重播
+const before = win.frames.length;
+await post(PORT, "/event", { type: "thinking", task: "修复登录" }, token);
+await sleep(150);
+check("同状态同文案：零新帧", win.frames.length === before, `新帧 ${JSON.stringify(win.frames.slice(before))}`);
+
+// 任务名变了 → 只更新气泡，不动动画
+await post(PORT, "/event", { type: "thinking", task: "修复登录+注册" }, token);
+await sleep(150);
+check("任务名变化：只多一个气泡帧", win.frames.length === before + 1 && bubbleFrames(win.frames).pop() === "「修复登录+注册」思考中…", JSON.stringify(win.frames.slice(before)));
+
+// tool_call：bash → write 都是「写代码组」，中间不该重播
+const b2 = win.frames.length;
+await post(PORT, "/event", { type: "tool_call", tool: "bash", detail: "npm test" }, token);
+await sleep(120);
+await post(PORT, "/event", { type: "tool_call", tool: "write" }, token);
+await sleep(150);
+const coding = animFrames(win.frames.slice(b2));
+check("进入执行中：1 个动画帧", coding.length === 1, JSON.stringify(coding));
+check("写代码组内不重播（bash→write）", coding.filter((f) => f.includes("tool_call")).length === 1);
+check("执行中文案带 detail", bubbleFrames(win.frames).includes("执行中：npm test"), JSON.stringify(bubbleFrames(win.frames).slice(-2)));
+
+// done → 回空闲 + 完成气泡
+await post(PORT, "/event", { type: "done", summary: "改完 3 个文件" }, token);
+await sleep(150);
+check("done 回到空闲动画", animFrames(win.frames.slice(b2)).pop() === "agent_idle", JSON.stringify(animFrames(win.frames.slice(b2))));
+check("完成气泡", bubbleFrames(win.frames).pop() === "完成：改完 3 个文件", JSON.stringify(bubbleFrames(win.frames).slice(-1)));
+
+// ---------------------------------------------------------------- 手动说话
+console.log("\n手动说话…");
+const b3 = win.frames.length;
+check("control say 成功", (await post(PORT, "/control", { action: "say", text: "过来玩" }, token)).body.ok === true);
+await sleep(120);
+const sayFrame = JSON.parse(win.frames.slice(b3).find((f) => f.startsWith("{\"type\":\"bubble\"")));
+check("say 只冒泡、不动动画", !!sayFrame && sayFrame.text === "过来玩" && sayFrame.ms > 0 && animFrames(win.frames.slice(b3)).length === 0);
+check("事件通道 say 也通", (await post(PORT, "/event", { type: "say", text: "hi" }, token)).body.ok === true);
+
+// ---------------------------------------------------------------- 暂停
+console.log("\n暂停 / 恢复…");
+const b4 = win.frames.length;
+await post(PORT, "/control", { action: "pause" }, token);
+await post(PORT, "/event", { type: "thinking" }, token);
+await sleep(150);
+check("暂停后状态事件被丢弃", win.frames.length === b4, JSON.stringify(win.frames.slice(b4)));
+await post(PORT, "/control", { action: "resume" }, token);
+await post(PORT, "/event", { type: "thinking" }, token);
+await sleep(150);
+check("恢复后又能驱动", win.frames.length > b4);
+
+// ---------------------------------------------------------------- 单只闸门
+console.log("\n单只闸门…");
+check("maxPets=1 时 add_pet 被拦", (await post(PORT, "/control", { action: "add-pet" }, token)).body.ok === false);
+const b5 = win.frames.length;
+await post(PORT, "/event", { type: "add_pet" }, token);
+await sleep(120);
+check("add_pet 事件也被拦（不转发）", win.frames.length === b5);
+
+// ---------------------------------------------------------------- WS 生产者
+console.log("\nWS 生产者（pi/dsh 的接法）…");
+// /feed 没 token 必须被拒
+const noAuth = new WebSocket(`ws://127.0.0.1:${PORT}/feed?source=bad`);
+check(
+	"/feed 无 token 被拒",
+	await new Promise((res) => {
+		noAuth.addEventListener("open", () => res(false));
+		noAuth.addEventListener("error", () => res(true));
+		noAuth.addEventListener("close", () => res(true));
+	}),
+);
+
+const feed = new WebSocket(`ws://127.0.0.1:${PORT}/feed?source=dsh-test&token=${encodeURIComponent(token)}`);
+await new Promise((res) => feed.addEventListener("open", res));
+const b6 = win.frames.length;
+// 先把窗放回空闲，才能看出「thinking 触发了一次状态变化」
+await post(PORT, "/event", { type: "agent_idle" }, token);
+await sleep(150);
+const b7 = win.frames.length;
+feed.send("thinking");
+feed.send("thinking");
+await sleep(250);
+check("WS 上行两次 thinking 只触发一次状态变化", animFrames(win.frames.slice(b7)).filter((f) => f === "thinking").length === 1, JSON.stringify(win.frames.slice(b7)));
+const st = (await get(PORT, "/state", token)).body;
+check("/state 看得见 WS 会话", st.bus.feeds === 1 && st.bus.feedsBySource["dsh-test"] === 1, JSON.stringify(st.bus));
+check(
+	"/state 看得见忙碌状态",
+	st.bus.state === "thinking" && st.bus.busySessions.some((s) => s.source === "dsh-test"),
+	JSON.stringify(st.bus),
+);
+feed.close();
+await sleep(250);
+check("WS 断开后会话状态回落", (await get(PORT, "/state", token)).body.bus.feeds === 0);
+
+// ---------------------------------------------------------------- 锁心跳
+console.log("\n单例互斥 + 锁心跳…");
+const owner = JSON.parse(readFileSync(join(HOME, "host.lock", "owner.json"), "utf8"));
+check("锁 owner 是本进程", owner.pid === host.pid);
+await sleep(2500);
+const owner2 = JSON.parse(readFileSync(join(HOME, "host.lock", "owner.json"), "utf8"));
+check("锁有心跳（at 在走）", owner2.at > owner.at, `${owner.at} → ${owner2.at}`);
+
+const second = spawn(process.execPath, [join(ROOT, "bin", "pi-pet.cjs"), "start", "--port", "47700", "--no-window"], {
+	env: { ...process.env, PI_PET_HOME: HOME, PI_PET_SKIP_FOREIGN: "1" },
+	stdio: ["ignore", "pipe", "pipe"],
+});
+let secondOut = "";
+second.stdout.on("data", (d) => (secondOut += d));
+second.stderr.on("data", (d) => (secondOut += d));
+const secondCode = await new Promise((res) => second.on("exit", res));
+check("第二个宿主起不来（互斥）", secondCode === 0 && /已经在跑|锁/.test(secondOut), `exit=${secondCode} out=${secondOut.trim()}`);
+check("第二个宿主没占端口 47700", (await get(47700, "/health")).status === 0);
+check("活着的还是原来那个宿主", health.pid === (await get(PORT, "/health")).body.pid);
+
+// 锁原语：用一个**别的**锁目录去试（不碰活着的那个）
+const probeLock = join(HOME, "probe.lock");
+const { acquireLock: probeAcquire, releaseLock: probeRelease } = await import(
+	pathToFileURL(join(ROOT, "app", "single.cjs")).href
+);
+check("第一次能抢到锁", probeAcquire(probeLock).ok === true);
+check("同一个锁抢不到第二次", probeAcquire(probeLock).ok === false);
+probeRelease(probeLock);
+check("释放后能再抢到", probeAcquire(probeLock).ok === true);
+probeRelease(probeLock);
+
+// ---------------------------------------------------------------- 收尾
+console.log("\n收尾…");
+check("stop 返回成功", (await post(PORT, "/control", { action: "shutdown" }, token)).body.ok === true);
+const exitCode = await new Promise((res) => host.on("exit", res));
+check("宿主干净退出", exitCode === 0, `exit=${exitCode}`);
+check("锁已释放", !existsSync(join(HOME, "host.lock")));
+
+win.close();
+rmSync(HOME, { recursive: true, force: true });
+
+console.log(`\n${fail === 0 ? "全部通过" : "有失败"}：${pass} 通过 / ${fail} 失败`);
+if (fail) {
+	console.log(`失败项：\n  - ${failures.join("\n  - ")}`);
+	process.exit(1);
+}

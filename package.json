@@ -1,16 +1,19 @@
 {
   "name": "pi-dsh-pet",
   "version": "0.0.2",
-  "description": "Floating desktop deepseek chan for the pi coding agent: idle breathing, random actions, screen wandering, and pi event reactivity (thinking/coding/idle → matching animations).",
+  "description": "Standalone desktop pet (transparent Electron window) that exposes a local HTTP/WS port so pi, dsh, or any script can drive it. Ships a pi extension and a dsh adapter as thin clients.",
   "keywords": [
     "pi",
     "pi-plugin",
     "pi-extension",
     "pi-package",
+    "dsh",
     "desktop-pet",
     "pet",
     "electron",
-    "floating-widget"
+    "floating-widget",
+    "localhost-server",
+    "websocket"
   ],
   "homepage": "https://github.com/SOMWHY/pi-dsh-pet#readme",
   "repository": {
@@ -21,19 +24,34 @@
     "url": "https://github.com/SOMWHY/pi-dsh-pet/issues"
   },
   "type": "module",
+  "main": "app/electron.cjs",
+  "bin": {
+    "pi-pet": "bin/pi-pet.cjs",
+    "dsh-pet": "bin/pi-pet.cjs"
+  },
   "files": [
+    "app",
+    "bin",
     "pi",
+    "dsh",
     "assets/thumb",
-    "assets/config.jsonc"
+    "assets/config.jsonc",
+    "DESIGN.md"
   ],
-  "scripts": {},
+  "scripts": {
+    "start": "node bin/pi-pet.cjs start",
+    "serve": "node bin/pi-pet.cjs serve",
+    "status": "node bin/pi-pet.cjs status",
+    "doctor": "node bin/pi-pet.cjs doctor",
+    "test": "node test/smoke.mjs && node test/dsh.mjs"
+  },
+  "engines": {
+    "node": ">=18"
+  },
   "license": "MIT",
   "pi": {
     "extensions": [
       "./pi/extensions"
     ]
-  },
-  "dependencies": {
-    "ws": "^8.18.0"
   }
 }

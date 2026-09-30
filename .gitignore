@@ -50,3 +50,6 @@ desktop.ini
 
 # ── Windows 保留设备名（Git 无法索引）──
 nul
+
+# ── 本地临时（调试脚本 / 临时数据目录）──
+.tmp/
