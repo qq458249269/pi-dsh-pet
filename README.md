@@ -238,11 +238,20 @@ var SIZE_MAP = { small: 260, normal: 400, large: 540 };
 ## 接自己的程序
 
 宿主只听 127.0.0.1，token 在 `%APPDATA%/pi-dsh-pet/token`（`pi-pet token` 打印）。
+
+**端口别写死**：默认 47653 被占时宿主会退到随机端口，真实端口写在 `%APPDATA%/pi-dsh-pet/port`
+（一行纯文本，宿主每次起来就写、退出就删）。pi 扩展和 dsh 插件都走这条路：
+
+```js
+const port = fs.readFileSync(portFile, "utf8").trim(); // 例如 "12035"
+const token = fs.readFileSync(tokenFile, "utf8").trim();
+```
+
 上行只有两种方式，语义完全一样：
 
 ```js
 // 1) WS（推荐，能一直连着，每个来源独立一份会话状态）
-const ws = new WebSocket(`ws://127.0.0.1:47653/feed?source=my-tool&token=${token}`);
+const ws = new WebSocket(`ws://127.0.0.1:${port}/feed?source=my-tool&token=${token}`);
 ws.onopen = () => {
   ws.send(JSON.stringify({ type: "thinking", task: "拉取数据" }));
   ws.send(JSON.stringify({ type: "tool_call", tool: "bash", detail: "npm run build" }));
@@ -250,7 +259,7 @@ ws.onopen = () => {
 };
 
 // 2) REST（一次性）
-await fetch("http://127.0.0.1:47653/event", {
+await fetch(`http://127.0.0.1:${port}/event`, {
   method: "POST",
   headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
   body: JSON.stringify({ type: "thinking", task: "拉取数据" }),

@@ -28,7 +28,7 @@ const http = require("node:http");
 const path = require("node:path");
 
 const { ENDPOINTS, SIZES, VERSION } = require("./protocol.cjs");
-const { HOME, PATHS, PKG_ROOT, readConfig, writeConfig, readCtrl, log } = require("./paths.cjs");
+const { HOME, PATHS, PKG_ROOT, readConfig, writeConfig, readCtrl, readPortFile, log } = require("./paths.cjs");
 const { readState, readToken, pidAlive } = require("./single.cjs");
 const { findRunning } = require("./host.cjs");
 
@@ -164,6 +164,7 @@ const HELP = `pi-pet ${VERSION} — 桌面宠物宿主（独立应用）
   doctor                                                自检
 
 环境变量：PI_PET_HOME（数据目录）、PI_PET_PORT、PI_PET_ELECTRON、PI_PET_INSECURE=1
+          PI_PET_DEBUG=1（宿主日志更啰嗦：窗的 renderer console 转到 stderr）
 `;
 
 /* ============================== 小工具 ============================== */
@@ -395,6 +396,7 @@ async function cmdStart(flags) {
 		out(`pi-pet 宿主已起：http://127.0.0.1:${res.port}  pid ${res.pid}`);
 		out(`  数据目录 ${PATHS.home}`);
 		out(`  鉴权 token：${PATHS.token}`);
+		out(`  端口文件 ${PATHS.port}（脚本读这一行就知道连哪个端口）`);
 	}
 	return keepAlive(res);
 }
@@ -559,14 +561,21 @@ async function cmdRestart(flags) {
 	});
 }
 
-function cmdPort() {
+async function cmdPort() {
 	const found = findRunning();
-	if (!found || !found.state.port) {
-		out("");
-		return 1;
+	if (found && found.state.port) {
+		out(String(found.state.port));
+		return 0;
 	}
-	out(String(found.state.port));
-	return 0;
+	// state.json 没（硬杀、或旧版宿主只写端口文件）时，端口文件 + 探活还能救回来：
+	// 端口文件是硬杀后唯一不会消失的线索，但必须探活，不然会把一个死端口报给脚本。
+	const port = readPortFile();
+	if (port && (await probeHealth(port, 800))) {
+		out(String(port));
+		return 0;
+	}
+	out("");
+	return 1;
 }
 
 function cmdToken() {

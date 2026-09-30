@@ -22,8 +22,11 @@ const win = new WebSocket(`ws://127.0.0.1:${PORT}/ws`);
 const frames=[]; win.addEventListener("message",e=>frames.push(String(e.data)));
 await new Promise(r=>win.addEventListener("open",r));
 const handlers = new Map();
-const ctx = { logger: { info: (m)=>console.log("[dsh]",m) }, on: (e,f)=>{ if(handlers.has(e)) throw new Error("dup"); handlers.set(e,f); } };
-const plugin = apply(ctx, { env: { PI_PET_PORT: String(PORT), PI_PET_TOKEN: token }, source: "dsh-fake" });
+const logs = [];
+const ctx = { logger: { info: (m)=>{ logs.push(String(m)); console.log("[dsh]",m); } }, on: (e,f)=>{ if(handlers.has(e)) throw new Error("dup"); handlers.set(e,f); } };
+// 刻意**不传** PI_PET_PORT / PI_PET_TOKEN：真实 dsh 插件不会知道端口是多少（47653 被占时
+// 宿主会退到随机口），它只该靠读宿主写的 <home>/port + <home>/token 找到宿主。
+const plugin = apply(ctx, { env: { PI_PET_HOME: HOME }, source: "dsh-fake" });
 await sleep(300);
 console.log("订阅到的事件:", [...handlers.keys()].join(", "));
 handlers.get("agent/status")({ status: "thinking" });
@@ -41,6 +44,9 @@ const ok = (name, cond, extra = "") => {
   else { failed++; console.log("  ✗ " + name + (extra ? " — " + extra : "")); }
 };
 let total = 0, failed = 0;
+ok("宿主起来时写了 <home>/port（一行就是端口）", readFileSync(join(HOME, "port"), "utf8").trim() === String(PORT));
+// 真实 dsh 插件不会知道端口是多少（47653 被占时宿主会退到随机口），只靠读这两个文件
+ok("没给 PI_PET_PORT/TOKEN 也连上了（读 port/token 文件）", logs.some((l) => l.includes(`已接入宠物宿主 :${PORT}`) && /端口来自.*[\\/]port/.test(l)), logs.join(" | "));
 ok("thinking → 思考中", anim[0] === "thinking", JSON.stringify(anim));
 ok("工具调用 → 执行中 + detail", anim[1] === '{"type":"tool_call","tool":"bash"}' && bubbles.includes("执行中：npm test"), JSON.stringify(bubbles));
 ok("done → 回空闲", anim[2] === "agent_idle", JSON.stringify(anim));

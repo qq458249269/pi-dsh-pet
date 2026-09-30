@@ -26,7 +26,8 @@
 
 import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
 import { spawn, execFile } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
+import { homedir, platform } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -83,8 +84,63 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 type HostInfo = { port: number; token: string; pid?: number };
 
-/** Ask the CLI where the host is. Returns null when it is not running. */
+/**
+ * 宠物数据目录。规则必须和 app/paths.cjs 的 defaultHome() 逐字一致：
+ * $PI_PET_HOME > %APPDATA%/pi-dsh-pet > ~/Library/Application Support/pi-dsh-pet > ~/.pi-dsh-pet
+ * （这里是内联的：本文件故意不 import ../../app/*，pi 可能把它单独拷到别处加载。）
+ */
+function petHome(): string {
+  if (process.env.PI_PET_HOME) return process.env.PI_PET_HOME;
+  if (platform() === 'win32') {
+    return join(process.env.APPDATA || join(homedir(), 'AppData', 'Roaming'), 'pi-dsh-pet');
+  }
+  if (platform() === 'darwin') return join(homedir(), 'Library', 'Application Support', 'pi-dsh-pet');
+  return join(homedir(), '.pi-dsh-pet');
+}
+
+function readTrimmed(file: string): string {
+  try {
+    return readFileSync(file, 'utf8').trim();
+  } catch {
+    return '';
+  }
+}
+
+/** 宿主每次 listen 成功都会写这两个文件：<home>/port 一行端口号，<home>/token 是鉴权口令。 */
+function readEndpointFiles(): HostInfo | null {
+  const home = petHome();
+  const port = Number(readTrimmed(join(home, 'port')));
+  const token = readTrimmed(join(home, 'token'));
+  if (!port || port < 1 || port > 65535 || !token) return null;
+  return { port, token };
+}
+
+/** 探一下 /health：端口文件可能是硬杀后残留的（宿主没了，文件还在，端口也没人听）。 */
+async function probeHealth(port: number, timeoutMs = 1000): Promise<{ pid?: number } | null> {
+  try {
+    const res = await fetch(`http://127.0.0.1:${port}/health`, {
+      signal: typeof AbortSignal.timeout === 'function' ? AbortSignal.timeout(timeoutMs) : undefined,
+    });
+    if (!res.ok) return null;
+    const body = (await res.json()) as { role?: string; pid?: number };
+    return body && body.role === 'pi-pet-host' ? body : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Ask the CLI where the host is. Returns null when it is not running.
+ *
+ * 优先读端口文件（~1ms，不用 spawn 进程）；读不到或探活失败再退回 `pi-pet status --json`
+ * （它读 state.json + 心跳，能认出旧版/外部路径起的宿主）。两条路都拿不到才算没跑。
+ */
 async function findHost(): Promise<HostInfo | null> {
+  const quick = readEndpointFiles();
+  if (quick) {
+    const health = await probeHealth(quick.port);
+    if (health) return { ...quick, pid: Number(health.pid) || undefined };
+  }
   const raw = await runCli(['status', '--json']);
   if (!raw) return null;
   try {

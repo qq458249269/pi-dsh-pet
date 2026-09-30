@@ -5,8 +5,14 @@
  * 谁来调（pi / dsh / curl）都读同一份。
  *
  * 目录选择：`$PI_PET_HOME` > Windows `%APPDATA%/pi-dsh-pet` > `~/.pi-dsh-pet`。
- * 里面放：state.json（宿主写的全局状态，端口真源）/ ctrl.json（意图）/ config.json
- *        / host.lock/（单例锁）/ token（REST 鉴权）/ electron.json（记住 electron.exe）/ log.txt
+ * 里面放：state.json（宿主写的全局状态）/ port（**只要一个端口号，纯文本，给脚本读**）
+ *        / ctrl.json（意图）/ config.json / host.lock/（单例锁）/ token（REST 鉴权）
+ *        / electron.json（记住 electron.exe）/ log.txt
+ *
+ * 为什么专门再写一个 port 文件：state.json 是给本项目的代码读的（带心跳、角色、版本），
+ * 而 pi 扩展 / dsh 插件 / 用户自己的脚本只想知道「现在该连哪个端口」。47653 被占时宿主
+ * 会退到随机端口，这时写死 47653 的调用方就永远连不上 —— 读这个文件才对。
+ * 内容就是 `47653\n` 这种一行，`cat` / `$(<port)` / `readFileSync` 都能直接用。
  */
 
 "use strict";
@@ -41,6 +47,7 @@ const HOME = defaultHome();
 const PATHS = {
 	home: HOME,
 	state: path.join(HOME, "state.json"),
+	port: path.join(HOME, "port"),
 	ctrl: path.join(HOME, "ctrl.json"),
 	config: path.join(HOME, "config.json"),
 	token: path.join(HOME, "token"),
@@ -52,6 +59,62 @@ const PATHS = {
 function ensureHome() {
 	fs.mkdirSync(HOME, { recursive: true });
 	return HOME;
+}
+
+/* ============================== 端口文件 ============================== */
+
+/**
+ * 把真正监听的端口写成一行纯文本。
+ *
+ * ⚠️ 端口是**运行期**才知道的：配置里的 47653 被占时 listen() 会退到随机端口。
+ * 只写 state.json 的话，pi 扩展要 spawn 一次 `pi-pet status --json` 才能知道端口，
+ * dsh 插件和外部脚本更拿不到 —— 所以给它们一个「读一行就是端口」的文件。
+ * 走临时文件 + rename：Windows 的 rename 不能覆盖已存在的目标，直接写会读到半行。
+ */
+function writePortFile(port) {
+	const n = Number(port);
+	if (!Number.isInteger(n) || n <= 0 || n > 65535) return false;
+	ensureHome();
+	const tmp = `${PATHS.port}.${process.pid}.tmp`;
+	try {
+		fs.writeFileSync(tmp, `${n}\n`, "utf8");
+		fs.rmSync(PATHS.port, { force: true });
+		fs.renameSync(tmp, PATHS.port);
+		return true;
+	} catch {
+		try {
+			fs.rmSync(tmp, { force: true });
+		} catch {
+			/* ignore */
+		}
+		return false;
+	}
+}
+
+/** 读端口文件（宿主没跑 / 文件是别人留下的就返回 0）。 */
+function readPortFile() {
+	try {
+		const n = Number(fs.readFileSync(PATHS.port, "utf8").trim());
+		return Number.isInteger(n) && n > 0 && n <= 65535 ? n : 0;
+	} catch {
+		return 0;
+	}
+}
+
+/**
+ * 退出时清掉端口文件。
+ * 只在文件里写的还是**自己的**端口时才删：同一台机器上万一有另一个宿主刚起来
+ * （换 home 跑、或测试里连着起停），不能把人家的端口文件顺手删了。
+ */
+function clearPortFile(port) {
+	try {
+		const cur = readPortFile();
+		if (cur && Number(port) && cur !== Number(port)) return false;
+		fs.rmSync(PATHS.port, { force: true });
+		return true;
+	} catch {
+		return false;
+	}
 }
 
 /* ============================== 配置 ============================== */
@@ -180,6 +243,9 @@ module.exports = {
 	CONFIG_DEFAULTS,
 	CTRL_DEFAULTS,
 	ensureHome,
+	writePortFile,
+	readPortFile,
+	clearPortFile,
 	readConfig,
 	writeConfig,
 	readCtrl,

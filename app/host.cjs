@@ -28,6 +28,8 @@ const {
 	readConfig,
 	writeCtrl,
 	readCtrl,
+	writePortFile,
+	clearPortFile,
 	log,
 } = require("./paths.cjs");
 const {
@@ -256,6 +258,9 @@ async function start(options = {}) {
 	state.port = port;
 	state.size = readCtrl().size || cfg.size;
 	state.pkg = require("./paths.cjs").PKG_ROOT;
+	// 端口写进 home/port：pi 扩展 / dsh 插件 / 外部脚本读这一行就能连上，
+	// 不用 spawn `pi-pet status`、也不用赌 47653 没被占。
+	writePortFile(port);
 
 	/* ---- 5. 生命周期 ---- */
 	let stopping = false;
@@ -296,6 +301,7 @@ async function start(options = {}) {
 		} catch {
 			/* 删不掉就靠心跳过期 */
 		}
+		clearPortFile(port);
 		releaseLock();
 		log(`宿主退出（code ${code}）`);
 		process.exit(code);
@@ -306,6 +312,7 @@ async function start(options = {}) {
 	// 硬退出（被 taskkill / 崩溃）时至少把锁还回去，别让下个宿主等 TTL
 	process.on("exit", () => {
 		releaseLock();
+		clearPortFile(port);
 		try {
 			fs.rmSync(PATHS.state, { force: true });
 		} catch {
@@ -469,9 +476,9 @@ async function start(options = {}) {
 	writeState(state);
 
 	if (wantNoWindow) {
-		log(`宿主已起（仅服务，不起窗）：127.0.0.1:${port}  pid ${process.pid}`);
+		log(`宿主已起（仅服务，不起窗）：127.0.0.1:${port}  pid ${process.pid}  端口文件 ${PATHS.port}`);
 	} else {
-		log(`宿主已起：127.0.0.1:${port}  pid ${process.pid}  home=${PATHS.home}`);
+		log(`宿主已起：127.0.0.1:${port}  pid ${process.pid}  home=${PATHS.home}  端口文件 ${PATHS.port}`);
 		win.launch(state.size, port);
 	}
 

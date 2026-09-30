@@ -109,6 +109,19 @@ const hostMod = await import(pathToFileURL(join(ROOT, "app", "host.cjs")).href);
 const foreign = hostMod.probeExistingHosts();
 console.log(`外部宿主探测：${foreign.length ? foreign.map((h) => `pid ${h.state.pid}:${h.state.port}`).join(", ") : "无"}`);
 
+/** Run the CLI against the test HOME, resolve stdout ("" on failure). */
+function runCli(args) {
+	return new Promise((resolve) => {
+		const child = spawn(process.execPath, [join(ROOT, "bin", "pi-pet.cjs"), ...args], {
+			env: { ...process.env, PI_PET_HOME: HOME, PI_PET_SKIP_FOREIGN: "1" },
+			stdio: ["ignore", "pipe", "ignore"],
+		});
+		let out = "";
+		child.stdout.on("data", (d) => (out += d));
+		child.on("exit", (code) => resolve(code === 0 ? out.trim() : out.trim()));
+	});
+}
+
 // ---------------------------------------------------------------- 起宿主
 console.log("启动宿主（serve 模式，无窗）…");
 const host = spawn(process.execPath, [join(ROOT, "bin", "pi-pet.cjs"), "serve", "--port", String(PORT)], {
@@ -302,6 +315,15 @@ await sleep(2500);
 const owner2 = JSON.parse(readFileSync(join(HOME, "host.lock", "owner.json"), "utf8"));
 check("锁有心跳（at 在走）", owner2.at > owner.at, `${owner.at} → ${owner2.at}`);
 
+// ---------------------------------------------------------------- 端口文件
+// pi 扩展 / dsh 插件 / 外部脚本不看 state.json，只读 <home>/port 那一行。
+// ⚠️ 端口是**运行期**才知道的：默认 47653 被占时 listen() 会退到随机端口，
+// 所以写死端口的调用方只能靠这个文件（否则永远连不上）。
+console.log("\n端口文件…");
+check("home/port 里就是真实监听的端口", readFileSync(join(HOME, "port"), "utf8").trim() === String(PORT));
+check("port 命令直接读它", (await runCli(["port"])) === String(PORT));
+check("端口是纯数字一行（cat / readFileSync 都能用），不多带 JSON", /^\d+\n?$/.test(readFileSync(join(HOME, "port"), "utf8")));
+
 const second = spawn(process.execPath, [join(ROOT, "bin", "pi-pet.cjs"), "start", "--port", "47700", "--no-window"], {
 	env: { ...process.env, PI_PET_HOME: HOME, PI_PET_SKIP_FOREIGN: "1" },
 	stdio: ["ignore", "pipe", "pipe"],
@@ -331,6 +353,8 @@ check("stop 返回成功", (await post(PORT, "/control", { action: "shutdown" },
 const exitCode = await new Promise((res) => host.on("exit", res));
 check("宿主干净退出", exitCode === 0, `exit=${exitCode}`);
 check("锁已释放", !existsSync(join(HOME, "host.lock")));
+// 留着端口文件 = 让脚本连一个没人听的端口（重连会一直报 ECONNREFUSED）
+check("端口文件随宿主一起清掉（不留死端口给脚本）", !existsSync(join(HOME, "port")));
 
 win.close();
 rmSync(HOME, { recursive: true, force: true });
