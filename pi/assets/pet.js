@@ -166,6 +166,15 @@
   var lastRegionKey = "";
   var lastRegionAt = 0;
 
+  /** 把每只宠物的可见气泡夹在屏幕内（超出就往回挪），挪完再算命中区，
+      保证主进程拿到的形状和屏幕上画出来的是同一个位置。 */
+  function clampBubbles() {
+    for (var i = 0; i < pets.length; i++) {
+      var p = pets[i];
+      if (p && typeof p.clampBubble === "function") p.clampBubble();
+    }
+  }
+
   function collectHitRects() {
     var out = [];
     for (var i = 0; i < pets.length; i++) {
@@ -210,6 +219,7 @@
 
   /** 真发一次：矩形没变就不发（省掉一次跨进程 + 一次 SetWindowRgn）。 */
   function emitHitRegion() {
+    clampBubbles(); // 先把气泡夹回屏幕内，形状才算得准
     var api = window.__petElectron__;
     if (!api || !api.setHitRegion) return;
     var rects = collectHitRects();
@@ -280,6 +290,20 @@
     // ---- Derived ----
     var halfW = this.size / 2;
     var halfH = (this.size * 9) / 16 / 2;
+
+    /**
+     * 把容器位置夹回屏幕内。不夹的话宠物能被拖到只剩半个身子在屏幕里（头顶的气泡
+     * 跟着出屏，再被主进程的 SetWindowRgn 裁一刀，看着就像「气泡被切了一半」）。
+     * extraBottom = 舞台额外的下移量（站位对齐脚底用的），算下边界时算进去。
+     */
+    function clampPos(left, top, extraBottom) {
+      var maxLeft = Math.max(0, window.innerWidth - halfW * 2);
+      var maxTop = Math.max(0, window.innerHeight - halfH * 2 - (extraBottom || 0));
+      return {
+        left: Math.min(Math.max(left, 0), maxLeft),
+        top: Math.min(Math.max(top, 0), maxTop),
+      };
+    }
 
     // ---- State ----
     this.anim = "";
@@ -461,18 +485,47 @@
     var bubble = document.createElement("div");
     bubble.className = "pet-bubble";
     bubble.style.display = "none";
+    // 文案单独占一个节点：直接 bubble.textContent = 文案 会把同级的输入框节点一起删掉
+    // （之后 askSay 拿到的就是个脱离 DOM 的 input，「说点什么…」框永远出不来）。
+    var bubbleText = document.createElement("span");
+    bubbleText.className = "pet-bubble-text";
+    bubble.appendChild(bubbleText);
     container.appendChild(bubble);
     self.bubbleEl = bubble; // 命中区要把头顶的气泡算进去
 
     var bubbleTimer = null;
+
+    /** 气泡贴到屏幕边（宠物拖到边角）时把它挪回来，不然半边在屏幕外 = 看着被切了一半。
+        偏移走 left/bottom（不在 transition 里，改完立刻到位，不会一边补一边抖）。 */
+    self.clampBubble = function () {
+      if (!bubble.classList.contains("show")) return;
+      var r = bubble.getBoundingClientRect();
+      if (!r || !(r.width > 0) || !(r.height > 0)) return;
+      var W = window.innerWidth;
+      var H = window.innerHeight;
+      var dx = 0;
+      var dy = 0;
+      if (r.left < 8) dx = 8 - r.left;
+      else if (r.right > W - 8) dx = W - 8 - r.right;
+      if (r.top < 8) dy = 8 - r.top;
+      else if (r.bottom > H - 8) dy = H - 8 - r.bottom;
+      // 写一样的值没有代价，但每帧都写新值会让浏览器白排一次版
+      if (!dx) bubble.style.removeProperty("left");
+      else bubble.style.left = "calc(50% + " + Math.round(dx) + "px)";
+      // bottom 越大越靠上，所以往下挪是减
+      if (!dy) bubble.style.removeProperty("bottom");
+      else bubble.style.bottom = "calc(100% - " + Math.round(dy) + "px)";
+    };
+
     self.showBubble = function (text, opts) {
       opts = opts || {};
       var t = String(text == null ? "" : text);
       if (!t) return;
-      if (bubble.textContent !== t) bubble.textContent = t;
+      if (bubbleText.textContent !== t) bubbleText.textContent = t;
       bubble.classList.add("show");
       bubble.classList.toggle("sticky", opts.sticky === true);
       bubble.style.display = "";
+      self.clampBubble();
       pushHitRegion(); // 气泡会改变命中区（它在宠物头顶）
       if (bubbleTimer) clearTimeout(bubbleTimer);
       var ms = Number(opts.ms) || 0;
@@ -498,14 +551,16 @@
     input.type = "text";
     input.maxLength = 80;
     input.placeholder = "说点什么…（Enter 发送）";
-    input.style.display = "none";
+    // 亮不亮全看 class：写内联 display:none 的话优先级压过 .on{display:block}，框永远出不来
+    input.classList.remove("on");
     bubble.appendChild(input);
     bubble.classList.add("has-input");
 
     function submitInput() {
       var v = input.value.trim();
       input.value = "";
-      input.style.display = "none";
+      input.classList.remove("on");
+      bubble.classList.remove("with-input");
       self.hideBubble();
       if (!v) return;
       if (window.__petElectron__ && window.__petElectron__.say) window.__petElectron__.say(v);
@@ -514,8 +569,11 @@
 
     self.askSay = function () {
       bubble.classList.add("show");
+      bubble.classList.add("with-input");
+      input.classList.add("on"); // ⚠️ 不能写 style.display = ""：样式表里的 display:none
+      //    优先级更高，空的内联样式等于「按样式表来」，框还是出不来
       bubble.style.display = "";
-      input.style.display = "";
+      self.clampBubble();
       pushHitRegion();
       input.focus();
       input.select();
@@ -525,7 +583,8 @@
       if (e.key === "Enter") submitInput();
       else if (e.key === "Escape") {
         input.value = "";
-        input.style.display = "none";
+        input.classList.remove("on");
+        bubble.classList.remove("with-input");
         self.hideBubble();
       }
     });
@@ -660,8 +719,9 @@
         else ratioX = startRatio + dir * totalRatio * ((t - leadSec) / travelWindow);
         var px = ratioX * W;
         var py = startYRatio * H;
-        container.style.left = px - halfW + "px";
-        container.style.top = py - halfH + "px";
+        var mp = clampPos(px - halfW, py - halfH, bottomPad);
+        container.style.left = mp.left + "px";
+        container.style.top = mp.top + "px";
         container.style.right = "auto";
         container.style.bottom = "auto";
         // 漫游中每一帧位置都在变：命中区必须跟着走，否则形状留在出发点，
@@ -670,7 +730,10 @@
         if (t < duration - tailSec) self.moveRef = requestAnimationFrame(step);
         else {
           self.moveRef = null;
-          self.customPos = { rx: targetRatio, ry: startYRatio };
+          // 存**实际落点**而不是计划点：贴边时 clampPos 会把宠物夹回屏内，
+          // 存计划点的话下次 resize 一下宠物就又飞到屏外去了
+          var done = container.getBoundingClientRect();
+          self.customPos = { rx: (done.left + halfW) / W, ry: (done.top + halfH) / H };
         }
       };
       self.moveRef = requestAnimationFrame(step);
@@ -744,8 +807,10 @@
           self.switchTo(self.anim, true);
         }
       }
-      container.style.left = e.clientX - dragState.offX - halfW + "px";
-      container.style.top = e.clientY - dragState.offY - halfH + "px";
+      // 拖拽也要夹在屏幕内（舞台的下移量这时是 none，所以按 halfH 算下边界）
+      var dp = clampPos(e.clientX - dragState.offX - halfW, e.clientY - dragState.offY - halfH, 0);
+      container.style.left = dp.left + "px";
+      container.style.top = dp.top + "px";
       container.style.right = "auto";
       container.style.bottom = "auto";
       stage.style.transform = "none";

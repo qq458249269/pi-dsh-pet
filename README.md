@@ -48,20 +48,35 @@ curl -X POST 127.0.0.1:47653/event -H "authorization: Bearer $(pi-pet token)" \
 ```
 
 也提供免安装单文件 exe（release 里就叫 `pi-dsh-pet.exe`），双击即可，不用 Node；
-想装到开始菜单就用 `pi-dsh-pet-setup.exe`。
 只有 exe 也能接自己的程序：端口与 token 在 `%APPDATA%\pi-dsh-pet\port` 与
 `%APPDATA%\pi-dsh-pet\token`（右键菜单里有「复制服务地址」「打开数据文件夹」）；
 要完整的 `pi-pet status/feed/say` 命令行则用 `npm i -g pi-dsh-pet`。
 
 > 💡 首次运行需下载 Electron ≈100MB，后续启动秒开。
 
+#### 为什么 exe 还是这么大
+
+| 块 | 大小 | 能动吗 |
+| --- | --- | --- |
+| Electron 运行时 | ≈74MB（压后） | 不能，去掉就不是 Electron 了 |
+| 91 个 webm 素材 | ≈46MB | 只能重编码降码率（`npm run slim:assets`） |
+| locales 语言包 | ≈41MB → 2MB | 已砍：只留 `zh-CN` / `en-US` |
+
+默认产物 ~120MB 就是这个拆解的结果：locales 已砍、压缩已开到 `maximum`。
+还嫌大就在 CI 上勾 `slim_assets`（或本地 `npm run slim:assets`）把素材重编码到
+512px/CRF 34，能再省三四十 MB，代价是画质；`npm run assets:restore` 一键还原。
+`scripts/slim-assets.cjs` 需要本机有 `ffmpeg`，没有就报错退出、不动原文件。
+
 ### 不想用 CI？本地打包
 
 ```sh
 npm i --no-save electron@33 electron-builder@25   # 只在打包这一步装，运行时依旧零依赖
-npm run build          # → dist/pi-dsh-pet.exe（免安装单文件）+ dist/pi-dsh-pet-setup.exe（安装包）
+npm run build          # → dist/pi-dsh-pet.exe（只有这一个：免安装单文件）
 npm run build:dir      # 只出免安装目录版 dist/win-unpacked/，跑得快，适合先验证
 ```
+
+> 不再出安装包（NSIS setup）：一个项目两个 exe 时最容易踩的是「双击了没反应」——
+> setup 双击先弹 UAC 和安装向导，用户以为程序挂了。免安装单文件双击即用。
 
 CI（推 main / 手动触发 `release` workflow）走同一条链，只是多两件事：
 先用 `win-unpacked/pi-dsh-pet.exe` 真跑一次冒烟（起服务、查 `/health`、确认 asar 里的

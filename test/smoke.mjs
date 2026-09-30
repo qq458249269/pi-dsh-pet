@@ -128,6 +128,30 @@ const { launchCwd } = await import(pathToFileURL(join(ROOT, "app", "window.cjs")
 	check("完全不存在 → 不给 cwd（undefined）", launchCwd(join(ROOT, "没有这个目录", "app.asar")) === undefined);
 }
 
+// ---------------------------------------------------------------- 头顶的气泡
+// 「气泡只显示一半」和「气泡不跟着宠物走」都是窗侧（渲染进程）的毛病，冒烟开不了窗，
+// 所以把三条容易改回去的地方钉在这儿（都是实测踩过的坑，不是洁癖）：
+console.log("\n头顶气泡（截断 / 不跟随）…");
+{
+	const petJs = readFileSync(join(ROOT, "pi", "assets", "pet.js"), "utf8");
+	const petCss = readFileSync(join(ROOT, "pi", "assets", "pet.css"), "utf8");
+	// ① 收缩盒 + left:50% 时可用宽度只有宠物宽度的一半（231px），写在 max-width 上的
+	//    320/420 根本够不着，长文案就在半路被省略号切掉 —— 必须显式 width: max-content
+	check("气泡显式 width:max-content（否则 max-width 够不着）", /width:\s*max-content/.test(petCss));
+	check("气泡不再 nowrap（一行放不下就换行）", !/white-space:\s*nowrap/.test(petCss));
+	// ② 漫游/拖拽时每帧都要重报命中区：SetWindowRgn 是按上一次上报的形状裁的，
+	//    不跟着走 = 宠物移走后气泡被裁掉，看着就像「气泡留在原地」
+	check("漫游时上报命中区", /container\.style\.left = mp\.left[\s\S]{0,400}pushHitRegion\(\)/.test(petJs));
+	check("拖拽时上报命中区", /var dp = clampPos\([\s\S]{0,400}pushHitRegion\(\)/.test(petJs));
+	// ③ 贴屏幕边时要把气泡夹回来，并且挪完再算命中区（否则形状和画出来的不是一处）
+	check("气泡夹回屏幕内", /self\.clampBubble = function/.test(petJs));
+	check("算命中区前先夹气泡", /clampBubbles\(\);[\s\S]{0,200}collectHitRects\(\)/.test(petJs));
+	// ④ 宠物本身也不能拖到屏幕外（半只在屏外时头顶气泡必然被裁）
+	check("拖拽位置有夹取", /clampPos\(e\.clientX - dragState\.offX/.test(petJs));
+	// ⑤ showBubble 写文案不能碰 bubble.textContent：会把输入框节点删掉（「说点什么…」出不来）
+	check("文案走独立节点，不动 bubble.textContent", !/^\s*bubble\.textContent\s*=/m.test(petJs) && /bubbleText\.textContent = t/.test(petJs));
+}
+
 // ---------------------------------------------------------------- 互斥：外部宿主
 // 先看看本机有没有别的宿主（尤其是旧版 pi 扩展起的那个）：默认必须拒绝共存。
 // PI_PET_SKIP_FOREIGN=1 只对本测试自己起的进程生效，它只关「外部状态文件」这一层。

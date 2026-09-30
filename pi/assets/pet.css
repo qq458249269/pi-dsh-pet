@@ -55,17 +55,30 @@
   position: absolute;
   bottom: 100%;
   left: 50%;
+  /* 贴到屏幕边时 JS 把气泡夹回来：直接改 left/bottom 的 calc 值（这两个属性没写进
+     transition，改完立刻到位 —— 要是用 transform 夹，0.18s 的过渡会让它一路抖）。
+     不夹的话会有一半跑到屏幕外，看着就像「被切了一半」。 */
   transform: translate(-50%, 6px);
   margin-bottom: 10px;
-  max-width: 320px;
+  /* ⚠️ 不能再用「自适应宽度」：left:50% 时可用宽度 = 宠物宽度的一半（231px），
+     写在 max-width 上的 320/420 永远够不着，长文案就在 231px 处被切了。
+     要宽度就得显式 width:max-content（先撑到 max-width，再由它封顶）。 */
+  width: max-content;
+  max-width: min(420px, calc(100vw - 32px));
   padding: 7px 12px;
   border-radius: 12px;
   background: rgba(28, 30, 38, 0.92);
   color: #f2f4f8;
   font: 13px/1.45 system-ui, "Microsoft YaHei", sans-serif;
-  white-space: nowrap;
+  /* 以前是 nowrap + max-width:320px：长文案只剩一个省略号，看着像「只显示一半」。
+     改成自动换行、最多三行，三行以后才截断。 */
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
   overflow: hidden;
-  text-overflow: ellipsis;
   opacity: 0;
   pointer-events: none;
   z-index: 2;
@@ -75,6 +88,11 @@
 .pet-bubble.show {
   opacity: 1;
   transform: translate(-50%, 0);
+}
+/* 输入框亮着的时候别用 -webkit-box 排版（它会拿输入框当匿名 flex 项），老实用 block */
+.pet-bubble.with-input {
+  display: block;
+  -webkit-line-clamp: none;
 }
 /* Little tail pointing down at the pet */
 .pet-bubble::after {
@@ -96,7 +114,8 @@
 .pet-bubble-input {
   display: none;
   margin: 0 0 6px;
-  width: 240px;
+  box-sizing: border-box;
+  width: min(360px, calc(100vw - 60px));
   padding: 4px 8px;
   border: 1px solid rgba(255, 255, 255, 0.25);
   border-radius: 8px;
@@ -107,6 +126,10 @@
 }
 .pet-bubble-input:focus {
   border-color: rgba(120, 190, 255, 0.8);
+}
+/* 「说点什么…」的时候亮起来（不能用内联 display 空串来亮：样式表这条优先级更高） */
+.pet-bubble-input.on {
+  display: block;
 }
 .pet-bubble-input::placeholder {
   color: rgba(255, 255, 255, 0.45);

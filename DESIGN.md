@@ -234,7 +234,7 @@ pi-pet config           # 看/改 config.json
 
 ## 10. 版本号与发布
 
-规则 `YYYY.MM.DD.NNNN`（UTC 日期 + 当天第几个流水号），例：`2026.09.30.0001`。三个 job：`version`（算号 + 跑测试 + source zip + 建 tag）→ `exe`（Windows 打 portable + nsis）→ `release`（挂资产、发说明）。
+规则 `YYYY.MM.DD.NNNN`（UTC 日期 + 当天第几个流水号），例：`2026.09.30.0001`。三个 job：`version`（算号 + 跑测试 + source zip + 建 tag）→ `exe`（Windows 打 portable）→ `release`（挂资产、发说明）。
 
 ### 10.1 打包链上的硬约束
 
@@ -255,15 +255,17 @@ pi-pet config           # 看/改 config.json
    `2026.09.30.0002` → `${version}` 变成 `2026.9.3-0.2`。
    后果有两个：名字难看且不稳定（规范化规则随版本变），以及**不能拿版本号做 CI 断言**
    —— 那是拿别人的内部实现当契约，改个 electron-builder 版本就假失败。
-   产物固定叫 `pi-dsh-pet.exe`（portable）与 `pi-dsh-pet-setup.exe`（NSIS；
-   不能也叫 `pi-dsh-pet.exe`，两个 target 同名会撞）。
+   产物固定叫 `pi-dsh-pet.exe`（portable，**只此一个**）。
+   曾经还出过一个 `pi-dsh-pet-setup.exe`（NSIS），已经取消：同项目两个 exe 时
+   「双击没反应」最容易被误报成程序挂了（setup 双击先弹 UAC 和安装向导），
+   而免安装单文件双击即用，不给人第二种可能。
    版本信息另有地方存：tag、release 说明、asar 里的 package.json。
 
 ### 10.2 产物长什么样
 
 `version` job 出 `*-source.zip`；`exe` job 先 `--dir` 出 `dist/win-unpacked/`
-（唯一能**当场真跑一次**的产物），冒烟通过后再出 `pi-dsh-pet.exe`（免安装单文件）
-与 `pi-dsh-pet-setup.exe`（NSIS 安装包）。冒烟只起服务不起窗（`--no-window`），用临时
+（唯一能**当场真跑一次**的产物），冒烟通过后再出 `pi-dsh-pet.exe`（免安装单文件，
+唯一的发布产物）。冒烟只起服务不起窗（`--no-window`），用临时
 `PI_PET_HOME`，验 `port` 文件 + `/health` 的 `role` + `/` 与 `/config.jsonc`
 能从 `app.asar` 里读出来，验完 taskkill 清理；它 `continue-on-error`，
 挂了写进摘要但不拦产物（别因为 runner 的图形环境卡死整次发布）。
