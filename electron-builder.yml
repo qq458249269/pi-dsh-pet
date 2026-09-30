@@ -8,17 +8,21 @@ copyright: MIT
 
 directories:
   output: dist
+  # buildResources：图标等资源目录。没建也不会报错，只是用 Electron 默认图标。
   buildResources: build
 
 asar: true
-# 只带运行时要的东西：宿主代码 + 窗代码 + 91 个 webm 素材
+# 只带运行时要的东西：宿主代码 + 窗代码 + 91 个 webm 素材。
+# ⚠️ 每一项都加引号：YAML 里裸的 * 会被当 alias，而且未加引号的通配写法
+# 在不同 glob 实现下对「零层子目录」（app/main.cjs 之于 app/**/*.cjs）匹配不一致，
+# 漏掉文件的表现是「exe 打出来了，双击窗里啥也没有」——所以这里用 **/* 明确收全部。
 files:
-  - app/**/*.cjs
-  - bin/**/*.cjs
-  - pi/assets/**
-  - assets/thumb/**
-  - assets/config.jsonc
-  - package.json
+  - "app/**/*"
+  - "bin/**/*"
+  - "pi/assets/**/*"
+  - "assets/thumb/**/*"
+  - "assets/config.jsonc"
+  - "package.json"
 
 win:
   # portable = 单文件 exe（双击即用，免安装）；nsis = 带快捷方式的安装包

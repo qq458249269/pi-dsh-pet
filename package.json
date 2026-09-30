@@ -16,6 +16,10 @@
     "websocket"
   ],
   "homepage": "https://github.com/SOMWHY/pi-dsh-pet#readme",
+  "author": {
+    "name": "SOMWHY",
+    "url": "https://github.com/SOMWHY"
+  },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/SOMWHY/pi-dsh-pet.git"
@@ -43,7 +47,9 @@
     "serve": "node bin/pi-pet.cjs serve",
     "status": "node bin/pi-pet.cjs status",
     "doctor": "node bin/pi-pet.cjs doctor",
-    "test": "node test/smoke.mjs && node test/dsh.mjs"
+    "test": "node test/smoke.mjs && node test/dsh.mjs",
+    "build": "npx --yes electron-builder --win --publish never --config electron-builder.yml",
+    "build:dir": "npx --yes electron-builder --win --dir --publish never --config electron-builder.yml"
   },
   "engines": {
     "node": ">=18"

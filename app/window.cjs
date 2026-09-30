@@ -157,13 +157,16 @@ function createWindowManager(ctx) {
 			env.ELECTRON_MIRROR = "https://npmmirror.com/mirrors/electron/";
 			env.NPM_CONFIG_REGISTRY = "https://registry.npmmirror.com";
 		}
-		const bin = resolveElectronBin();
-		const args = [ELECTRON_SCRIPT, String(port)];
+		// 打包版没有 electron.exe：窗就是**这个 exe 的第二个实例**。
+		// 此时的 exe 本身就是 Electron，所以整条 electron 查找链（npm 缓存、npx、
+		// memo 写盘）在成品里毫无意义，只会打出「没找到 electron.exe，退回 npx」这种
+		// 误导日志 —— 先分叉，再去解析 electron。
 		let spec;
 		if (isPackaged()) {
-			// 打包版没有 electron.exe：窗就是**这个 exe 的第二个实例**
 			spec = { file: process.execPath, args: ["--pi-pet-window", String(port)], shell: false };
 		} else {
+			const bin = resolveElectronBin();
+			const args = [ELECTRON_SCRIPT, String(port)];
 			spec = bin
 				? { file: bin, args, shell: false }
 				: { file: isWin ? "npx.cmd" : "npx", args: ["--yes", "electron", ...args], shell: isWin };

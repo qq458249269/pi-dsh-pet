@@ -48,8 +48,24 @@ curl -X POST 127.0.0.1:47653/event -H "authorization: Bearer $(pi-pet token)" \
 ```
 
 也提供免安装单文件 exe（`pi-dsh-pet-<版本>-portable.exe`），双击即可，不用 Node。
+只有 exe 也能接自己的程序：端口与 token 在 `%APPDATA%\pi-dsh-pet\port` 与
+`%APPDATA%\pi-dsh-pet\token`（右键菜单里有「复制服务地址」「打开数据文件夹」）；
+要完整的 `pi-pet status/feed/say` 命令行则用 `npm i -g pi-dsh-pet`。
 
 > 💡 首次运行需下载 Electron ≈100MB，后续启动秒开。
+
+### 不想用 CI？本地打包
+
+```sh
+npm i --no-save electron@33 electron-builder@25   # 只在打包这一步装，运行时依旧零依赖
+npm run build          # → dist/*-portable.exe（免安装单文件）+ *-x64.exe（NSIS 安装包）
+npm run build:dir      # 只出免安装目录版 dist/win-unpacked/，跑得快，适合先验证
+```
+
+CI（推 main / 手动触发 `release` workflow）走同一条链，只是多两件事：
+先用 `win-unpacked/pi-dsh-pet.exe` 真跑一次冒烟（起服务、查 `/health`、确认 asar 里的
+页面与 91 个素材读得出来），再把 exe 与源码 zip 一起挂到 release。
+发布链的约束（token 权限、跨 job 依赖）见 [DESIGN.md §10](./DESIGN.md)。
 
 宠物会出现在屏幕右下角，开始动画链。当你在 pi 里写代码或提问时，宠物会自动响应：
 

@@ -29,6 +29,12 @@ npm-debug.log*
 *.tgz
 dist/
 
+# electron-builder 的构建资源目录（图标等；空目录，electron-builder 用默认图标）
+build/
+
+# CI 生成的打包配置（extends 本地配置 + 钉住的 electron 版本；每次跑都不一样）
+electron-builder.ci.json
+
 # ── 临时/备份目录 ──
 temp/
 

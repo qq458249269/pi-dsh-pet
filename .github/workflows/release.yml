@@ -15,6 +15,11 @@ on:
         type: boolean
         default: false
 
+# ⚠️ 这一段是 release 能跑通的前提，不是可选的装饰。
+# 少了 contents:write，GITHUB_TOKEN 会被削成一个只能读的 token，发布那一步拿到的就是
+# 一个空/无权的 token，报出来的错极具误导性：
+#   "GitHub Personal Access Token is not set, neither programmatically, nor using env GH_TOKEN"
+# 看着像「忘了配 token」，实际是**权限**问题。job 里也会再写一遍，别指望继承。
 permissions:
   contents: write
 
@@ -27,9 +32,16 @@ jobs:
   version:
     name: 版本号 + 源码包
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     outputs:
       version: ${{ steps.v.outputs.version }}
       tag: ${{ steps.v.outputs.tag }}
+      # exe job 用 SHA 检出，**不用 tag**：tag 是本 job 末尾才推的，
+      # 一旦推送失败（比如 token 权限/网络），tag 根本不存在，exe job 会以
+      # "couldn't find remote ref v…" 直接挂掉 —— 于是「发不了 tag」连累「打不出 exe」。
+      # 这里传同一个 commit，exe 与源码包保证同源，且互不依赖。
+      sha: ${{ github.sha }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -99,6 +111,10 @@ jobs:
       - name: 建 tag 并推
         # dry_run 明确承诺「不建 tag」；tag push 时版本号就是 tag 本身，别重复建
         if: ${{ github.ref_type != 'tag' && !(github.event_name == 'workflow_dispatch' && inputs.dry_run == true) }}
+        # continue-on-error：推 tag 失败**不许**连累 exe。真出现过「tag 没推上去 →
+        # exe job 检出 ref 找不到 → 整个 workflow 红了、release 里什么都没有」。
+        # 推不动就在摘要里留证据，release job 会因为拿不到 tag 而明确报错。
+        continue-on-error: true
         run: |
           set -euo pipefail
           TAG="${{ steps.v.outputs.tag }}"
@@ -111,7 +127,14 @@ jobs:
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git tag -a "${TAG}" -m "release ${{ steps.v.outputs.version }}"
-          git push origin "refs/tags/${TAG}"
+          # 注意：`set -e` 下 push 失败会直接退出，下面的警告就永远打不出来。
+          # 所以失败要用 `if !` 兜住：continue-on-error 只会把 step 标黄，
+          # 不给任何人留证据，等于静默失败。
+          if ! git push origin "refs/tags/${TAG}"; then
+            echo "::warning::tag ${TAG} 推失败。exe 会照打（它按 commit SHA 检出），但 release 这一步会因拿不到 tag 而报错"
+            exit 0
+          fi
+          echo "tag ${TAG} 已推送"
 
   # ---------------------------------------------------------------- 2. 打 Windows exe
   exe:
@@ -121,11 +144,14 @@ jobs:
     # 这里换成显式判断，dry_run 才真的只跳过 exe（手动触发时）。
     if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.dry_run == true) }}
     runs-on: windows-latest
+    permissions:
+      contents: read # exe job 只需要读代码
     steps:
+      # 按 SHA 检出，不按 tag：tag 是上游 job 现推的，推失败就别让它带崩这里。
       - uses: actions/checkout@v4
         with:
-          ref: ${{ needs.version.outputs.tag }}
-          fetch-depth: 0
+          ref: ${{ needs.version.outputs.sha }}
+          fetch-depth: 1
 
       - uses: actions/setup-node@v4
         with:
@@ -139,12 +165,131 @@ jobs:
         run: |
           npm install --no-audit --no-fund --no-save --package-lock=false electron@33 electron-builder@25
 
-      # electronVersion 显式给出去，别让 builder 去猜（仓库 package.json 里没有 electron 依赖）
-      - name: 打 exe
+      # electronVersion 显式给出去，别让 builder 去猜（仓库 package.json 里没有 electron 依赖）。
+      # ⚠️ 别再用 CLI 的 `-c.electronVersion=…` 点号写法：`-c` 是 `--config` 的别名，
+      # yargs 会把 `config` 覆写成对象 → electron-builder 把**整个配置**当成
+      # {electronVersion}（appId/files/targets/productName 全丢），打出来的东西
+      # 既不是 portable 也没有我们的 files 白名单。改成生成一份带 extends 的配置文件。
+      - name: 生成打包配置（钉住 electron 版本）
+        shell: pwsh
         run: |
           $v = node -p "JSON.parse(require('fs').readFileSync('node_modules/electron/package.json','utf8')).version"
+          if (-not $v) { throw "读不到 electron 版本（node_modules/electron 没装上？）" }
+          "ELECTRON_VERSION=$v" >> $env:GITHUB_ENV
+          $cfg = @{ extends = "./electron-builder.yml"; electronVersion = $v } | ConvertTo-Json
+          # 不带 BOM 写：JSON.parse 遇到 BOM 直接报错
+          [IO.File]::WriteAllText("$PWD\electron-builder.ci.json", $cfg, (New-Object Text.UTF8Encoding $false))
           Write-Host "electron $v"
-          npx electron-builder --win --config electron-builder.yml "-c.electronVersion=$v"
+          Get-Content electron-builder.ci.json
+
+      # --dir：先出「免安装目录版」。它是 portable / nsis 的中间产物，
+      # 也是唯一能**当场真跑一次**的产物（便携单文件会自解压到临时目录，不好验证）。
+      - name: 打目录版（中间产物，冒烟用）
+        run: npx electron-builder --win --dir --publish never --config electron-builder.ci.json
+
+      # 冒烟：确认打出来的东西真的能独立跑（不需要 Node / 全局安装 / 仓库源码）。
+      # 只起服务不起窗（窗要开 GUI，runner 上没必要），用临时 home 免得碰到任何真实状态，
+      # 验完立刻杀掉并清理。挂了就写进摘要，但不拦着产物继续出（不因为 runner 的
+      # 图形环境把整次发布卡死）。
+      - name: 冒烟：真跑一次目录版 exe
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $exe = Join-Path $PWD "dist\win-unpacked\pi-dsh-pet.exe"
+          if (-not (Test-Path $exe)) { throw "没找到 $exe" }
+
+          $home_ = Join-Path $PWD "dist\smoke-home"
+          $out = Join-Path $PWD "dist\smoke.out.log"
+          $err = Join-Path $PWD "dist\smoke.err.log"
+          Remove-Item -Recurse -Force $home_ -ErrorAction SilentlyContinue
+          $env:PI_PET_HOME = $home_
+
+          $p = Start-Process -FilePath $exe -ArgumentList "--no-window" -PassThru `
+                 -WindowStyle Hidden -RedirectStandardOutput $out -RedirectStandardError $err
+          $ok = $false
+          $note = ""
+          try {
+            $port = 0
+            for ($i = 0; $i -lt 60; $i++) {
+              Start-Sleep -Milliseconds 500
+              $pf = Join-Path $home_ "port"
+              if (Test-Path $pf) {
+                $port = [int]((Get-Content $pf -Raw).Trim())
+                if ($port -gt 0) { break }
+              }
+            }
+            if ($port -le 0) { throw "exe 起来了但 40s 内没写端口文件（home=$home_）" }
+
+            $base = "http://127.0.0.1:$port"
+            # 用 curl.exe 而不是 Invoke-WebRequest / Invoke-RestMethod：
+            #   - Windows PowerShell 5.1 的 IWR 拿 IE 引擎解析 HTML，本项目的
+            #     content-type 不带 charset → 直接抛 NullReferenceException（假失败）；
+            #   - 机器上有系统代理时，IWR 会走代理去连 127.0.0.1（连不通）。
+            # curl.exe 显式 --noproxy '*'，行为在 5.1/7 上都一样。
+            $code = curl.exe -s -o NUL -w "%{http_code}" --noproxy "*" --max-time 5 "$base/health"
+            if ($code -ne "200") { throw "/health 返回 $code" }
+            $h = (curl.exe -s --noproxy "*" --max-time 5 "$base/health" | Out-String) | ConvertFrom-Json
+            if ($h.role -ne "pi-pet-host") { throw "/health 的 role 不对：$($h.role)" }
+            # 注意 /health 的 version 是**协议版本**（1），不是应用版本号 ——
+            # 应用版本靠产物文件名验（见「列产物」那一步）
+            if (-not $h.version) { throw "/health 没有 version 字段" }
+
+            # 窗页面 + 素材都在 app.asar 里，顺手确认能从 asar 里读出来
+            $html = curl.exe -s --noproxy "*" --max-time 5 "$base/" | Out-String
+            if ($html -notmatch "pet") { throw "首页不像 pet.html" }
+            $cfg = curl.exe -s --noproxy "*" --max-time 5 "$base/config.jsonc" | Out-String
+            if ($cfg -notmatch "idle") { throw "config.jsonc 读不出来" }
+
+            $ok = $true
+            $note = "port=$port role=$($h.role) proto=$($h.version) 服务正常"
+            Write-Host "smoke ok: $note"
+          } catch {
+            $note = $_.Exception.Message
+            Write-Host "smoke failed: $note"
+          } finally {
+            taskkill /pid $p.Id /t /f 2>&1 | Out-Null
+            Start-Sleep -Seconds 1
+            foreach ($f in @($out, $err)) {
+              if ((Test-Path $f) -and (Get-Item $f).Length -gt 0) {
+                Write-Host "--- $(Split-Path $f -Leaf) ---"
+                Get-Content $f -Tail 40
+              }
+            }
+            Remove-Item -Recurse -Force $home_ -ErrorAction SilentlyContinue
+          }
+
+          $mark = if ($ok) { "PASS" } else { "FAIL" }
+          $line = "## 打包冒烟（dist\win-unpacked\pi-dsh-pet.exe）`n**$mark** — $note`n版本 ${{ needs.version.outputs.version }}`n"
+          # 用单行拼接而不是 here-string：here-string 的结束符 "@ 必须顶格，
+          # 放进 YAML 缩进里很容易写歪，报错还完全看不出是 YAML 的锅。
+          # $env:GITHUB_STEP_SUMMARY 理论上一定有，但 $ErrorActionPreference=Stop 下
+          # 它一旦为空，Add-Content 会把**整步**判死（包括已经 PASS 的冒烟），所以先判再写。
+          if ($env:GITHUB_STEP_SUMMARY) { Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value $line }
+          Write-Host $line
+
+          if (-not $ok) {
+            Write-Error "冒烟没过：$note（产物仍会照常上传，release 里见 exe）"
+          }
+
+      - name: 打 exe（portable 单文件 + nsis 安装包）
+        run: npx electron-builder --win --publish never --config electron-builder.ci.json
+
+      - name: 列产物
+        shell: pwsh
+        run: |
+          Get-ChildItem dist -File | Select-Object Name, @{n='MB';e={[math]::Round($_.Length/1MB,1)}} |
+            Format-Table -AutoSize | Out-String | Write-Host
+          $portable = Get-ChildItem dist -Filter *portable.exe -ErrorAction SilentlyContinue
+          if (-not $portable) { throw "没打出 portable 单文件 exe（dist 里没有 *portable.exe）" }
+          if (-not (Test-Path dist\win-unpacked\pi-dsh-pet.exe)) { throw "没打出 win-unpacked 目录版" }
+          # 产物名里必须带刚算出来的版本号：证明 set-version → electron-builder 这条链是通的
+          $ver = "${{ needs.version.outputs.version }}"
+          if ($portable.Name -notlike "*$ver*") {
+            throw "portable 产物名里没有版本号 $ver（实际：$($portable.Name)）"
+          }
+          $portable | Select-Object Name, @{n='MB';e={[math]::Round($_.Length/1MB,1)}} |
+            Format-Table -AutoSize | Out-String | Write-Host
 
       - name: 传产物
         uses: actions/upload-artifact@v4
@@ -163,25 +308,69 @@ jobs:
     # exe 失败也照样发（至少把源码放出去）；dry_run 则一律不发
     if: ${{ always() && needs.version.result == 'success' && !(github.event_name == 'workflow_dispatch' && inputs.dry_run == true) }}
     runs-on: ubuntu-latest
+    permissions:
+      contents: write # 关键：发 release 必须显式给，缺了就是那个「token is not set」的错
+    env:
+      # gh CLI 读 GH_TOKEN，octokit / 任何 action 读 GITHUB_TOKEN —— 两个都给。
+      # secrets.GH_PAT 是留给「GITHUB_TOKEN 被组织策略限制」时的后门，没有就回落到默认 token。
+      GH_TOKEN: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
+      GITHUB_TOKEN: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
+      TAG: ${{ needs.version.outputs.tag }}
+      VERSION: ${{ needs.version.outputs.version }}
     steps:
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
+          merge-multiple: true
 
-      - name: 组装 release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ needs.version.outputs.tag }}
-          name: pi-dsh-pet ${{ needs.version.outputs.version }}
-          body: |
-            版本 `${{ needs.version.outputs.version }}`（规则 `YYYY.MM.DD.NNNN`）
+      - name: 校验 token（别让「token 是空的」再伪装成别的错）
+        run: |
+          set -euo pipefail
+          if [ -z "${GH_TOKEN}" ]; then
+            echo "::error::GH_TOKEN 是空的。检查：① 顶层 permissions: contents: write ② 组织是否限制了 GITHUB_TOKEN（那就配 secrets.GH_PAT）"
+            exit 1
+          fi
+          echo "token 长度 ${#GH_TOKEN}"
+          gh auth status 2>&1 | sed 's/[A-Za-z0-9_-]\{20,\}/***/g' || true
 
-            - 📦 源码：`*source.zip`
-            - 🖥 独立 exe（Windows x64，免安装）：`*portable.exe`
-            - 💾 安装包（带快捷方式）：`*x64.exe`
+      - name: 写 release 说明
+        run: |
+          set -euo pipefail
+          cat > notes.md <<EOF
+          版本 \`${VERSION}\`（规则 \`YYYY.MM.DD.NNNN\`）
 
-            用法：`pi-dsh-pet.exe` 双击即可（自带服务+窗）；pi/dsh 侧用 `pi-pet start` 或
-            让 pi 扩展自动拉起，端口/token 见 `pi-pet status`。
-          files: |
-            artifacts/**/*
-          fail_on_unmatched_files: false
+          | 文件 | 说明 |
+          |------|------|
+          | \`*portable.exe\` | 免安装单文件，**双击即用**（推荐） |
+          | \`*x64.exe\` | NSIS 安装包，带桌面/开始菜单快捷方式 |
+          | \`*source.zip\` | 源码 |
+
+          用法：\`pi-dsh-pet.exe\` 双击即可（自带服务+窗，不需要 Node）。
+          pi / dsh 侧用 \`pi-pet start\`，或让 pi 扩展自动拉起；
+          端口/token 见 \`pi-pet status\`（数据目录：%APPDATA%\\pi-dsh-pet）。
+          EOF
+          cat notes.md
+
+      # 用 gh CLI 而不是第三方 action：少一层「token 从哪来」的玄学，报错也更直白。
+      - name: 发 Release
+        run: |
+          set -euo pipefail
+          # exe job 挂了也发：只要有文件就传（fail_on_unmatched_files 那套）
+          mapfile -d '' FILES < <(find artifacts -type f -print0 | sort -z)
+          if [ "${#FILES[@]}" -eq 0 ]; then
+            echo "::error::一个产物都没有，exe job 应该是失败了——看它那一步的日志"
+            exit 1
+          fi
+          echo "待发布 ${#FILES[@]} 个文件："
+          printf '  %s\n' "${FILES[@]}"
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "release $TAG 已存在 → 覆盖同名资产"
+            gh release upload "$TAG" "${FILES[@]}" --clobber
+            gh release edit "$TAG" --title "pi-dsh-pet ${VERSION}" --notes-file notes.md
+          else
+            gh release create "$TAG" "${FILES[@]}" --verify-tag \
+              --title "pi-dsh-pet ${VERSION}" --notes-file notes.md
+          fi
+
+          echo "发布完成：$(gh release view "$TAG" --json url -q .url)"

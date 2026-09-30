@@ -384,7 +384,7 @@ async function cmdStart(flags) {
 			return keepAlive(res);
 		}
 		if (res.reason === "no-ws") {
-			out("✗ 缺 ws 依赖：在包目录里跑 npm install");
+			out("✗ WebSocket 服务端不可用（app/wsserver.cjs 加载失败）");
 			return 3;
 		}
 		out(`✗ 起不来：${res.reason}${res.error ? `（${res.error}）` : ""}`);
@@ -632,10 +632,14 @@ async function cmdDoctor() {
 	ok("素材目录", path.join(PKG_ROOT, "assets", "thumb"), fs.existsSync(path.join(PKG_ROOT, "assets", "thumb")));
 	ok("配置", path.join(PKG_ROOT, "assets", "config.jsonc"), fs.existsSync(path.join(PKG_ROOT, "assets", "config.jsonc")));
 	try {
-		require.resolve("ws");
-		ok("ws 依赖", "可解析", true);
+		// 零依赖：WebSocket 服务端是自带的（app/wsserver.cjs）。以前这里查的是 `ws` 包，
+		// 那是宿主独立化之前的遗留 —— 打完 exe 的目录里根本没有 node_modules，
+		// doctor 会在成品里永远报「✗ ws 依赖不可解析」，把自检的结论带歪。
+		const { attachWebSocket } = require("./wsserver.cjs");
+		const okWs = typeof attachWebSocket === "function";
+		ok("WebSocket 服务端", okWs ? "内置（零依赖）" : "attachWebSocket 不是函数", okWs);
 	} catch (err) {
-		ok("ws 依赖", `不可解析（${err.message}）—— 在包目录里 npm install`, false);
+		ok("WebSocket 服务端", `不可用（${err.message}）`, false);
 	}
 	try {
 		const { resolveElectronBin } = require("./window.cjs");

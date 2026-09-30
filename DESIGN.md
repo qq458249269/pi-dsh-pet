@@ -217,10 +217,44 @@ pi-pet config           # 看/改 config.json
 10. **暂停要只挡状态类**。`shutdown` / `add_pet` 不能一起挡，否则右键菜单会失灵。
 11. **`agent_idle` 之后要重算**。恢复响应（`resume`）时必须立刻 `drive()` 一次，
     否则要等下一个事件宠物才动。
+12. **CI 报「token 没配」时先看 permissions，别先去建 PAT。** `contents: write` 缺失
+    会被包装成「PAT is not set」这种完全指错方向的错（见 §10.1）。
+13. **CI 的 job 之间别用「上游现推的 tag」当依赖。** tag 推失败 → 下游 checkout 失败
+    → 整个发布红、release 里什么都没有。跨 job 传 commit SHA，tag 只在最后当结果用。
+14. **打包后不能再查 npm 依赖。** `doctor` 曾经在成品里查 `ws`，而 exe 目录根本没有
+    `node_modules`，于是永远报「✗ 依赖不可解析」。自检项必须对着「打进包里的东西」写。
 
 ## 10. 版本号与发布
 
-规则 `YYYY.MM.DD.NNNN`（UTC 日期 + 当天第几个流水号），例：`2026.09.30.0001`。
-`.github/workflows/release.yml` 在推 main / 手动触发时自动算号、回写 `package.json`、
-打 source code zip、建 `v<版本>` tag；Windows job 用 electron-builder 出
-**单文件 portable exe** + NSIS 安装包（两个都是 Windows x64）。
+规则 `YYYY.MM.DD.NNNN`（UTC 日期 + 当天第几个流水号），例：`2026.09.30.0001`。三个 job：`version`（算号 + 跑测试 + source zip + 建 tag）→ `exe`（Windows 打 portable + nsis）→ `release`（挂资产、发说明）。
+
+### 10.1 打包链上的三个硬约束
+
+1. **`permissions: contents: write` 不能省。** 缺了它，`GITHUB_TOKEN` 会被削成一个只读的
+   token，发布那一步报出来的却是
+   `GitHub Personal Access Token is not set, neither programmatically, nor using env "GH_TOKEN"`
+   —— 一句完全指错方向的错（看着像「忘配 token」，实际是「权限被削空」）。
+   顶层写一遍还不够，`release` job 里再写一遍。
+2. **发布用 `gh` CLI + `GH_TOKEN`，不引第三方 action。** runner 上自带 `gh`，
+   少一层「token 从哪来」的玄学，报错也直白。`GH_PAT`（若配了）优先于默认 token，
+   给「组织限制了 GITHUB_TOKEN」的后门。
+3. **exe job 按 commit SHA 检出，不按 tag。** tag 是上游 job 末尾现推的，
+   推失败（权限/网络）就会以 `couldn't find remote ref v…` 把整个发布拖红。
+   源码包和 exe 因此完全解耦；推 tag 那步 `continue-on-error`：
+   推不动就在摘要里留证据，绝不连累 exe。
+
+### 10.2 产物长什么样
+
+`version` job 出 `*source.zip`；`exe` job 先 `--dir` 出 `dist/win-unpacked/`
+（唯一能**当场真跑一次**的产物），冒烟通过后再出 `*-portable.exe`（免安装单文件）
+与 `*-x64.exe`（NSIS 安装包）。冒烟只起服务不起窗（`--no-window`），用临时
+`PI_PET_HOME`，验 `port` 文件 + `/health` 的 `role` + `/` 与 `/config.jsonc`
+能从 `app.asar` 里读出来，验完 taskkill 清理；它 `continue-on-error`，
+挂了写进摘要但不拦产物（别因为 runner 的图形环境卡死整次发布）。
+
+打包后运行期的两个前提：`app/electron.cjs` 就是 Electron 主进程
+（窗 = 同一个 exe 的第二个实例，`--pi-pet-window <port>`）；
+`pi/assets/*` 与 `assets/thumb/*` 虽然打进 asar，但**由本机的 HTTP 服务**读给
+渲染进程（`/pet.html`、`/thumb/*.webm`），不依赖 Chromium 直接读 asar 里的媒体。
+`npm run build` / `npm run build:dir` 是本地等价物（`npx electron-builder`），
+仓库本身仍然零运行时依赖。
