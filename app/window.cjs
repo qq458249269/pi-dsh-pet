@@ -42,6 +42,35 @@ function electronExe(distDir) {
 	return path.join(distDir, process.platform === "win32" ? "electron.exe" : "electron");
 }
 
+/**
+ * 拉窗时的 cwd。**打包版踩过的坑，别改回去**：
+ * `PKG_ROOT = path.resolve(__dirname, "..")`，而打包后 `__dirname` 落在
+ * `<exe 目录>\resources\app.asar\app` 里，于是 PKG_ROOT = `<…>\resources\app.asar`
+ * ——**那是一个文件，不是目录**。把它当 cwd 交给 spawn，Windows 的 CreateProcess 报
+ * ERROR_PATH_NOT_FOUND，Node 映射成 `ENOENT`，日志里就变成极具误导的一句
+ *   `electron 启动出错：spawn C:\…\Temp\…\pi-dsh-pet.exe ENOENT`
+ * exe 明明在盘上、也真的在跑（gpu / network 子进程就是它起的），只有窗永远起不来，
+ * keepAlive 还不依不饶每 20s 重试一次（restarts 一路涨）。**exe 找不到才是 ENOENT，
+ * cwd 不是目录也是 ENOENT**，两者必须分开说。
+ *
+ * 修法：cwd 只在 pkgRoot 真的是目录时给；否则退到它的上一层（打包版 = `resources`，
+ * 实测可跑）；再不行就不给 cwd（子进程继承宿主当前目录），绝不把「不是目录的东西」传下去。
+ *
+ * pkgRoot 做成可注入的形参（默认真 PKG_ROOT），是为了让单测能在**不打包**的情况下
+ * 模拟「PKG_ROOT 是 app.asar 那个文件」的成品形态 —— 这正是当初漏网的场景：
+ * 开发期一切正常，只有用户双击 exe 才炸，CI 里的 `--no-window` 冒烟照不到。
+ */
+function launchCwd(pkgRoot = PKG_ROOT) {
+	for (const c of [pkgRoot, path.dirname(pkgRoot)]) {
+		try {
+			if (fs.existsSync(c) && fs.statSync(c).isDirectory()) return c;
+		} catch {
+			/* 试下一个 */
+		}
+	}
+	return undefined;
+}
+
 /** npm 的 cache 目录：环境变量 → 各级 .npmrc 的 cache= → 平台默认值。**刻意不 spawn npm**。 */
 function npmCacheDirs() {
 	const dirs = [];
@@ -173,9 +202,10 @@ function createWindowManager(ctx) {
 		}
 
 		const debug = process.env.PI_PET_DEBUG === "1";
+		const cwd = launchCwd();
 		try {
 			child = spawn(spec.file, spec.args, {
-				cwd: PKG_ROOT,
+				cwd,
 				env,
 				// PI_PET_DEBUG=1 时把窗的输出接到宿主自己的 stdout/stderr：
 				// 平时 stdio 是 ignore（不弹控制台），代价是渲染进程报什么都没人看得见，
@@ -198,7 +228,13 @@ function createWindowManager(ctx) {
 		log(`拉起窗：pid ${pid} → http://127.0.0.1:${port}（size=${size || "normal"}）`);
 
 		child.on("error", (err) => {
-			log(`electron 启动出错：${err.message}`);
+			// ENOENT 两种含义：exe 不在，或 cwd 不是目录（打包版的 PKG_ROOT 就是 app.asar）。
+			// 补一句 cwd 才能一眼看出是哪一种，别再对着一个明明在盘上的 exe 猜。
+			const hint =
+				err.code === "ENOENT" && cwd
+					? `（cwd=${cwd}；若 exe 明明在盘上，多半是 cwd 指向了 app.asar 这类**文件**）`
+					: "";
+			log(`electron 启动出错：${err.message}${hint}`);
 			if (pid) ctx.onWindowChange({ windowPid: pid, windowState: "error" });
 		});
 		child.on("exit", (code) => {
@@ -278,4 +314,4 @@ function createWindowManager(ctx) {
 	};
 }
 
-module.exports = { createWindowManager, resolveElectronBin, WINDOW_GRACE_MS, WINDOW_LOST_MS, RELAUNCH_MIN_GAP_MS };
+module.exports = { createWindowManager, resolveElectronBin, launchCwd, WINDOW_GRACE_MS, WINDOW_LOST_MS, RELAUNCH_MIN_GAP_MS };

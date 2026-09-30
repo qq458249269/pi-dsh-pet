@@ -9,7 +9,7 @@
  */
 
 import { spawn } from "node:child_process";
-import { mkdtempSync, rmSync, readFileSync, existsSync } from "node:fs";
+import { mkdtempSync, rmSync, readFileSync, existsSync, statSync } from "node:fs";
 import net from "node:net";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
@@ -101,6 +101,32 @@ check("`feed tool_call bash --text x`：tool 与 text 各自到位", (() => {
 	return r.positional[2] === "bash" && r.flags.text === "跑一下";
 })());
 check("多词位置参数保留（feed say）", eq(pa(["feed", "say", "多", "个", "词"]).positional, ["feed", "say", "多", "个", "词"]));
+
+// ---------------------------------------------------------------- 拉窗的 cwd
+// 这条不是洁癖，是「双击 exe 只出服务不出窗」的**唯一**根因：
+// 打包后 paths.cjs 的 PKG_ROOT = <exe目录>\resources\app.asar，而 asar 是**文件**；
+// 把它当 spawn 的 cwd，Windows CreateProcess 回 ERROR_PATH_NOT_FOUND，Node 翻译成
+// ENOENT，日志却长得像「exe 找不到」（exe 明明在跑，gpu/network 子进程就是它起的）。
+// CI 的 `--no-window` 冒烟碰不到窗，所以只能在这里把「成品形态」钉住。
+console.log("\n拉窗的工作目录（打包版的 ENOENT 坑）…");
+const { launchCwd } = await import(pathToFileURL(join(ROOT, "app", "window.cjs")).href);
+{
+	const isDir = (p) => {
+		try {
+			return existsSync(p) && statSync(p).isDirectory();
+		} catch {
+			return false;
+		}
+	};
+	// ① 开发态：PKG_ROOT 是仓库根，原样返回
+	check("开发态 cwd = 仓库根（是目录）", launchCwd() === ROOT && isDir(launchCwd()));
+	// ② 成品态：拿一个**真实存在的文件**冒充 app.asar，必须退到真目录
+	const fakeAsar = launchCwd(join(ROOT, "package.json"));
+	check("PKG_ROOT 是文件（打包版的 app.asar）→ 退到真目录", isDir(fakeAsar), String(fakeAsar));
+	check("退到的目录不是那个文件本身", fakeAsar !== join(ROOT, "package.json"));
+	// ③ 连上一层都不存在时，宁可不给 cwd（undefined）也不硬塞一个坏路径
+	check("完全不存在 → 不给 cwd（undefined）", launchCwd(join(ROOT, "没有这个目录", "app.asar")) === undefined);
+}
 
 // ---------------------------------------------------------------- 互斥：外部宿主
 // 先看看本机有没有别的宿主（尤其是旧版 pi 扩展起的那个）：默认必须拒绝共存。

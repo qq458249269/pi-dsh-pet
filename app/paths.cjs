@@ -211,6 +211,25 @@ function writeCtrl(patch) {
 
 const LOG_MAX_LINES = 400;
 
+/**
+ * stderr 还能不能写。
+ *
+ * 这里的坑是**异步**的：`process.stderr.write()` 在管道那头断了（拉起它的人先退出了、
+ * `| head` 提前收口、宿主被 stop 掉）时，**不抛同步异常**，而是在 socket 上异步发
+ * `EPIPE`。原来的 `try/catch` 一个都抓不住，于是：
+ *   某次 uncaughtException → handler 里 log() → 写 stderr → EPIPE 异步事件
+ *   → 又进 uncaughtException → handler 里又 log() → 又 EPIPE → ……**无限自触发**。
+ * 实测后果：宿主 CPU 打满、log.txt 被 EPIPE 栈刷掉 400 行（真正的原因第一条就被挤没了），
+ * 而服务其实还活着 —— 这种「日志把进程搞死」的失败最难查，所以单独兜住：
+ * 挂一个 'error' 监听把断掉的 stderr 标记为不可写，之后一律只写 log.txt。
+ */
+let stderrWritable = true;
+if (process.stderr && typeof process.stderr.on === "function") {
+	process.stderr.on("error", () => {
+		stderrWritable = false;
+	});
+}
+
 function log(...parts) {
 	const line = `[pi-pet ${new Date().toISOString()}] ${parts.join(" ")}`;
 	try {
@@ -224,10 +243,12 @@ function log(...parts) {
 		/* 写不上日志不影响服务 */
 	}
 	try {
-		// stdio 被 ignore 时这行会失败，属正常
-		process.stderr.write(`${line}\n`);
+		// stdio 被 ignore 时这行会失败，属正常；管道断了就当没有 stderr
+		if (stderrWritable && process.stderr && process.stderr.writable && !process.stderr.destroyed) {
+			process.stderr.write(`${line}\n`);
+		}
 	} catch {
-		/* ignore */
+		stderrWritable = false;
 	}
 	return line;
 }

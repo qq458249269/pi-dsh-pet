@@ -247,6 +247,8 @@ async function start(options = {}) {
 
 	/* ---- 4. 监听 ---- */
 	let port;
+	/** uncaughtException 累计次数（只给 handler 里的“闭嘴上限”用，见下方监听器）。 */
+	let fatalLogged = 0;
 	try {
 		port = await listen(server, Number(options.port) || cfg.port);
 	} catch (err) {
@@ -320,7 +322,11 @@ async function start(options = {}) {
 		}
 	});
 	process.on("uncaughtException", (err) => {
-		// 服务已经起来了就别自杀，只记一笔（窗还能继续用）
+		// 服务已经起来了就别自杀，只记一笔（窗还能继续用）。
+		// 但**这个处理器自己再抛**就变成自触发死循环（log → 写 stderr → 异步 EPIPE → 又进来），
+		// 所以加个上限：前 20 条照记，之后闭嘴（否则日志会被同一份栈刷满，真因第一条反而没了）。
+		fatalLogged++;
+		if (fatalLogged > 20) return;
 		log(`未捕获异常：${err && err.stack ? err.stack : err}`);
 	});
 
