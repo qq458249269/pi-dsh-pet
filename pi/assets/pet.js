@@ -30,6 +30,36 @@
       .trim();
   }
 
+  /**
+   * 节奏参数（可选，写在 config.jsonc 的 timing 里）。写错/漏写都回落到默认值 ——
+   * 手感参数不值得为它把整扇窗搞崩（assertClientConfig 抛错 = 宠物直接不出现）。
+   *
+   *   minPlayMs   一段动画**最少**播多久才允许被别人切走（毫秒）
+   *   idleDwellMs 待机动画播完之后原地续播多久再由链子往下抽（毫秒）
+   *
+   * 这两个数是同一件事的两头：minPlayMs 治「动画没演完就被切一半」，
+   * idleDwellMs 治「待机太短，一口气连着演、看着一直忙个不停」。
+   */
+  var TIMING_DEFAULT = { minPlayMs: 2600, idleDwellMs: 6000 };
+
+  function readTiming(raw) {
+    var t = raw && typeof raw === "object" ? raw : {};
+    function num(key, def) {
+      var v = Number(t[key]);
+      if (!isFinite(v) || v < 0) return def;
+      return Math.min(60000, Math.round(v));
+    }
+    return { minPlayMs: num("minPlayMs", TIMING_DEFAULT.minPlayMs), idleDwellMs: num("idleDwellMs", TIMING_DEFAULT.idleDwellMs) };
+  }
+
+  /** 窗里到处都要问这两个数（config 可能还没加载完，所以都带兜底） */
+  function minPlayMs() {
+    return config && config.timing ? config.timing.minPlayMs : TIMING_DEFAULT.minPlayMs;
+  }
+  function idleDwellMs() {
+    return config && config.timing ? config.timing.idleDwellMs : TIMING_DEFAULT.idleDwellMs;
+  }
+
   var CORNERS = ["top-left", "top-right", "bottom-left", "bottom-right"];
   var CORNER_SET = {};
   CORNERS.forEach(function (c) { CORNER_SET[c] = true; });
@@ -79,7 +109,7 @@
       if (!isFinite(v) || v < 0) throw new Error("animationWeights." + k + " invalid");
     });
 
-    return { pets: pets, animations: a, animationWeights: w };
+    return { pets: pets, animations: a, animationWeights: w, timing: readTiming(raw.timing) };
   }
 
   // ========================================================================
@@ -318,6 +348,15 @@
     this.clickFromOverride = false;  // flag: click happened during override
     this.hovering = false;           // 鼠标是否在命中框里
     this.hoverAnim = "";             // 本次 hover 放的动画名
+    // 节奏三件套：playing=屏幕上真正在放的那一段，playedAt=它开始播的时刻。
+    // ⚠️ 判定「屏幕上是什么」一律用 playing，别用 self.anim —— anim 是**链子刚决定**的名字，
+    // 切换被门禁挡下来的时候两者会差一段（那时 anim 已经是下一个了，屏幕还在放上一个）。
+    this.playing = "";               // 正在显示的动画名
+    this.playedAt = 0;               // playing 开始播放的时刻（0 = 还没播过）
+    this.queued = null;              // 被最小播放时长挡下来的切换请求 {anim, once}
+    this.queuedTimer = null;
+    this.dwellTimer = null;          // 待机停留计时器
+    this.destroyed = false;
 
     // ---- Refs ----
     this.gen = 0;
@@ -419,6 +458,10 @@
     /**
      * 鼠标移入 = 打招呼（hover 动画），移出 = 收回。
      * 不打断：拖拽中 / 正在响应 agent（override）/ 正在放点击回应。
+     *
+     * ⚠️ 移入是**用户自己动的**，立刻播（不然打招呼要等两秒才反应过来）；
+     * 移出是**被动**的，走门禁 —— 不许把屏幕上正演到一半的动作砍掉（老实现就是
+     * 一移出鼠标立刻换回待机动画，动画没演完就被切掉，观感上就是「待机太短」）。
      */
     this.setHover = function (on) {
       if (self.hovering === on) return;
@@ -428,17 +471,18 @@
 
       if (on) {
         if (dragState.active || self.dragging || self.currentOverrideAnim || self.clickFromOverride) return;
-        if (config.animations.clicks.indexOf(self.anim) >= 0 || hover.indexOf(self.anim) >= 0) return;
+        if (config.animations.clicks.indexOf(self.playing) >= 0 || hover.indexOf(self.playing) >= 0) return;
+        self.stopDwell();
         self.stopMove();
         self.hoverAnim = pick(hover, self.anim);
         self.anim = self.hoverAnim;
         // once=false：hover 不算「一次性反应动画」，所以不会把左键点击也一并禁掉
         self.once = false;
         self.seq++;
-        self.switchTo(self.hoverAnim, true); // 播一遍就好，不循环
+        self.switchTo(self.hoverAnim, true, { force: true }); // 播一遍就好，不循环
       } else {
-        // 还在放 hover 就立刻回待机，别让打完招呼的姿势挂在屏幕上
-        if (self.hoverAnim && self.anim === self.hoverAnim && !self.currentOverrideAnim && !dragState.active) {
+        // 还在放 hover 就回待机，但**别从中间砍**：门禁会等这一段放完再换
+        if (self.hoverAnim && self.playing === self.hoverAnim && !self.currentOverrideAnim && !dragState.active) {
           self.hoverAnim = "";
           if (config.animations.idle.length) {
             self.anim = pick(config.animations.idle, self.anim);
@@ -626,8 +670,28 @@
     }
 
     // ---- Switch to animation (dual buffer crossfade) ----
-    this.switchTo = function (next, nextOnce) {
+    //
+    // ⚠️ 门禁：一段动画**没播够 minPlayMs 就不许被别人切走**（用户自己动手除外）。
+    // 待机时把一段动作从中间砍掉的全是**被动**切换 —— 鼠标扫过宠物（hover 移出就回待机）、
+    // 拖拽落点回待机、待机链重抽。老实现直接换 src，正在播的那段当场消失，屏幕上就是
+    // 「动画还没执行完就跳下一个」。现在这些请求先排队（queueSwitch），等当前这段播完
+    // （ended）或播够 minPlayMs 再切；只有用户自己的动作（点一下 / 拖起来 / 拖完落回待机）
+    // 和状态驱动的 override 才立刻打断 —— 打断本来就是它们的本意。
+    this.switchTo = function (next, nextOnce, opts) {
       if (!next) return;
+      var force = !!(opts && opts.force);
+      if (!force && !self.canInterrupt()) {
+        self.queueSwitch(next, nextOnce);
+        return;
+      }
+      // 同一段还在放 → 别从头重播（重播 = 跳回第一帧，看着就是「闪了一下」）。
+      // ⚠️ 只对**一次性**动画生效：循环中的（override / 待机停留）跳过一次就会永远卡在
+      // 那一条里 —— 它的 onended 是 null，链子再也接不上（宠物再也不动了）。
+      if (!force && next === self.playing && !self.pending) {
+        var cur = self.frontIdx === 0 ? videoA : videoB;
+        if (!cur.ended && !cur.loop) return;
+      }
+      self.clearQueue();
       var pending = self.pending;
       if (pending && pending.anim === next && pending.once === nextOnce) return;
       var gen = ++self.gen;
@@ -645,12 +709,96 @@
         old.classList.remove("is-front");
         self.frontIdx = self.frontIdx === 0 ? 1 : 0;
         self.pending = null;
+        self.playing = next;   // 屏幕上真正在放的（判定「演到哪了」只看它）
+        self.playedAt = Date.now();
         target.style.transform = self.facingRef === "right" ? "scaleX(-1)" : "";
         target.play().catch(function () {});
         if (self.pendingMove) self.startMoveDrive(target);
       };
       target.addEventListener("loadeddata", onReady);
       if (target.readyState >= 2) onReady();
+    };
+
+    /** 现在允许把屏幕上这一段切走吗？ */
+    this.canInterrupt = function () {
+      if (!self.playing || !self.playedAt) return true; // 还没开始播 / 什么都没播
+      if (self.currentOverrideAnim) return true; // 状态帧驱动的 override 必须立刻响应
+      if (dragState.active || self.dragging) return true; // 拖拽要跟手
+      if (self.dwellTimer) return true; // 待机停留中：这一轮本来就播完了
+      var front = self.frontIdx === 0 ? videoA : videoB;
+      if (front.ended) return true; // 已经放完，正等着切下一个
+      return Date.now() - self.playedAt >= minPlayMs();
+    };
+
+    /** 切不动就先记着：等当前这段放完（或播够 minPlayMs）再切，不打断它。 */
+    this.queueSwitch = function (anim, once) {
+      if (self.destroyed) return;
+      if (self.queued && self.queued.anim === anim && self.queued.once === once) {
+        if (self.queuedTimer) return;
+      } else {
+        self.queued = { anim: anim, once: once };
+      }
+      if (self.queuedTimer) clearTimeout(self.queuedTimer);
+      var left = Math.max(16, minPlayMs() - (Date.now() - self.playedAt));
+      self.queuedTimer = setTimeout(function () {
+        self.queuedTimer = null;
+        var q = self.queued;
+        self.queued = null;
+        if (!q || self.destroyed) return;
+        if (dragState.active || self.dragging || self.currentOverrideAnim) return; // 期间被别的事接管了，丢弃
+        self.switchTo(q.anim, q.once);
+      }, left);
+    };
+
+    this.clearQueue = function () {
+      self.queued = null;
+      if (self.queuedTimer) {
+        clearTimeout(self.queuedTimer);
+        self.queuedTimer = null;
+      }
+    };
+
+    // ---- 待机停留：待机段放完之后别急着抽下一个 ----
+    // 链子的权重是 idle 10 / turn 5 / move 5 / action 80（见 assets/config.jsonc），
+    // 也就是「一段待机呼吸刚结束就有 90% 概率跳去演随机动作」—— 屏幕上的宠物几乎
+    // 没有真正停下来的时候，观感就是「待机时间太短」。这里让待机那一段原地续播
+    // idleDwellMs 再往下走；期间用户一动（点/拖/状态帧）立刻收摊。
+    this.canDwell = function (name) {
+      if (self.currentOverrideAnim || dragState.active || self.dragging) return false;
+      if (idleDwellMs() <= 0) return false;
+      return config.animations.idle.indexOf(name) >= 0;
+    };
+
+    this.startDwell = function (name) {
+      if (self.destroyed) return;
+      if (self.dwellTimer) clearTimeout(self.dwellTimer);
+      self.anim = name;
+      self.once = false; // 停留期间循环放
+      // 直接让**当前这一条**视频继续循环，不换 src —— 换 src 会从第一帧重来，
+      // 那又是一次「跳回去」。待机呼吸这类素材本来就是循环片，续播看不出接缝。
+      var front = self.frontIdx === 0 ? videoA : videoB;
+      try {
+        front.loop = true;
+        front.onended = null;
+        var p = front.play();
+        if (p && p.catch) p.catch(function () {});
+      } catch (e) {
+        /* 续播失败也别把链子卡住：下面的计时器照样接上 */
+      }
+      self.playedAt = Date.now();
+      self.dwellTimer = setTimeout(function () {
+        self.dwellTimer = null;
+        if (self.destroyed || self.currentOverrideAnim || dragState.active || self.dragging) return;
+        self.once = true;
+        self.seq++;
+        self.pickNext();
+      }, idleDwellMs());
+    };
+
+    this.stopDwell = function () {
+      if (!self.dwellTimer) return;
+      clearTimeout(self.dwellTimer);
+      self.dwellTimer = null;
     };
 
     // ---- Animation chain: pick next ----
@@ -692,23 +840,30 @@
     var handleEnded = function () {
       var anims = config.animations;
       if (dragState.active) return;
+      // 屏幕上真正放完的那一段（self.anim 可能已经被门禁挡下的请求改掉了）
+      var endedAnim = self.playing || self.anim;
       // Turn anims flip facing on end
-      if (anims.turn.indexOf(self.anim) >= 0) {
+      if (anims.turn.indexOf(endedAnim) >= 0) {
         var nextF = self.facing === "left" ? "right" : "left";
         self.facing = nextF;
         self.facingRef = nextF;
       }
       // Drag/click anims → return to idle (or re-enter override if click was during override)
-      if (anims.drag.indexOf(self.anim) >= 0 || anims.clicks.indexOf(self.anim) >= 0) {
+      if (anims.drag.indexOf(endedAnim) >= 0 || anims.clicks.indexOf(endedAnim) >= 0) {
         if (self.clickFromOverride && self.currentOverrideAnim) {
           self.clickFromOverride = false;
           self.playOverride(self.currentOverrideAnim, OVERRIDE_DURATION_MS);
           return;
         }
-        if (anims.idle.length) self.anim = pick(anims.idle, self.anim);
+        if (anims.idle.length) self.anim = pick(anims.idle, endedAnim);
         self.once = true;
         self.seq++;
         self.switchTo(self.anim, true);
+        return;
+      }
+      // 待机段放完 → 原地续播一小会儿（默认 6s），别一口气接着演
+      if (self.canDwell(endedAnim)) {
+        self.startDwell(endedAnim);
         return;
       }
       self.pickNext();
@@ -774,7 +929,7 @@
       if (!actions.length) return false;
       var chosen = actions[Math.floor(Math.random() * actions.length)];
       var mp = Object.assign({}, moves.default, chosen.params || {});
-      var dir = (self.facingRef === "right") !== (config.animations.turn.indexOf(self.anim) >= 0) ? 1 : -1;
+      var dir = (self.facingRef === "right") !== (config.animations.turn.indexOf(self.playing || self.anim) >= 0) ? 1 : -1;
       var W = window.innerWidth;
       var plan = planMove({
         cx: self.currentCenterX(),
@@ -791,7 +946,8 @@
       self.pendingMove = Object.assign({}, plan, { dir: dir, leadSec: mp.leadSec, tailSec: mp.tailSec });
       self.once = true;
       self.anim = chosen.name;
-      self.switchTo(chosen.name, true);
+      // force：漫游的落点/相位是按这一段动画的计划算的，晚切一步就会在原地先愣一下
+      self.switchTo(chosen.name, true, { force: true });
       return true;
     };
 
@@ -809,6 +965,7 @@
       e.currentTarget.classList.add("dragging");
       // 输入框开着的时候点宠物 = 「不说了」：先收掉，别把焦点一直扣在透明窗上
       if (self.closeInput) self.closeInput();
+      self.stopDwell(); // 用户上手了，待机停留立刻收摊
       self.stopMove();
       setPassthrough(false); // capture during drag
       e.currentTarget.setPointerCapture(e.pointerId);
@@ -834,7 +991,7 @@
         self.once = true;
         if (config.animations.drag.length) {
           self.anim = pick(config.animations.drag);
-          self.switchTo(self.anim, true);
+          self.switchTo(self.anim, true, { force: true }); // 拖起来了就得立刻换姿势
         }
       }
       // 拖拽也要夹在屏幕内（舞台的下移量这时是 none，所以按 halfH 算下边界）
@@ -868,7 +1025,7 @@
         pushHitRegion(); // 落点定死，再报一次（节流可能刚好把最后一下挡掉了）
         if (config.animations.idle.length) self.anim = pick(config.animations.idle, self.anim);
         self.once = false;
-        self.switchTo(self.anim, false);
+        self.switchTo(self.anim, false, { force: true }); // 落回待机是拖拽的一部分，跟着手
       }
     });
 
@@ -878,7 +1035,8 @@
 
     hit.addEventListener("click", function () {
       if (dragState.active || dragState.dragging || self.justDragged) return;
-      if (self.once && config.animations.idle.indexOf(self.anim) < 0) return;
+      if (self.once && config.animations.idle.indexOf(self.playing) < 0) return;
+      self.stopDwell();
       self.stopMove();
 
       // Click during WS override (thinking/coding): cancel timer,
@@ -890,19 +1048,20 @@
         self.anim = "点击回应-傲娇生气";
         self.once = true;
         self.seq++;
-        self.switchTo(self.anim, true);
+        self.switchTo(self.anim, true, { force: true });
         return;
       }
 
       self.once = true;
       if (config.animations.clicks.length) {
         self.anim = pick(config.animations.clicks);
-        self.switchTo(self.anim, true);
+        self.switchTo(self.anim, true, { force: true });
       }
     });
 
     // ---- Override: WebSocket forces a specific animation ----
     this.playOverride = function (animName, durationMs) {
+      self.stopDwell(); // 状态帧来了：待机停留让位
       self.stopMove();
       if (self.overrideTimer) clearTimeout(self.overrideTimer);
       self.currentOverrideAnim = animName; // always update so re-entry picks latest state
@@ -921,7 +1080,7 @@
       self.anim = animName;
       self.once = false; // loop while override active
       self.seq++;
-      self.switchTo(animName, false);
+      self.switchTo(animName, false, { force: true }); // 状态必须立刻反映到屏幕上
       if (durationMs && durationMs > 0 && isFinite(durationMs)) {
         self.overrideTimer = setTimeout(function () {
           resetToChain();
@@ -941,11 +1100,14 @@
         self.anim = pick(config.animations.idle);
         self.once = true;
         self.seq++;
-        self.switchTo(self.anim, true);
+        self.switchTo(self.anim, true, { force: true });
       }
     }
 
     this.destroy = function () {
+      self.destroyed = true;
+      self.stopDwell();
+      self.clearQueue();
       self.stopMove();
       if (self.overrideTimer) clearTimeout(self.overrideTimer);
       container.remove();

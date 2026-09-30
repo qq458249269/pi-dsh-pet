@@ -152,6 +152,36 @@ console.log("\n头顶气泡（截断 / 不跟随）…");
 	check("文案走独立节点，不动 bubble.textContent", !/^\s*bubble\.textContent\s*=/m.test(petJs) && /bubbleText\.textContent = t/.test(petJs));
 }
 
+// ------------------------------------------------ 待机动画的节奏（别切一半 / 别太短）
+// 症状两条，都是同一个病根：**待机时正在演的那段动画被从中间砍掉**。
+//   ① 动画还没执行完就跳下一个 —— 触发者全是「被动」切换：鼠标扫过宠物（hover 移出就回
+//      待机）、拖拽落点回待机、待机链重抽。config.jsonc 的 idle 池只有一条片子，pick()
+//      排除不掉自己，于是这些回待机全是「从头重播」，看起来就是原地闪一下。
+//   ② 待机时间太短 —— 权重 idle 10 / turn 5 / move 5 / action 80，一段待机呼吸刚放完就有
+//      90% 概率直接跳去演随机动作，宠物一直忙个不停，根本没有「待机」这回事。
+// 修法：switchTo 加门禁（minPlayMs 内不许被动切换，切换请求排队等 ended），
+// 外加待机停留（idleDwellMs：待机片放完原地续播一会儿再抽下一个）。四条钉上：
+console.log("\n待机动画节奏（不切一半 / 待机别太短）…");
+{
+	const petJs = readFileSync(join(ROOT, "pi", "assets", "pet.js"), "utf8");
+	const cfg = readFileSync(join(ROOT, "assets", "config.jsonc"), "utf8");
+	// ① 门禁：被动切换先排队，不直接换 src
+	check("switchTo 有门禁（切不动就排队）", /!self\.canInterrupt\(\)[\s\S]{0,120}self\.queueSwitch\(next, nextOnce\)/.test(petJs));
+	check("排队切换带 minPlayMs 兜底", /minPlayMs\(\) - \(Date\.now\(\) - self\.playedAt\)/.test(petJs));
+	check("canInterrupt 放过已放完的当前段", /front\.ended\) return true/.test(petJs));
+	// ② 同一段不重播（重播 = 跳回第一帧）；但**循环中的不能跳**（跳了就永远卡在那一条里）
+	check("同一段不从头重播", /next === self\.playing[\s\S]{0,200}!cur\.ended && !cur\.loop\) return/.test(petJs));
+	// ③ 屏幕上在放什么看 playing，不是 anim（anim 可能已被排队的请求改掉了）
+	check("判定当前段用 playing", /var endedAnim = self\.playing \|\| self\.anim/.test(petJs) && /this\.playing = ""/.test(petJs));
+	// ④ 待机停留：待机片放完先续播，别急着抽下一个；用户一动就收摊
+	check("待机放完先停留再抽", /self\.canDwell\(endedAnim\)[\s\S]{0,80}self\.startDwell\(endedAnim\)/.test(petJs));
+	check("停留期间循环续播当前片（不换 src）", /this\.startDwell = function[\s\S]{0,600}front\.loop = true/.test(petJs));
+	check("用户上手就收摊（点击/拖拽/状态帧都停 dwell）", (petJs.match(/stopDwell\(\)/g) || []).length >= 4);
+	// ⑤ 节奏参数可配，且两个默认值都写在 config.jsonc 里
+	check("timing 段带 minPlayMs / idleDwellMs", /"minPlayMs"\s*:\s*2600/.test(cfg) && /"idleDwellMs"\s*:\s*6000/.test(cfg));
+	check("timing 缺省/写错都有兜底", /function readTiming\(raw\)/.test(petJs) && /TIMING_DEFAULT = \{ minPlayMs: 2600, idleDwellMs: 6000 \}/.test(petJs));
+}
+
 // ------------------------------------------------ 「说点什么…」的键盘与收尾
 // 这一整块都是**窗拿不到键盘焦点**惹的：窗平时 focusable:false，点宠物不抢你正在
 // 打字的窗口；那样的窗 DOM 里的 input.focus() 会被系统丢掉 —— 框出来了却打不进字，
