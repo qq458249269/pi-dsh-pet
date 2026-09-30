@@ -271,7 +271,7 @@ jobs:
           # $env:GITHUB_STEP_SUMMARY 理论上一定有，但 $ErrorActionPreference=Stop 下
           # 它一旦为空，Add-Content 会把**整步**判死（包括已经 PASS 的冒烟），所以先判再写。
           if ($env:GITHUB_STEP_SUMMARY) { Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value $line }
-Write-Host $line
+          Write-Host $line
 
           if (-not $ok) {
             Write-Error "冒烟没过：$note（产物仍会照常上传，release 里见 exe）"
