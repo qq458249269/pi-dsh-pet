@@ -8,7 +8,12 @@ on:
   push:
     branches: [main]
     tags: ["v*"]
-workflow_dispatch:
+  # ⚠️ workflow_dispatch 必须**缩进在 on: 里面**（和 push 平级）。
+  # 顶格写它就成了根级键：on 里只剩 push，「手动触发」这个入口直接消失 ——
+  # 而且报错极不直观，编辑器只会在那一行说
+  #   Unexpected value 'workflow_dispatch'
+  # 看着像「写法不支持」，实际是缩进错了一格。
+  workflow_dispatch:
     inputs:
       dry_run:
         description: "只算版本号、跑测试、传源码，不打 exe、不建 tag、不发 release"
@@ -330,8 +335,12 @@ jobs:
             Write-Error "窗没拉起来（多半又是 cwd/app.asar 那类 spawn 失败），见上面日志"
           }
 
-      - name: 打 exe（portable 单文件）
       # windows-latest runner 自带 ffmpeg。默认**不跑**：不偷摸降画质给所有人。
+      # ⚠️ 别在上一行留一个只有 name、没有 run/uses 的「半截 step」：那是合法的 YAML
+      # （解析成 {name: ...}），但对 schema 来说它哪个分支都不属于，报错只有一句
+      #   There's not enough info to determine what you meant. Add one of these properties:
+      #   cancel, run, shell, uses, wait, wait-all, with, working-directory
+      # 看着像「少写了 run」，实际是**多了一个 step 头**。
       - name: 瘦身素材（手动触发 + 勾了 slim_assets 才跑）
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.slim_assets == true }}
         shell: pwsh

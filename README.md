@@ -85,6 +85,17 @@ CI（推 main / 手动触发 `release` workflow）走同一条链，只是多两
 把它规范化成 `2026.9.3-0.2` 这种鬼样子），版本认 tag / release 说明。
 发布链的约束（token 权限、跨 job 依赖）见 [DESIGN.md §10](./DESIGN.md)。
 
+改 `.github/workflows/release.yml` 前先知道两件事（它踩过两次，报错都指不到病根）：
+
+| 坑 | 症状 | 后果 |
+|----|------|------|
+| 事件键顶格：`workflow_dispatch:` 写在第 0 列 | 编辑器报 `Unexpected value 'workflow_dispatch'` | 它变成**根级**键，`on:` 里只剩 `push` —— **手动触发入口静默消失**，推 tag/main 才跑 |
+| 半截 step：`- name: xxx` 后面既没 `run:` 也没 `uses:` | 编辑器报 `There's not enough info to determine what you meant. Add one of these properties: cancel, run, shell, uses…` | 那一步是空转（重排步骤时留下的残渣），不是「忘了写 run」 |
+
+两行都是**合法 YAML**，所以 `npm test` 一度是绿的。`npm run test:workflow`（已挂在
+`npm test` 第一步）专门钉这两件事，外加「每个 job 都要有 `runs-on`/`steps`」和
+「`on:` 里必须真的有 `workflow_dispatch`」；零依赖、离线跑。
+
 宠物会出现在屏幕右下角，开始动画链。当你在 pi 里写代码或提问时，宠物会自动响应：
 
 | pi agent 状态 | 宠物动画 | 气泡 |
