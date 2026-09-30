@@ -11,7 +11,6 @@ directories:
   # buildResources：图标等资源目录。没建也不会报错，只是用 Electron 默认图标。
   buildResources: build
 
-asar: true
 # 只带运行时要的东西：宿主代码 + 窗代码 + 91 个 webm 素材。
 # ⚠️ 每一项都加引号：YAML 里裸的 * 会被当 alias，而且未加引号的通配写法
 # 在不同 glob 实现下对「零层子目录」（app/main.cjs 之于 app/**/*.cjs）匹配不一致，
@@ -24,32 +23,34 @@ files:
   - "assets/config.jsonc"
   - "package.json"
 
+# ---- 体积：portable 单文件的三大块，只有第三块能自己说了算 ----
+# ① Electron 运行时 ~147MB（压缩后 ~74MB）：动不了，除非换运行时。
+# ② locales/ 41MB（未压缩）：**整块砍掉**。Electron 默认带 50+ 种语言包，这里只
+#    用得到 zh-CN（界面/菜单）与 en-US（兜底），其余 39 个 .pak 纯占位。
+#    .pak 本身压得动一部分，portable 大体能省下十几 MB。
+# ③ assets/thumb/*.webm 46MB：VP9 已经压过，7z 再压几乎没收益，只能靠
+#    `npm run slim:assets`（ffmpeg 重编码降分辨率/码率）真省，详见 README。
+electronLanguages:
+  - zh-CN
+  - en-US
+
+# maximum：7z 用 -mx=9。素材压不动，但 Electron 那 147MB 里的 dll/exe/pak 能压出几个点。
+# 代价是打包慢几分钟（CI 有的是时间）。
+compression: maximum
+
 win:
-  # portable = 单文件 exe（双击即用，免安装）；nsis = 带快捷方式的安装包
+  # 只出 portable 单文件 exe（双击即用，免安装）。**不再出 NSIS 安装包**：
+  # 用户只要一个能双击的 exe，安装版反而让人多一步、release 里还多一个 120MB 的附件。
   target:
     - target: portable
       arch: [x64]
-    - target: nsis
-      arch: [x64]
-  # 产物名**不带版本号**，就叫这两个固定名：
-  #   pi-dsh-pet.exe         = portable 免安装单文件（用户双击的就是它）
-  #   pi-dsh-pet-setup.exe   = NSIS 安装包（不能也叫 pi-dsh-pet.exe：两个 target 同名会撞）
+  # 产物名**不带版本号**，就叫这个固定名：pi-dsh-pet.exe —— 用户双击的就是它。
   # 为什么不带版本号：版本号规则是 YYYY.MM.DD.NNNN（2026.09.30.0002），**不是合法 semver**
   # （三段后还有一段），electron-builder 会自己规范化它。实测打出来是：
   #   2026.09.30.0002 → ${version} 变成 2026.9.3-0.2
   # 也就是说名字里塞版本号，既不可控（下次规范化规则变了名字又变）又难看。
   # 版本信息没丢：tag（v2026.09.30.0002）、release、asar 里的 package.json 都还在。
-  artifactName: pi-dsh-pet-setup.${ext}
-  # 素材是 webm，asar 里读没问题；但 webm 有 91 个，别让压缩把 CI 拖死
-  compression: normal
-
-nsis:
-  oneClick: false
-  perMachine: false
-  allowToChangeInstallationDirectory: true
-  createDesktopShortcut: true
-  createStartMenuShortcut: true
-  shortcutName: pi-dsh-pet
+  artifactName: pi-dsh-pet.${ext}
 
 portable:
   # 固定名：双击即用的那一个，见上面 win.artifactName 里的说明

@@ -49,7 +49,10 @@
     "doctor": "node bin/pi-pet.cjs doctor",
     "test": "node test/smoke.mjs && node test/dsh.mjs",
     "build": "npx --yes electron-builder --win --publish never --config electron-builder.yml",
-    "build:dir": "npx --yes electron-builder --win --dir --publish never --config electron-builder.yml"
+    "build:dir": "npx --yes electron-builder --win --dir --publish never --config electron-builder.yml",
+    "slim:assets": "node scripts/slim-assets.cjs",
+    "slim:assets:dry": "node scripts/slim-assets.cjs --dry",
+    "assets:restore": "node scripts/slim-assets.cjs --restore"
   },
   "engines": {
     "node": ">=18"
