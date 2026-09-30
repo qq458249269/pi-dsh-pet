@@ -62,7 +62,17 @@ function sendJson(res, status, body) {
 	res.end(text);
 }
 
-function sendFile(res, filePath) {
+/**
+ * 发一个文件。
+ *
+ * `maxAge` 分两档：代码/配置一律 no-store，素材（91 个 thumb webm）才允许缓存。
+ * 之前一刀切 `public, max-age=3600`，害处有两个：
+ *   1. 改完 pi/assets/pet.js 再 `pi-pet restart`，窗拿到的**还是磁盘上那份旧 JS**，
+ *      缓存不失效 → 改了没反应，排查时最容易怀疑成「代码没跑到」；
+ *   2. 用户升级后开着的窗也会拿旧代码跑一小时。
+ * 素材是本地磁盘读，缓存省不下多少，但体积大、名字带哈希语义之外的稳定引用，保留缓存。
+ */
+function sendFile(res, filePath, { maxAge = 0 } = {}) {
 	fs.stat(filePath, (err, st) => {
 		if (err || !st.isFile()) {
 			res.writeHead(404, { "content-type": "text/plain; charset=utf-8" });
@@ -72,7 +82,7 @@ function sendFile(res, filePath) {
 		res.writeHead(200, {
 			"content-type": MIME[path.extname(filePath).toLowerCase()] || "application/octet-stream",
 			"content-length": st.size,
-			"cache-control": "public, max-age=3600",
+			"cache-control": maxAge > 0 ? `public, max-age=${maxAge}` : "no-store",
 		});
 		fs.createReadStream(filePath).pipe(res);
 	});
@@ -158,7 +168,7 @@ function createServer(ctx) {
 				res.end("bad thumb path");
 				return;
 			}
-			return sendFile(res, file);
+			return sendFile(res, file, { maxAge: 3600 });
 		}
 
 		/* ---------------- 要鉴权：控制面 ---------------- */
@@ -218,8 +228,20 @@ function createServer(ctx) {
 
 		if (p === ENDPOINTS.event && req.method === "GET") {
 			// 极简形态：GET /event?type=thinking  —— 粘在浏览器地址栏就能用
+			const type = url.searchParams.get("type") || "";
+			// ⚠️ 不带 type 的 GET 不是一条事件，是 CLI 的**能力探测**（app/main.cjs 的
+			//    probeCaps：靠「回 400」判断这个宿主到底有没有事件面）。别把它喂进
+			//    bus.ingest —— 那儿会打一行「丢弃无法识别的帧」，而 pi 扩展在 /feed 掉线时
+			//    每 2s 探一次宿主能力，于是日志被探测刷屏（.start.log 里那片 http:GET 就是它）。
+			if (!type.trim()) {
+				return sendJson(res, 400, {
+					ok: false,
+					error: "unknown event",
+					hint: "带上 type 试试：GET /event?type=thinking",
+				});
+			}
 			const result = ctx.bus.ingest(
-				{ type: url.searchParams.get("type") || "", tool: url.searchParams.get("tool") || "" },
+				{ type, tool: url.searchParams.get("tool") || "" },
 				"http:GET",
 				Number(ctx.ctrl().maxPets) || 1,
 			);

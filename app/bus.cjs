@@ -255,7 +255,9 @@ function createBus(hooks = {}) {
 	function ingest(raw, source = "unknown", maxPets = 1, sourceId = null, paused = false) {
 		const ev = parseIncoming(raw);
 		if (!ev) {
-			log(`丢弃无法识别的帧（来源 ${source}）：${String(raw).slice(0, 80)}`);
+			// 对象来源（REST）直接 String() 会变成 "[object Object]"，什么也定位不了
+			const shown = typeof raw === "string" ? raw : JSON.stringify(raw);
+			log(`丢弃无法识别的帧（来源 ${source}）：${String(shown).slice(0, 80)}`);
 			return { ok: false, reason: "unrecognized" };
 		}
 		const wire = typeof raw === "string" ? raw.trim() : JSON.stringify(raw);

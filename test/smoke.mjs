@@ -10,6 +10,7 @@
 
 import { spawn } from "node:child_process";
 import { mkdtempSync, rmSync, readFileSync, existsSync } from "node:fs";
+import net from "node:net";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -155,6 +156,9 @@ check("带对 token 时鉴权通过", caps.auth === true);
 check("action 清单带得上（reportMissing 靠它说人话）", caps.actions.includes("say") && caps.actions.includes("restart-window"));
 const capsNoTok = await probeCaps(PORT, undefined);
 check("token 不对 → 鉴权被拒，且两面都探不到（不会瞎发请求）", capsNoTok.auth === false && !capsNoTok.control && !capsNoTok.event);
+// 探测本身不能弄脏状态机/日志：pi 扩展在 /feed 掉线时每 2s 探一次，
+// 早期版本把「不带 type 的 GET /event」当事件喂进 bus，于是日志被刷屏。
+check("能力探测不写状态机、不写「丢弃无法识别的帧」", !/丢弃无法识别的帧/.test(hostLog), hostLog.split("\n").filter((l) => /丢弃无法识别的帧/.test(l)).slice(0, 2).join(" | "));
 const capsDead = await probeCaps(PORT + 1, token);
 check("端口没人听 → 两面都没有（不是「都支持」）", !capsDead.control && !capsDead.event);
 
@@ -264,6 +268,31 @@ check(
 feed.close();
 await sleep(250);
 check("WS 断开后会话状态回落", (await get(PORT, "/state", token)).body.bus.feeds === 0);
+
+// ---------------------------------------------------------------- 崩溃红线
+// 窗被 taskkill（= pi-pet restart / --force / 崩溃自愈）时，宿主这边收到的是 TCP RST：
+// socket 报 ECONNRESET → WsConnection emit("error")。EventEmitter 对没人监听的 "error"
+// 是直接抛的，不兜住的话每次换窗都会在宿主里炸一条 uncaughtException。
+console.log("\n连接层的 ECONNRESET 不变成未捕获异常…");
+await new Promise((resolve) => {
+	const s = net.connect(PORT, "127.0.0.1", () => {
+		s.write(
+			"GET /ws HTTP/1.1\r\nHost: 127.0.0.1\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n" +
+				"Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n",
+		);
+		setTimeout(() => {
+			s.resetAndDestroy(); // RST，不是 FIN
+			resolve();
+		}, 60);
+	});
+	s.on("error", () => resolve());
+});
+await sleep(400);
+check(
+	"硬 RST 一条 /ws 连接 → 宿主不记未捕获异常",
+	!/未捕获异常/.test(hostLog),
+	hostLog.split("\n").filter((l) => /未捕获异常/.test(l)).slice(0, 2).join(" | "),
+);
 
 // ---------------------------------------------------------------- 锁心跳
 console.log("\n单例互斥 + 锁心跳…");

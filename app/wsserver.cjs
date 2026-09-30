@@ -56,8 +56,9 @@ class WsConnection extends EventEmitter {
 		socket.on("data", (chunk) => this._onData(chunk));
 		socket.on("close", () => this._finish(1006));
 		socket.on("error", (err) => {
-			this.emit("error", err);
+			// 先收尾再 emit：close 只发一次，而上层靠 close 做记账（窗断开、会话离开）
 			this._finish(1006);
+			this.emit("error", err);
 		});
 		socket.setNoDelay(true);
 	}
@@ -267,6 +268,15 @@ function attachWebSocket(httpServer, { shouldAccept = null, onConnection, pingMs
 		);
 
 		const conn = new WsConnection(socket, req);
+		// 这里**必须**自己挂一个 error 监听：WsConnection 是 EventEmitter，socket 一报错
+		// 就 emit("error")，而 EventEmitter 对没人监听的 "error" 是直接抛的
+		//（Unhandled 'error' event）。上层（bus）只关心 close，不关心 error ——
+		// 不在这里兜住的话，每次 taskkill 掉窗（TCP 直接 RST）宿主都会炸一条
+		// uncaughtException，日志里就是那一串 `read ECONNRESET`。
+		// 挂在这一层还有个好处：无论将来谁接连接，都不会再漏。
+		conn.on("error", () => {
+			/* 连接层面的错（ECONNRESET/ECONNREFUSED…）已经由 _finish 收尾，这里只吃掉它 */
+		});
 		conns.add(conn);
 		conn.on("close", () => conns.delete(conn));
 		if (onConnection) onConnection(conn, req);

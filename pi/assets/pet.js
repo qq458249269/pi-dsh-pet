@@ -64,6 +64,8 @@
     ["idle", "turn", "drag", "clicks"].forEach(function (k) {
       if (!Array.isArray(a[k])) throw new Error("animations." + k + " missing");
     });
+    // 可选池：没写就不播（老配置照样能用）
+    if (a.hover !== undefined && !Array.isArray(a.hover)) throw new Error("animations.hover must be an array");
     if (!a.moves || typeof a.moves !== "object" || !a.moves.default || !Array.isArray(a.moves.actions)) {
       throw new Error("animations.moves structure invalid");
     }
@@ -141,6 +143,127 @@
   }
 
   // ========================================================================
+  // 4.5 命中区（Hit region）
+  //
+  // 窗是全屏的，如果不去管它，鼠标一扫到宠物身上就把整屏点击都吃了（下面的窗口全部
+  // 点不动，必须把鼠标移出宠物才恢复）。所以把「宠物包围盒」实时报给主进程，
+  // 由主进程 setShape 把整窗命中区裁到宠物身上：只有宠物能点，别处的点击照常落到下面。
+  //
+  // 取的是**真正能点的那块**（.pet-hit），不是宠物容器：容器是 16:9 的整块画布，
+  // 四边留着一圈透明边。按容器报会把那圈透明边也划进命中区，鼠标停在那儿
+  // 点下去什么都不会发生（被透明窗吃掉），却又到不了下面的窗口 —— 正是本节要消灭的毛病。
+  //
+  // 包围盒还要包含头顶的气泡（否则正在输入的「说点什么…」会被裁掉），四周留一点余量。
+  // ========================================================================
+
+  var HIT_PAD_X = 10;
+  var HIT_PAD_TOP = 12;
+  var HIT_PAD_BOTTOM = 10;
+  /** 漫游/拖拽时每帧都在动，而主进程每次都要 SetWindowRgn：50ms 一次（20fps）跟手又不至于卡 */
+  var HIT_THROTTLE_MS = 50;
+  var regionQueued = false;
+  var regionTimer = null;
+  var lastRegionKey = "";
+  var lastRegionAt = 0;
+
+  function collectHitRects() {
+    var out = [];
+    for (var i = 0; i < pets.length; i++) {
+      var p = pets[i];
+      var el = p.hitEl || p.el;
+      if (!el || !el.getBoundingClientRect) continue;
+      var r = el.getBoundingClientRect();
+      if (!r || !(r.width > 0) || !(r.height > 0)) continue;
+      var box = {
+        left: r.left - HIT_PAD_X,
+        top: r.top - HIT_PAD_TOP,
+        right: r.right + HIT_PAD_X,
+        bottom: r.bottom + HIT_PAD_BOTTOM,
+      };
+      // 气泡长在头顶（bottom:100%），可见时并进来
+      var b = p.bubbleEl;
+      if (b && b.classList && b.classList.contains("show")) {
+        var br = b.getBoundingClientRect();
+        if (br && br.width > 0) {
+          box.left = Math.min(box.left, br.left - 6);
+          box.right = Math.max(box.right, br.right + 6);
+          box.top = Math.min(box.top, br.top - 6);
+        }
+      }
+      out.push({
+        x: box.left,
+        y: box.top,
+        width: box.right - box.left,
+        height: box.bottom - box.top,
+      });
+    }
+    // 「掉线了」提示条长在屏幕右上角，不在宠物身上，一并算进去免得被裁掉
+    var banner = document.getElementById(DISCONNECT_BANNER_ID);
+    if (banner && banner.classList && banner.classList.contains("show")) {
+      var rr = banner.getBoundingClientRect();
+      if (rr && rr.width > 0) {
+        out.push({ x: rr.left - 4, y: rr.top - 4, width: rr.width + 8, height: rr.height + 8 });
+      }
+    }
+    return out;
+  }
+
+  /** 真发一次：矩形没变就不发（省掉一次跨进程 + 一次 SetWindowRgn）。 */
+  function emitHitRegion() {
+    var api = window.__petElectron__;
+    if (!api || !api.setHitRegion) return;
+    var rects = collectHitRects();
+    // 一只都算不出来（还没布局完）就别报：主进程收到空数组会保持上一次的形状，
+    // 报上去反而可能把命中区清空。
+    if (!rects.length) return;
+    var key = "";
+    for (var i = 0; i < rects.length; i++) {
+      var r = rects[i];
+      key += r.x + "," + r.y + "," + r.width + "," + r.height + "|";
+    }
+    if (key === lastRegionKey) return;
+    lastRegionKey = key;
+    lastRegionAt = Date.now();
+    try {
+      api.setHitRegion(rects);
+    } catch (e) {
+      /* 主进程还没 ready 就算了，下一次变化还会再报 */
+    }
+  }
+
+  /**
+   * 请求上报命中区。同一帧里的多次请求会合并，连续移动时按 HIT_THROTTLE_MS 节流。
+   * ⚠️ 被节流挡掉的那次**必须补一个尾巴定时器**，否则这次移动就永远丢了：
+   *   rAF 只在我们主动排下一次时才跑，不排就没有「下一帧」这回事。
+   */
+  function pushHitRegion() {
+    if (regionQueued || regionTimer) return;
+    var wait = HIT_THROTTLE_MS - (Date.now() - lastRegionAt);
+    if (wait <= 0) {
+      regionQueued = true;
+      var fired = false;
+      var fallback = 0;
+      var fire = function () {
+        if (fired) return;
+        fired = true;
+        regionQueued = false;
+        if (fallback) clearTimeout(fallback);
+        emitHitRegion();
+      };
+      // rAF 不是保险的：窗只要有一阵子不合成帧（被另一只透明全屏窗盖住、屏保、锁屏、
+      // 远程桌面断开），rAF 就一直不回调 —— 于是命中区永远发不出去，宠物看着好好的
+      // 却点不动（主进程还停在 1×1 的起步形状）。所以 setTimeout 兜底，谁先到算谁。
+      fallback = setTimeout(fire, 32);
+      requestAnimationFrame(fire);
+      return;
+    }
+    regionTimer = setTimeout(function () {
+      regionTimer = null;
+      pushHitRegion();
+    }, wait);
+  }
+
+  // ========================================================================
   // 5. PetCard class (port of pet.ts PetCard component)
   // ========================================================================
 
@@ -169,6 +292,8 @@
     this.currentOverrideAnim = null; // Name of active WS override (for click-during-override)
     this.overrideActive = null;     // Name currently looping as override (anti-replay)
     this.clickFromOverride = false;  // flag: click happened during override
+    this.hovering = false;           // 鼠标是否在命中框里
+    this.hoverAnim = "";             // 本次 hover 放的动画名
 
     // ---- Refs ----
     this.gen = 0;
@@ -208,11 +333,15 @@
 
     container.appendChild(stage);
     rootEl.appendChild(container);
+    self.el = container; // 定位/漫游时用来量包围盒
+    self.hitEl = hit; // 命中区上报用真正能点的那块（见 4.5）
 
     // ---- Position (corner-based initial) ----
     applyPosition();
+    pushHitRegion();
     window.addEventListener("resize", function () {
       if (self.customPos) applyPosition();
+      pushHitRegion();
     });
 
     function applyPosition() {
@@ -252,8 +381,8 @@
     hit.style.height = ((HIT_BOX.y1 - HIT_BOX.y0) / 360) * 100 + "%";
 
     // ---- Electron mouse passthrough ----
-    // When mouse enters the hitbox → capture events (for drag/click).
-    // When mouse leaves → passthrough to windows below.
+    // 正常路径：主进程用 setShape 把命中区裁到宠物身上，这里不用管穿透。
+    // 老 Electron（没有 setShape）才走开关式：进命中框收事件、离开穿回去。
     var passthrough = true;
     function setPassthrough(on) {
       if (passthrough === on) return;
@@ -262,8 +391,51 @@
         window.__petElectron__.setPassthrough(on);
       }
     }
-    hit.addEventListener("mouseenter", function () { setPassthrough(false); });
-    hit.addEventListener("mouseleave", function () { setPassthrough(true); });
+
+    /**
+     * 鼠标移入 = 打招呼（hover 动画），移出 = 收回。
+     * 不打断：拖拽中 / 正在响应 agent（override）/ 正在放点击回应。
+     */
+    this.setHover = function (on) {
+      if (self.hovering === on) return;
+      self.hovering = on;
+      var hover = config.animations.hover;
+      if (!hover || !hover.length) return;
+
+      if (on) {
+        if (dragState.active || self.dragging || self.currentOverrideAnim || self.clickFromOverride) return;
+        if (config.animations.clicks.indexOf(self.anim) >= 0 || hover.indexOf(self.anim) >= 0) return;
+        self.stopMove();
+        self.hoverAnim = pick(hover, self.anim);
+        self.anim = self.hoverAnim;
+        // once=false：hover 不算「一次性反应动画」，所以不会把左键点击也一并禁掉
+        self.once = false;
+        self.seq++;
+        self.switchTo(self.hoverAnim, true); // 播一遍就好，不循环
+      } else {
+        // 还在放 hover 就立刻回待机，别让打完招呼的姿势挂在屏幕上
+        if (self.hoverAnim && self.anim === self.hoverAnim && !self.currentOverrideAnim && !dragState.active) {
+          self.hoverAnim = "";
+          if (config.animations.idle.length) {
+            self.anim = pick(config.animations.idle, self.anim);
+            self.once = true;
+            self.seq++;
+            self.switchTo(self.anim, true);
+          }
+        }
+      }
+    };
+
+    hit.addEventListener("mouseenter", function () {
+      setPassthrough(false);
+      hit.style.cursor = "grab";
+      self.setHover(true);
+    });
+    hit.addEventListener("mouseleave", function () {
+      setPassthrough(true);
+      hit.style.cursor = "";
+      self.setHover(false);
+    });
 
     // ---- Right-click → menu ----
     // The menu itself is native (built in the main process) because the window is a
@@ -290,6 +462,7 @@
     bubble.className = "pet-bubble";
     bubble.style.display = "none";
     container.appendChild(bubble);
+    self.bubbleEl = bubble; // 命中区要把头顶的气泡算进去
 
     var bubbleTimer = null;
     self.showBubble = function (text, opts) {
@@ -300,6 +473,7 @@
       bubble.classList.add("show");
       bubble.classList.toggle("sticky", opts.sticky === true);
       bubble.style.display = "";
+      pushHitRegion(); // 气泡会改变命中区（它在宠物头顶）
       if (bubbleTimer) clearTimeout(bubbleTimer);
       var ms = Number(opts.ms) || 0;
       // sticky = 状态还在：不清计时器，靠宿主每 10s 的续期帧接着
@@ -314,6 +488,7 @@
       if (bubbleTimer) clearTimeout(bubbleTimer);
       bubbleTimer = null;
       bubble.classList.remove("show");
+      pushHitRegion();
     };
 
     // 「说点什么…」：输入框就长在气泡里。Enter 提交，Esc 取消。
@@ -341,6 +516,7 @@
       bubble.classList.add("show");
       bubble.style.display = "";
       input.style.display = "";
+      pushHitRegion();
       input.focus();
       input.select();
     };
@@ -488,6 +664,9 @@
         container.style.top = py - halfH + "px";
         container.style.right = "auto";
         container.style.bottom = "auto";
+        // 漫游中每一帧位置都在变：命中区必须跟着走，否则形状留在出发点，
+        // 宠物移到哪儿就点不到了（旧位置还会留一块点不动的「鬼影」区）
+        pushHitRegion();
         if (t < duration - tailSec) self.moveRef = requestAnimationFrame(step);
         else {
           self.moveRef = null;
@@ -570,6 +749,7 @@
       container.style.right = "auto";
       container.style.bottom = "auto";
       stage.style.transform = "none";
+      pushHitRegion(); // 拖到哪儿，命中区就到哪儿（不然半路就「松手」了）
     });
 
     hit.addEventListener("pointerup", function (e) {
@@ -590,6 +770,7 @@
         self.dragging = false;
         self.customPos = { rx: (e.clientX - dragState.offX) / window.innerWidth, ry: (e.clientY - dragState.offY) / window.innerHeight };
         stage.style.transform = "translateY(" + bottomPad + "px)";
+        pushHitRegion(); // 落点定死，再报一次（节流可能刚好把最后一下挡掉了）
         if (config.animations.idle.length) self.anim = pick(config.animations.idle, self.anim);
         self.once = false;
         self.switchTo(self.anim, false);
@@ -623,13 +804,6 @@
         self.anim = pick(config.animations.clicks);
         self.switchTo(self.anim, true);
       }
-    });
-
-    hit.addEventListener("mouseenter", function (e) {
-      if (!dragState.active) e.currentTarget.style.cursor = "grab";
-    });
-    hit.addEventListener("mouseleave", function (e) {
-      if (!dragState.active) e.currentTarget.style.cursor = "grab"; // default
     });
 
     // ---- Override: WebSocket forces a specific animation ----
@@ -680,6 +854,7 @@
       self.stopMove();
       if (self.overrideTimer) clearTimeout(self.overrideTimer);
       container.remove();
+      pushHitRegion(); // 别把已经删掉的宠物的位置留在命中区里
     };
 
     // ---- Start playing ----
@@ -755,6 +930,7 @@
     var pet = new PetCard(cfg, root);
     pets.push(pet);
     pet.init();
+    pushHitRegion(); // 进了 pets 才量得到它（构造时它还没进数组）
   }
 
   /** Apply an event override to all pets */
@@ -810,6 +986,7 @@
       reconnectAttempts = 0;
       var banner = document.getElementById(DISCONNECT_BANNER_ID);
       if (banner) banner.classList.remove("show");
+      pushHitRegion(); // 提示条没了，命中区跟着收回来
     };
 
     ws.onmessage = function (event) {
@@ -850,6 +1027,7 @@
       console.log("[pi-dsh-pet] WebSocket disconnected");
       var banner = document.getElementById(DISCONNECT_BANNER_ID);
       if (banner) banner.classList.add("show");
+      pushHitRegion(); // 提示条在屏幕右上角，得留在命中区里（它要能被点到/看到）
       reconnectAttempts++;
       if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
         console.log("[pi-dsh-pet] Max reconnect attempts reached, closing window");
@@ -884,6 +1062,11 @@
       var pet = new PetCard(cfg, root);
       pets.push(pet);
     });
+
+    // 首次上报命中区。必须在这里发：构造期那只宠物还没进 pets，量不出矩形，
+    // 而主进程起步只给 1×1 的命中点 —— 不发的话宠物出生后长时间点不到
+    //（要等它漫游或冒气泡才会补上）。
+    pushHitRegion();
 
     // Start all pets
     pets.forEach(function (pet) { pet.init(); });

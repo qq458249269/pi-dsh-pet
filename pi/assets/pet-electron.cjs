@@ -4,8 +4,12 @@
  * 启动方式：宿主（app/host.cjs）用 `electron pet-electron.cjs <port>` 拉起。
  * 职责：开一扇全屏透明置顶窗，加载宿主提供的 http://127.0.0.1:<port>。
  *
- * 鼠标穿透：默认整窗穿透（点透明处等于点在下面的窗口上）。渲染进程在鼠标进入宠物
- * 命中框时通过 preload 告诉主进程「别穿透」，于是能点、能拖；离开再穿回去。
+ * 鼠标命中：窗是全屏的，但**只有宠物那块能被点到**（别处的点击要落到下面的窗口上）。
+ *   Windows/Linux 用 setShape() 把整窗的命中区裁成宠物的包围盒，渲染进程每次动一动
+ *   （漫游 / 拖拽 / 换位置 / 冒气泡）就把新包围盒经 preload 送过来。
+ *   ⚠️ 别再用「鼠标进命中框 → setIgnoreMouseEvents(false)」那套：窗是全屏的，一关穿透
+ *   整块屏幕的点击都被这扇透明窗吃掉，下面所有窗口都点不动（卡死），必须把鼠标移出
+ *   宠物才恢复。老 Electron 没有 setShape 时才退回那套（见下）。
  *
  * 右键菜单：渲染进程把「当前状态/只数/命中信息」发过来，主进程在这里拼原生菜单，
  * 菜单项的动作**全部走宿主的控制面**（POST /control，带 token）——
@@ -140,18 +144,92 @@ app.whenReady().then(() => {
     },
   });
 
-  win.setIgnoreMouseEvents(true, { forward: true });
+  // ---- 命中区：把整窗的鼠标命中裁到宠物身上 ----
+  const SHAPE_OK = typeof win.setShape === "function" && process.env.PI_PET_NO_SHAPE !== "1";
+  let shapeBroken = false;
+  let gotRegion = false;
+
+  if (SHAPE_OK) {
+    // 窗口一直收事件；「谁能点到」交给 setShape。开始先给一个 1×1 的点，
+    // 免得渲染进程还没算出包围盒时整屏透明窗把点击全吃了。
+    // （PI_PET_NO_SHAPE=1 只用来排查「形状模式是不是坏了」，别在正常运行时开）
+    win.setIgnoreMouseEvents(false);
+    try {
+      win.setShape([{ x: 0, y: 0, width: 1, height: 1 }]);
+    } catch {
+      /* 极端环境下失败就等第一次上报 */
+    }
+  } else {
+    win.setIgnoreMouseEvents(true, { forward: true });
+  }
+
+  // 渲染进程：新的命中包围盒（窗口坐标）
+  ipcMain.on("pet:hit-region", (_event, rects) => {
+    if (process.env.PI_PET_DEBUG === "1") {
+      console.error(`[pi-dsh-pet] hit-region 收到 ${JSON.stringify(rects)}（shape=${SHAPE_OK} broken=${shapeBroken}）`);
+    }
+    if (!SHAPE_OK || shapeBroken || win.isDestroyed()) return;
+    // 宠物漫游/拖拽时每 50ms 一帧，别拿非法形状去砸 SetWindowRgn
+    const list = (Array.isArray(rects) ? rects : [])
+      .map((r) => ({
+        x: Math.max(0, Math.floor(Number(r && r.x) || 0)),
+        y: Math.max(0, Math.floor(Number(r && r.y) || 0)),
+        width: Math.ceil(Number(r && r.width) || 0),
+        height: Math.ceil(Number(r && r.height) || 0),
+      }))
+      .filter((r) => r.width > 0 && r.height > 0);
+    if (!list.length) return; // 没算出来就保持上一次，别把窗弄没了
+    gotRegion = true;
+    try {
+      win.setShape(list);
+    } catch (err) {
+      // 不支持 / 形状非法：永久退回开关式穿透，别反复抛
+      shapeBroken = true;
+      console.error("[pi-dsh-pet] setShape 失败，退回开关式穿透：", err && err.message);
+      win.setIgnoreMouseEvents(true, { forward: true });
+    }
+  });
+
+  // 兜底：没有 setShape（或它坏了）时，渲染进程仍用老协议开关穿透
+  ipcMain.on("pet:passthrough", (_event, on) => {
+    if ((SHAPE_OK && !shapeBroken) || win.isDestroyed()) return; // 命中由 shape 管，别再开关
+    if (on) win.setIgnoreMouseEvents(true, { forward: true });
+    else win.setIgnoreMouseEvents(false);
+  });
+
+  // 加载完 5s 还没拿到包围盒 = 渲染进程没起来（配置拉失败、pet.js 报错…）。
+  // 这时候宁可让整窗不可命中，也别让它当一整块矩形拦在屏幕最上层：
+  // ⚠️ 这里**不能**用 setShape([]) —— 传空数组 = “恢复默认矩形”，正好是反效果
+  //（整屏透明窗把下面所有窗口的点击全吃掉，必须把鼠标移出那块 1×1 才恢复）。
+  // 「整窗不收鼠标事件」只有 setIgnoreMouseEvents(true) 这一条路。
+  win.webContents.once("did-finish-load", () => {
+    setTimeout(() => {
+      if (gotRegion || shapeBroken || win.isDestroyed()) return;
+      console.error("[pi-dsh-pet] 5s 内没收到命中区（渲染进程没起来？）→ 整窗穿透，别挡屏幕");
+      win.setIgnoreMouseEvents(true, { forward: true });
+    }, 5000);
+  });
 
   // 给渲染进程回话的快捷方式（“说点什么…”）
   webContentsSend = (channel) => {
     if (!win.isDestroyed()) win.webContents.send(channel);
   };
 
-  // 渲染进程：鼠标进出命中框 → 切换穿透
-  ipcMain.on("pet:passthrough", (_event, on) => {
-    if (on) win.setIgnoreMouseEvents(true, { forward: true });
-    else win.setIgnoreMouseEvents(false);
-  });
+  // PI_PET_DEBUG=1：把渲染进程的 console 转到主进程 stderr。
+  // 平时窗是 detached + stdio:"ignore" 的，渲染进程报什么都没人看得见，
+  // 调 pet.js 时只能靠猜 —— 有了这个开关就能直接看到它抛了什么。
+  // 两个 Electron 版本的 console-message 签名不一样（老的传 level/message，
+  // 新的第一个参数是 event 对象），两种都收。
+  if (process.env.PI_PET_DEBUG === "1") {
+    win.webContents.on("console-message", (...args) => {
+      const ev = args.length >= 2 && args[0] && typeof args[0] === "object" ? args[0] : null;
+      const level = ev ? ev.level : args[0];
+      const message = ev ? ev.message : args[1];
+      const line = ev ? ev.lineNumber : args[2];
+      const source = ev ? ev.sourceId : args[3];
+      console.error(`[pet.js:${level}] ${message} (${source}:${line})`);
+    });
+  }
 
   // 渲染进程：宿主退出 / WS 断了 → 自己关
   ipcMain.on("pet:close", () => app.quit());

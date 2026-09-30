@@ -169,11 +169,15 @@ function createWindowManager(ctx) {
 				: { file: isWin ? "npx.cmd" : "npx", args: ["--yes", "electron", ...args], shell: isWin };
 		}
 
+		const debug = process.env.PI_PET_DEBUG === "1";
 		try {
 			child = spawn(spec.file, spec.args, {
 				cwd: PKG_ROOT,
 				env,
-				stdio: "ignore",
+				// PI_PET_DEBUG=1 时把窗的输出接到宿主自己的 stdout/stderr：
+				// 平时 stdio 是 ignore（不弹控制台），代价是渲染进程报什么都没人看得见，
+				// 调 pet.js 只能靠猜。
+				stdio: debug ? ["ignore", "inherit", "inherit"] : "ignore",
 				detached: true,
 				windowsHide: true,
 				shell: spec.shell,

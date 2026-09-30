@@ -2,7 +2,8 @@
  * pet-electron.cjs 的 preload —— 给 pet.js 用的最小桥
  *
  * 上下文隔离开着，渲染进程拿不到 electron 模块，所以这几件事必须由主进程做：
- *   setPassthrough  鼠标是否在命中框上（决定整窗透不穿透）
+ *   setPassthrough  鼠标是否在命中框上（**仅在老 Electron（无 setShape）时生效**）
+ *   setHitRegion    把整窗的命中区裁成宠物的包围盒（正常路径，见主进程注释）
  *   openMenu        右键菜单（菜单项的动作走宿主控制面，主进程负责弹）
  *   say / onAskSay  手动输入气泡：主进程叫出输入框 → 渲染进程提交 → 主进程调宿主
  *   closeWindow     宿主退出 / WS 断了 → 关窗
@@ -10,8 +11,10 @@
 const { contextBridge, ipcRenderer } = require("electron");
 
 contextBridge.exposeInMainWorld("__petElectron__", {
-  /** 让点击穿透窗口（默认 true） */
+  /** 让点击穿透窗口（默认 true）。仅在主进程没有 setShape 时才会被采纳。 */
   setPassthrough: (on) => ipcRenderer.send("pet:passthrough", on),
+  /** 命中区：[{x,y,width,height}]（窗口坐标）。空数组会被忽略，别用来「关窗」。 */
+  setHitRegion: (rects) => ipcRenderer.send("pet:hit-region", Array.isArray(rects) ? rects : []),
   /** 弹右键菜单；info 里的 state/pets 由渲染进程提供（主进程只管菜单本身） */
   openMenu: (info) => ipcRenderer.send("pet:menu", info || {}),
   /** 手动说话：交给主进程 → 宿主 /control say → 全窗都看得到 */
