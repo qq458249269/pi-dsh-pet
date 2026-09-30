@@ -76,6 +76,31 @@ const bubbleFrames = (frames) => frames.filter(isBubble).map((f) => JSON.parse(f
 
 console.log(`\npi-dsh-pet 冒烟测试  (home=${HOME} port=${PORT})\n`);
 
+// ---------------------------------------------------------------- 参数解析
+// 纯函数，不用起进程。覆盖当初真出过的坑：带值选项不吞下一个 token，
+// 导致 `say "过来玩" --ms 6000` 把 6000 当成气泡文字、`--text=任务名` 整条丢进 flag 名。
+console.log("命令行参数解析…");
+const { parseArgs, probeCaps } = await import(pathToFileURL(join(ROOT, "app", "main.cjs")).href);
+const pa = (argv) => parseArgs(argv);
+const eq = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+
+check("`--ms 6000` 吃掉值，位置参数不被污染", eq(pa(["say", "过来玩", "--ms", "6000"]), { flags: { ms: 6000 }, positional: ["say", "过来玩"], missing: [] }));
+check("`--text=任务名` 的值能拿到", pa(["feed", "thinking", "--text=修复登录"]).flags.text === "修复登录");
+check("`--text 任务名` 与 `=` 写法等价", pa(["feed", "thinking", "--text", "修复登录"]).flags.text === "修复登录");
+check("`--port` 是数字不是字符串", pa(["start", "--port", "4000"]).flags.port === 4000);
+check("`-p 4000` == `--port 4000`", pa(["-p", "4000", "start"]).flags.port === 4000);
+check("`--port=4000` == `--port 4000`", eq(pa(["--port=4000", "start"]).flags, { port: 4000 }));
+check("`--no-window` → camelCase", pa(["start", "--no-window"]).flags.noWindow === true);
+check("开关不吃下一个 token（`--insecure start` 仍是命令）", eq(pa(["--insecure", "start"]).positional, ["start"]));
+check("缺值记进 missing（不静默吞）", pa(["say", "hi", "--ms"]).missing.includes("ms"));
+check("非数字值记进 missing（不产生 NaN）", pa(["--port=abc", "start"]).missing.includes("port") && pa(["--port=abc", "start"]).flags.port === undefined);
+check("负数是合法值（`--ms -1`）", pa(["say", "hi", "--ms", "-1"]).flags.ms === -1);
+check("`feed tool_call bash --text x`：tool 与 text 各自到位", (() => {
+	const r = pa(["feed", "tool_call", "bash", "--text", "跑一下"]);
+	return r.positional[2] === "bash" && r.flags.text === "跑一下";
+})());
+check("多词位置参数保留（feed say）", eq(pa(["feed", "say", "多", "个", "词"]).positional, ["feed", "say", "多", "个", "词"]));
+
 // ---------------------------------------------------------------- 互斥：外部宿主
 // 先看看本机有没有别的宿主（尤其是旧版 pi 扩展起的那个）：默认必须拒绝共存。
 // PI_PET_SKIP_FOREIGN=1 只对本测试自己起的进程生效，它只关「外部状态文件」这一层。
@@ -118,6 +143,20 @@ console.log("\n鉴权…");
 check("/event 无 token → 401", (await post(PORT, "/event", { type: "thinking" }, "")).status === 401);
 check("/control 错 token → 401", (await post(PORT, "/control", { action: "state" }, "nope")).status === 401);
 check("/health 免鉴权", (await get(PORT, "/health")).status === 200);
+
+// ---------------------------------------------------------------- 能力探测
+// CLI 的 withHost() 全靠它判断「这个宿主到底有没有控制面 / 事件面」：
+// 外来旧宿主只有 /health + /ws + /feed，探错了 say/restart 就只剩一个裸 404。
+console.log("\n能力探测（CLI withHost 依赖）…");
+const caps = await probeCaps(PORT, token);
+check("控制面认得（GET /control 无 action → 400 + action 清单）", caps.control === true, JSON.stringify(caps));
+check("事件面认得（GET /event 无 type → 400）", caps.event === true);
+check("带对 token 时鉴权通过", caps.auth === true);
+check("action 清单带得上（reportMissing 靠它说人话）", caps.actions.includes("say") && caps.actions.includes("restart-window"));
+const capsNoTok = await probeCaps(PORT, undefined);
+check("token 不对 → 鉴权被拒，且两面都探不到（不会瞎发请求）", capsNoTok.auth === false && !capsNoTok.control && !capsNoTok.event);
+const capsDead = await probeCaps(PORT + 1, token);
+check("端口没人听 → 两面都没有（不是「都支持」）", !capsDead.control && !capsDead.event);
 
 // ---------------------------------------------------------------- 窗接入
 console.log("\n窗接入 + 状态机…");

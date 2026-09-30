@@ -34,25 +34,118 @@ const { findRunning } = require("./host.cjs");
 
 /* ============================== 参数 ============================== */
 
+/** 开关：出现即 true，**不**吃掉下一个参数（`--insecure start` 的 start 仍是命令）。 */
+const BOOL_FLAGS = new Set([
+	"no-window",
+	"window",
+	"insecure",
+	"force",
+	"json",
+	"quiet",
+	"help",
+	"version",
+]);
+
+/** 带值选项：吃掉下一个参数；`--text=…` / `--text …` 两种写法都认。 */
+const VALUE_FLAGS = new Set(["port", "text", "task", "detail", "summary", "ms", "size"]);
+
+/** 带连字符的选项名 → camelCase 键（`--no-window` → flags.noWindow）。 */
+const DASH_TO_CAMEL = { "no-window": "noWindow" };
+
+/** 这几个的值当数字用，解析时就转掉，免得下游拿到字符串 "4000"。 */
+const NUMERIC_FLAGS = new Set(["port", "ms"]);
+
+/** 短选项 → 长名。`-p 4000` 与 `--port 4000` 等价。 */
+const SHORT_FLAGS = { "-p": "port", "-q": "quiet", "-h": "help", "-v": "version" };
+
+/**
+ * 解析命令行。
+ *
+ * 关键点（踩过的坑）：**带值的选项必须显式声明**。以前除了 `--port` 之外一律
+ * `flags[k] = true` 且不吞下一个 token，于是
+ *   `say "过来玩" --ms 6000` → flags={ms:true}、positional 多出一个 "6000"
+ *     → 气泡文字变成「过来玩 6000」、ms 变成 Number(true)=1；
+ *   `feed thinking --text=修复登录` → flags={"text=修复登录":true}
+ *     → body.text 永远拿不到，任务名**静默丢失**。
+ * 声明了 BOOL/VALUE 两张表之后，值一律落到 flags[k]，位置参数不再被污染。
+ *
+ * @returns {{flags: object, positional: string[], missing: string[]}}
+ *   `missing` = 写了选项却没给值（或值不是数字）的键，调用方报「参数错」（退出码 2）。
+ */
 function parseArgs(argv) {
 	const flags = {};
 	const positional = [];
+	const missing = [];
+
+	/** 落值：数字选项当场转，转不动（NaN）就记 missing，别把 NaN 传到下游。 */
+	const setValue = (key, raw) => {
+		if (NUMERIC_FLAGS.has(key)) {
+			const n = Number(raw);
+			if (!Number.isFinite(n)) {
+				missing.push(key);
+				return;
+			}
+			flags[key] = n;
+			return;
+		}
+		flags[key] = raw;
+	};
+
 	for (let i = 0; i < argv.length; i++) {
 		const a = argv[i];
-		if (a === "--no-window") flags.noWindow = true;
-		else if (a === "--window") flags.noWindow = false;
-		else if (a === "--insecure") flags.insecure = true;
-		else if (a === "--force") flags.force = true;
-		else if (a === "--json") flags.json = true;
-		else if (a === "--quiet" || a === "-q") flags.quiet = true;
-		else if (a === "--help" || a === "-h") flags.help = true;
-		else if (a === "--version" || a === "-v") flags.version = true;
-		else if (a === "--port" || a === "-p") flags.port = Number(argv[++i]);
-		else if (a.startsWith("--port=")) flags.port = Number(a.slice(7));
-		else if (a.startsWith("--")) flags[a.slice(2)] = true;
-		else positional.push(a);
+
+		// 短选项：-p / -q / -h / -v，值紧跟或用 = 都行
+		if (SHORT_FLAGS[a]) {
+			const key = SHORT_FLAGS[a];
+			if (VALUE_FLAGS.has(key)) {
+				const next = argv[i + 1];
+				if (next !== undefined && !(next.startsWith("-") && !/^-?\d+(\.\d+)?$/.test(next))) {
+					setValue(key, next);
+					i++;
+				} else {
+					missing.push(key);
+				}
+			} else {
+				flags[key] = true;
+			}
+			continue;
+		}
+		if (a.length > 1 && a[0] === "-" && !a.startsWith("--") && /^-[a-zA-Z]$/.test(a)) {
+			// 未知短选项当开关，别把后面的词吞了
+			flags[a.slice(1)] = true;
+			continue;
+		}
+
+		if (a.startsWith("--") && a.length > 2) {
+			const body = a.slice(2);
+			const eq = body.indexOf("=");
+			const rawKey = eq === -1 ? body : body.slice(0, eq);
+			const key = DASH_TO_CAMEL[rawKey] || rawKey;
+			if (eq !== -1) {
+				// `--text=修复登录`：通用 key=value，值原样保留（数字选项才转）
+				setValue(key, body.slice(eq + 1));
+			} else if (BOOL_FLAGS.has(key) || BOOL_FLAGS.has(rawKey)) {
+				flags[key] = true;
+			} else if (VALUE_FLAGS.has(key) || VALUE_FLAGS.has(rawKey)) {
+				const next = argv[i + 1];
+				// 负数是合法值（--ms -1），只有「像选项」才当缺值
+				const looksLikeOption = next !== undefined && next.startsWith("-") && !/^-?\d+(\.\d+)?$/.test(next);
+				if (next !== undefined && !looksLikeOption) {
+					setValue(key, next);
+					i++;
+				} else {
+					missing.push(key);
+				}
+			} else {
+				// 未知长选项：保持老行为（true，不吞值），值留在 positional 上，用户看得见
+				flags[key] = true;
+			}
+			continue;
+		}
+
+		positional.push(a);
 	}
-	return { flags, positional };
+	return { flags, positional, missing };
 }
 
 const HELP = `pi-pet ${VERSION} — 桌面宠物宿主（独立应用）
@@ -160,6 +253,63 @@ function fmtUptime(state) {
 	return `${Math.floor(s / 3600)}h${Math.floor((s % 3600) / 60)}m`;
 }
 
+/** 一次 HTTP 应答翻成人话。以前只打 `res.body || res.error`，而 404 是 text/plain：
+ *  body 解析失败 → null → 打出来的永远是那个刺眼的 `undefined`。 */
+function describeRes(res) {
+	if (!res) return "无应答";
+	if (res.status === 0) return `连不上宿主（${res.error || "无响应"}）`;
+	if (res.body && typeof res.body === "object" && (res.body.error || res.body.hint)) {
+		return `HTTP ${res.status}：${res.body.error}${res.body.hint ? `（${res.body.hint}）` : ""}`;
+	}
+	const raw = String(res.raw || "").trim().replace(/\s+/g, " ");
+	if (raw) return `HTTP ${res.status}：${raw.slice(0, 120)}`;
+	return `HTTP ${res.status}`;
+}
+
+/**
+ * 探这个宿主支持哪些面。
+ *
+ * 两个探测都是**只读**的（GET、不改任何状态）：
+ *   GET /control 不带 action → 本仓库宿主回 400 + action 清单；没有这个端点的宿主回 404。
+ *   GET /event 不带 type    → 本仓库宿主回 400 "unknown event"；旧宿主回 404。
+ * 状态文件是**任何进程都能写的普通文件**，`findRunning()` 又会把旧版 pi 扩展
+ * 起的那套宿主也当成「有宠物在跑」——不探能力，喊 say/restart 就只会丢一个裸 404 给用户。
+ */
+async function probeCaps(port, token) {
+	const [ctl, evt] = await Promise.all([
+		httpJson(port, "GET", ENDPOINTS.control, undefined, token),
+		httpJson(port, "GET", ENDPOINTS.event, undefined, token),
+	]);
+	const auth = ctl.status !== 401 && evt.status !== 401;
+	return {
+		control: ctl.status === 400 && !!(ctl.body && ctl.body.hint),
+		event: evt.status === 400 || evt.status === 200,
+		auth,
+		actions: ctl.body && typeof ctl.body.hint === "string" ? ctl.body.hint : "",
+	};
+}
+
+/** 状态文件是谁写的：自己 home 里的就是本仓库宿主，别的就是外来（旧 pi 扩展 / 别的版本）。 */
+function isForeign(file) {
+	try {
+		return path.resolve(file) !== path.resolve(PATHS.state);
+	} catch {
+		return false;
+	}
+}
+
+/** 需要的那面这个宿主没有：说清楚「是谁在跑、它只支持什么、怎么换」，别丢裸 404。 */
+function reportMissing(need, ctx) {
+	const what = need === "control" ? "控制面（say / restart / add / pause / show…）" : "事件面（feed）";
+	out(`✗ 这个宿主没有${what}`);
+	out(`  正在跑：pid ${ctx.health.pid || ctx.pid} :${ctx.port}  状态文件 ${ctx.file}`);
+	if (ctx.foreign) out("  来源：外来状态文件（不是本仓库起的宿主，findRunning 把它也当成了宠物）");
+	if (ctx.caps.actions) out(`  它的控制面只有：${ctx.caps.actions}`);
+	else if (!ctx.caps.auth) out(`  它要 token，但本机没读到（${PATHS.token}）—— 它不是本仓库起的`);
+	out("  换成本仓库的宿主：pi-pet stop（会把旧的 taskkill 掉） → pi-pet start");
+	return 1;
+}
+
 /* ============================== 子命令 ============================== */
 
 async function cmdStatus(flags) {
@@ -174,6 +324,8 @@ async function cmdStatus(flags) {
 	const { state, file } = found;
 	const health = await probeHealth(Number(state.port));
 	const alive = pidAlive(Number(state.pid));
+	const foreign = isForeign(file);
+	const caps = health ? await probeCaps(Number(state.port), readToken()) : null;
 	if (flags.json) {
 		return out(
 			JSON.stringify(
@@ -182,7 +334,9 @@ async function cmdStatus(flags) {
 					running: true,
 					// 状态文件说在、/health 探不通 = 假活（详见 DESIGN.md「已知坑」第 2 条）
 					reachable: !!health,
+					foreign,
 					stateFile: file,
+					caps,
 					state,
 					health,
 				},
@@ -192,6 +346,11 @@ async function cmdStatus(flags) {
 		);
 	}
 	out(`宠物宿主：pid ${state.pid} :${state.port}  活 ${fmtUptime(state)}  探活 ${health ? `${health.rttMs}ms` : "不通"}`);
+	out(`  来源：${foreign ? "外来状态文件（不是本仓库起的宿主）" : `本仓库（${PATHS.home}）`}`);
+	if (caps) {
+		out(`  能力：控制面 ${caps.control ? "有" : "没有"}  事件面 ${caps.event ? "有" : "没有"}  鉴权 ${caps.auth ? "通过" : "被拒"}`);
+		if (!caps.control) out("    → say / restart / add / pause 在这个宿主上不可用（旧宿主只有 /health /ws /feed）");
+	}
 	out(`  窗：pid ${state.windowPid || 0}  状态 ${state.windowState}  重启 ${state.restarts || 0} 次  ${health && health.windowConnected ? "（已连上）" : "（未连上）"}`);
 	out(`  生产者：${health ? health.feeds : "?"} 个会话  窗客户端：${health ? health.clients : "?"} 个`);
 	if (health && health.feedsBySource && Object.keys(health.feedsBySource).length) {
@@ -292,7 +451,11 @@ async function cmdStop() {
 	return 0;
 }
 
-async function withHost(fn) {
+/**
+ * 找到宿主、探活、探能力，然后把 {health, token, caps, file, foreign, port, pid} 交给 fn。
+ * @param {"control"|"event"} need 这次命令要哪一面；没有就直接报「不支持」，不发请求。
+ */
+async function withHost(need, fn) {
 	const found = findRunning();
 	if (!found) {
 		out("✗ 宠物宿主没在跑（pi-pet start）");
@@ -303,10 +466,15 @@ async function withHost(fn) {
 		out(`✗ 宿主在（pid ${found.state.pid}）但 /health 探不通，什么都做不了（pi-pet restart 或 pi-pet stop）`);
 		return 1;
 	}
-	return fn(health, readToken());
+	const token = readToken();
+	const caps = await probeCaps(health.port, token);
+	const ctx = { health, token, caps, file: found.file, foreign: isForeign(found.file), port: health.port, pid: found.state.pid };
+	if (need === "control" && !caps.control) return reportMissing("control", ctx);
+	if (need === "event" && !caps.event) return reportMissing("event", ctx);
+	return fn(ctx);
 }
 
-async function cmdFeed(positional) {
+async function cmdFeed(positional, flags) {
 	const type = positional[0];
 	if (!type) {
 		out("用法：pi-pet feed <thinking|agent_start|agent_idle|done|say|shutdown> [tool|文本]");
@@ -316,24 +484,24 @@ async function cmdFeed(positional) {
 		out('     pi-pet say "过来玩"                         （只冒泡，不改状态）');
 		return 2;
 	}
-	return withHost(async (health, token) => {
+	return withHost("event", async (ctx) => {
 		const body = { type };
 		const rest = positional.slice(1);
 		// feed say "文本"：第一个非 flag 位置参数就是气泡文字
 		if (type === "say") {
-			body.text = rest.filter((x) => !x.startsWith("--")).join(" ") || flags.text;
-		} else {
-			if (rest[0] && !rest[0].startsWith("--")) {
-				if (type === "tool_call") body.tool = rest[0];
-				else body.size = rest[0];
-			}
+			body.text = rest.join(" ") || flags.text;
+		} else if (rest[0]) {
+			// 第二个位置参数只对两种类型有意义：tool_call 的工具名、add_pet 的尺寸。
+			// 其余类型（旧代码一律当 size）收了也是白收，丢掉更安全。
+			if (type === "tool_call") body.tool = rest[0];
+			else if (type === "add_pet" && SIZES.includes(rest[0])) body.size = rest[0];
 		}
 		for (const k of ["text", "task", "detail", "summary", "ms"]) {
 			if (flags[k] !== undefined) body[k] = flags[k];
 		}
-		const res = await httpJson(health.port, "POST", ENDPOINTS.event, body, token);
+		const res = await httpJson(ctx.port, "POST", ENDPOINTS.event, body, ctx.token);
 		if (res.status !== 200) {
-			out(`✗ 没发出去：${JSON.stringify(res.body || res.error)}`);
+			out(`✗ 没发出去：${describeRes(res)}`);
 			return 1;
 		}
 		const bits = [type];
@@ -351,10 +519,10 @@ async function cmdSay(positional, flags) {
 		out('用法：pi-pet say "文本" [--ms 6000]');
 		return 2;
 	}
-	return withHost(async (health, token) => {
-		const res = await httpJson(health.port, "POST", ENDPOINTS.control, { action: "say", text, ms: Number(flags.ms) || 0 }, token);
+	return withHost("control", async (ctx) => {
+		const res = await httpJson(ctx.port, "POST", ENDPOINTS.control, { action: "say", text, ms: Number(flags.ms) || 0 }, ctx.token);
 		if (res.status !== 200) {
-			out(`✗ ${(res.body && res.body.error) || res.error || res.status}`);
+			out(`✗ ${(res.body && res.body.error) || describeRes(res)}`);
 			return 1;
 		}
 		out(`✓ ${res.body.detail || "已发送"}`);
@@ -364,10 +532,10 @@ async function cmdSay(positional, flags) {
 
 async function cmdAdd(positional) {
 	const size = positional[0] && SIZES.includes(positional[0]) ? positional[0] : "normal";
-	return withHost(async (health, token) => {
-		const res = await httpJson(health.port, "POST", ENDPOINTS.control, { action: "add-pet", size }, token);
+	return withHost("control", async (ctx) => {
+		const res = await httpJson(ctx.port, "POST", ENDPOINTS.control, { action: "add-pet", size }, ctx.token);
 		if (res.status !== 200) {
-			out(`✗ ${(res.body && res.body.error) || res.error || res.status}`);
+			out(`✗ ${(res.body && res.body.error) || describeRes(res)}`);
 			return 1;
 		}
 		out(`✓ ${res.body.detail}`);
@@ -376,10 +544,14 @@ async function cmdAdd(positional) {
 }
 
 async function cmdRestart(flags) {
-	return withHost(async (health, token) => {
-		const res = await httpJson(health.port, "POST", ENDPOINTS.control, { action: "restart-window", size: flags.size }, token);
+	if (flags.size !== undefined && !SIZES.includes(flags.size)) {
+		out(`✗ --size 只能是 ${SIZES.join(" / ")}（收到 ${JSON.stringify(flags.size)}）`);
+		return 2;
+	}
+	return withHost("control", async (ctx) => {
+		const res = await httpJson(ctx.port, "POST", ENDPOINTS.control, { action: "restart-window", size: flags.size }, ctx.token);
 		if (res.status !== 200) {
-			out(`✗ ${(res.body && res.body.error) || res.error || res.status}`);
+			out(`✗ ${(res.body && res.body.error) || describeRes(res)}`);
 			return 1;
 		}
 		out(`✓ ${res.body.detail}（size=${flags.size || readCtrl().size || "normal"}）`);
@@ -400,7 +572,12 @@ function cmdPort() {
 function cmdToken() {
 	const t = readToken();
 	if (!t) {
-		out("还没有 token（宿主没起过）：pi-pet start");
+		out("还没有 token（本仓库的宿主没起过）：pi-pet start");
+		const found = findRunning();
+		if (found && isForeign(found.file)) {
+			out(`  注意：现在跑的是外来宿主（状态文件 ${found.file}），它不认本仓库的 token`);
+			out("  想要能用的 token：pi-pet stop 换成本仓库的宿主，再 pi-pet start");
+		}
 		return 1;
 	}
 	out(t);
@@ -479,7 +656,13 @@ async function cmdDoctor() {
 
 async function main() {
 	const argv = process.argv.slice(2);
-	const { flags, positional } = parseArgs(argv);
+	const { flags, positional, missing } = parseArgs(argv);
+	if (missing.length) {
+		// 缺值/值非法要当场报，别带着半个 flag 往下跑（--ms 没值 → 气泡 1ms 后消失）
+		out(`✗ 参数缺值：${[...new Set(missing)].map((k) => `--${k}`).join(" ")}`);
+		out("  写法：`--k 值` 或 `--k=值`");
+		return 2;
+	}
 	const cmd = positional.shift() || "start";
 
 	if (flags.help) {
@@ -491,11 +674,15 @@ async function main() {
 		return 0;
 	}
 
+	// `--window` 显式反转 `--no-window`（两者先后顺序不影响）
+	if (flags.window) delete flags.noWindow;
+
 	switch (cmd) {
 		case "start":
 			return cmdStart(flags);
 		case "serve":
-			flags.noWindow = true;
+			// serve 默认无头；写了 --window 就以显式 flag 为准
+			if (!flags.window) flags.noWindow = true;
 			return cmdStart(flags);
 		case "status":
 			return cmdStatus(flags);
@@ -535,4 +722,4 @@ if (require.main === module) {
 		});
 }
 
-module.exports = { main, parseArgs, probeHealth, httpJson };
+module.exports = { main, parseArgs, probeCaps, probeHealth, httpJson };
