@@ -232,7 +232,8 @@ jobs:
             $h = (curl.exe -s --noproxy "*" --max-time 5 "$base/health" | Out-String) | ConvertFrom-Json
             if ($h.role -ne "pi-pet-host") { throw "/health 的 role 不对：$($h.role)" }
             # 注意 /health 的 version 是**协议版本**（1），不是应用版本号 ——
-            # 应用版本靠产物文件名验（见「列产物」那一步）
+            # 应用版本是 YYYY.MM.DD.NNNN，压根不是合法 semver，electron-builder
+            # 会自己规范化（实测 2026.09.30.0002 → 2026.9.3-0.2），所以别拿它做断言
             if (-not $h.version) { throw "/health 没有 version 字段" }
 
             # 窗页面 + 素材都在 app.asar 里，顺手确认能从 asar 里读出来
@@ -280,15 +281,25 @@ jobs:
         run: |
           Get-ChildItem dist -File | Select-Object Name, @{n='MB';e={[math]::Round($_.Length/1MB,1)}} |
             Format-Table -AutoSize | Out-String | Write-Host
-          $portable = Get-ChildItem dist -Filter *portable.exe -ErrorAction SilentlyContinue
-          if (-not $portable) { throw "没打出 portable 单文件 exe（dist 里没有 *portable.exe）" }
-          if (-not (Test-Path dist\win-unpacked\pi-dsh-pet.exe)) { throw "没打出 win-unpacked 目录版" }
-          # 产物名里必须带刚算出来的版本号：证明 set-version → electron-builder 这条链是通的
-          $ver = "${{ needs.version.outputs.version }}"
-          if ($portable.Name -notlike "*$ver*") {
-            throw "portable 产物名里没有版本号 $ver（实际：$($portable.Name)）"
+          # 产物名是固定的（见 electron-builder.yml 里的说明）：
+          #   pi-dsh-pet.exe        portable 免安装单文件 —— 用户双击的就是它
+          #   pi-dsh-pet-setup.exe  NSIS 安装包
+          # 不用版本号做断言：YYYY.MM.DD.NNNN 不是合法 semver，electron-builder 会
+          # 自己规范化（实测 2026.09.30.0002 → 2026.9.3-0.2），拿它当断言就是拿
+          # 「别人内部实现」当契约，会假失败。
+          foreach ($f in @("dist\pi-dsh-pet.exe", "dist\pi-dsh-pet-setup.exe", "dist\win-unpacked\pi-dsh-pet.exe")) {
+            if (-not (Test-Path $f)) { throw "没打出 $f" }
           }
-          $portable | Select-Object Name, @{n='MB';e={[math]::Round($_.Length/1MB,1)}} |
+          # asar 必须在：app/*.cjs + 91 个 webm 素材全在里面。asar 丢了照样能出 exe，
+          # 症状是「双击开窗，窗里啥也没有」—— 不在这里拦，到用户手上才发现。
+          $asar = "dist\win-unpacked\resources\app.asar"
+          if (-not (Test-Path $asar)) { throw "app.asar 不在包里（$asar）" }
+          $mb = [math]::Round((Get-Item $asar).Length / 1MB, 1)
+          Write-Host "app.asar：$mb MB"
+          if ($mb -lt 5) { throw "app.asar 才 $mb MB，八成没打进去素材" }
+          # 固定名 + 体积下限，两个都过了才算真出了货
+          Get-ChildItem dist -Filter *.exe |
+            Select-Object Name, @{n='MB';e={[math]::Round($_.Length/1MB,1)}} |
             Format-Table -AutoSize | Out-String | Write-Host
 
       - name: 传产物
@@ -341,11 +352,11 @@ jobs:
 
           | 文件 | 说明 |
           |------|------|
-          | \`*portable.exe\` | 免安装单文件，**双击即用**（推荐） |
-          | \`*x64.exe\` | NSIS 安装包，带桌面/开始菜单快捷方式 |
-          | \`*source.zip\` | 源码 |
+          | \`pi-dsh-pet.exe\` | 免安装单文件，**双击即用**（推荐） |
+          | \`pi-dsh-pet-setup.exe\` | 安装版，带桌面/开始菜单快捷方式 |
+          | \`pi-dsh-pet-${VERSION}-source.zip\` | 源码 |
 
-          用法：\`pi-dsh-pet.exe\` 双击即可（自带服务+窗，不需要 Node）。
+          用法：把 \`pi-dsh-pet.exe\` 放哪都行，双击就能跑（自带服务 + 窗，不需要 Node）。
           pi / dsh 侧用 \`pi-pet start\`，或让 pi 扩展自动拉起；
           端口/token 见 \`pi-pet status\`（数据目录：%APPDATA%\\pi-dsh-pet）。
           EOF

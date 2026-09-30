@@ -242,12 +242,20 @@ pi-pet config           # 看/改 config.json
    推失败（权限/网络）就会以 `couldn't find remote ref v…` 把整个发布拖红。
    源码包和 exe 因此完全解耦；推 tag 那步 `continue-on-error`：
    推不动就在摘要里留证据，绝不连累 exe。
+4. **产物名里不放版本号。** `YYYY.MM.DD.NNNN` 是四段、还带前导零，**不是合法
+   semver**，electron-builder 读 package.json 时会自己规范化它，实测
+   `2026.09.30.0002` → `${version}` 变成 `2026.9.3-0.2`。
+   后果有两个：名字难看且不稳定（规范化规则随版本变），以及**不能拿版本号做 CI 断言**
+   —— 那是拿别人的内部实现当契约，改个 electron-builder 版本就假失败。
+   产物固定叫 `pi-dsh-pet.exe`（portable）与 `pi-dsh-pet-setup.exe`（NSIS；
+   不能也叫 `pi-dsh-pet.exe`，两个 target 同名会撞）。
+   版本信息另有地方存：tag、release 说明、asar 里的 package.json。
 
 ### 10.2 产物长什么样
 
-`version` job 出 `*source.zip`；`exe` job 先 `--dir` 出 `dist/win-unpacked/`
-（唯一能**当场真跑一次**的产物），冒烟通过后再出 `*-portable.exe`（免安装单文件）
-与 `*-x64.exe`（NSIS 安装包）。冒烟只起服务不起窗（`--no-window`），用临时
+`version` job 出 `*-source.zip`；`exe` job 先 `--dir` 出 `dist/win-unpacked/`
+（唯一能**当场真跑一次**的产物），冒烟通过后再出 `pi-dsh-pet.exe`（免安装单文件）
+与 `pi-dsh-pet-setup.exe`（NSIS 安装包）。冒烟只起服务不起窗（`--no-window`），用临时
 `PI_PET_HOME`，验 `port` 文件 + `/health` 的 `role` + `/` 与 `/config.jsonc`
 能从 `app.asar` 里读出来，验完 taskkill 清理；它 `continue-on-error`，
 挂了写进摘要但不拦产物（别因为 runner 的图形环境卡死整次发布）。
@@ -258,3 +266,7 @@ pi-pet config           # 看/改 config.json
 渲染进程（`/pet.html`、`/thumb/*.webm`），不依赖 Chromium 直接读 asar 里的媒体。
 `npm run build` / `npm run build:dir` 是本地等价物（`npx electron-builder`），
 仓库本身仍然零运行时依赖。
+
+asar 也会丢：「files 白名单漏了」照样能打出一个 exe，症状是**双击开窗、窗里啥也没有**。
+所以「列产物」那步除了看三个固定名，还要看 `dist/win-unpacked/resources/app.asar`
+在不在、大小是不是离谱（5MB 门槛：91 个 webm 素材都在里面）。

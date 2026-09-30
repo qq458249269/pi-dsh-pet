@@ -31,7 +31,15 @@ win:
       arch: [x64]
     - target: nsis
       arch: [x64]
-  artifactName: pi-dsh-pet-${version}-${arch}.${ext}
+  # 产物名**不带版本号**，就叫这两个固定名：
+  #   pi-dsh-pet.exe         = portable 免安装单文件（用户双击的就是它）
+  #   pi-dsh-pet-setup.exe   = NSIS 安装包（不能也叫 pi-dsh-pet.exe：两个 target 同名会撞）
+  # 为什么不带版本号：版本号规则是 YYYY.MM.DD.NNNN（2026.09.30.0002），**不是合法 semver**
+  # （三段后还有一段），electron-builder 会自己规范化它。实测打出来是：
+  #   2026.09.30.0002 → ${version} 变成 2026.9.3-0.2
+  # 也就是说名字里塞版本号，既不可控（下次规范化规则变了名字又变）又难看。
+  # 版本信息没丢：tag（v2026.09.30.0002）、release、asar 里的 package.json 都还在。
+  artifactName: pi-dsh-pet-setup.${ext}
   # 素材是 webm，asar 里读没问题；但 webm 有 91 个，别让压缩把 CI 拖死
   compression: normal
 
@@ -44,4 +52,5 @@ nsis:
   shortcutName: pi-dsh-pet
 
 portable:
-  artifactName: pi-dsh-pet-${version}-portable.${ext}
+  # 固定名：双击即用的那一个，见上面 win.artifactName 里的说明
+  artifactName: pi-dsh-pet.${ext}
