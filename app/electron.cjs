@@ -14,11 +14,38 @@
  * 打包版没有 electron.exe 可 spawn，所以第二个进程就是**这个 exe 自己**。
  */
 
+const os = require("node:os");
 const path = require("node:path");
 const { app } = require("electron");
 
+/** 数据目录（与 app/paths.cjs 同一套规则；这里只为了给窗单独的 userData）。 */
+function dataHome() {
+	try {
+		return require(path.join(__dirname, "paths.cjs")).PATHS.home;
+	} catch {
+		/* paths.cjs 读不到就自己算 */
+	}
+	if (process.env.PI_PET_HOME) return path.resolve(process.env.PI_PET_HOME);
+	if (process.platform === "win32") {
+		return path.join(process.env.APPDATA || path.join(os.homedir(), "AppData", "Roaming"), "pi-dsh-pet");
+	}
+	return path.join(os.homedir(), ".pi-dsh-pet");
+}
+
 /* ---- 1. 窗模式：直接把自己变成那扇窗 ---- */
 if (process.argv.includes("--pi-pet-window")) {
+	// 宿主与窗是两个 Electron 进程，却默认共用同一个 userData（%APPDATA%\pi-dsh-pet）：
+	// Chromium 的 disk cache / GPU cache 被两边同时抢，窗一启动就刷一串
+	//   ERROR:cache_util_win.cc(20) Unable to move the cache: 拒绝访问。 (0x5)
+	//   ERROR:gpu_disk_cache.cc(713) Gpu Cache Creation failed: -2
+	// 本来无害，但它会把「窗到底起来没有」的排查搅成一团（窗没起来也有一屏红字），
+	// 而且 Chromium 抢缓存失败时首帧会明显变慢。给窗一个自己的 profile 就干净了。
+	// ⚠️ 必须在 app ready 之前调用 setPath，晚一步就抛。
+	try {
+		app.setPath("userData", path.join(dataHome(), "window-profile"));
+	} catch {
+		/* 抢不到就算了，不影响开窗 */
+	}
 	// argv[2] 就是端口（pet-electron.cjs 一直读它）
 	require(path.join(__dirname, "..", "pi", "assets", "pet-electron.cjs"));
 } else {
