@@ -216,7 +216,11 @@ async function start(options = {}) {
 	const busHooks = { onStateChange: () => {}, maxPets: () => 1, paused: () => false };
 	const bus = createBus(busHooks);
 
-	const win = createWindowManager({ onWindowChange: (patch) => Object.assign(state, patch) });
+	const win = createWindowManager({
+		// 窗靠 PI_PET_TOKEN 拿到权威口令（不要让它自己去 home 里猜）
+		token,
+		onWindowChange: (patch) => Object.assign(state, patch),
+	});
 
 	const onStateChange = () => {
 		const s = bus.stats();

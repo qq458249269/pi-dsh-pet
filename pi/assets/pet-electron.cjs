@@ -37,6 +37,21 @@ if (!port || isNaN(port)) {
 const url = `http://127.0.0.1:${port}`;
 const PKG_ROOT = path.resolve(__dirname, "..", "..");
 
+/** 数据目录（拿不到 token 时用它报错）：优先 paths.cjs，再按平台惯例算一遍。 */
+function homeDir() {
+  try {
+    return require(path.join(PKG_ROOT, "app", "paths.cjs")).PATHS.home;
+  } catch {
+    /* 被打包成 asar / 被单独拷走时的兜底 */
+  }
+  if (process.env.PI_PET_HOME) return process.env.PI_PET_HOME;
+  if (process.platform === "darwin") return path.join(os.homedir(), "Library", "Application Support", "pi-dsh-pet");
+  if (process.platform === "win32") {
+    return path.join(process.env.APPDATA || path.join(os.homedir(), "AppData", "Roaming"), "pi-dsh-pet");
+  }
+  return path.join(os.homedir(), ".pi-dsh-pet");
+}
+
 /** 主进程 → 渲染进程的单向通道（目前只有“叫出输入框”用得到） */
 let webContentsSend = null;
 
@@ -97,22 +112,45 @@ function callHost(action, body, token) {
   });
 }
 
-/** token 与数据目录：优先用 app/paths.cjs（单一真源），拿不到再自己算一遍。 */
+/**
+ * token 与数据目录。
+ *
+ * 口径：**宿主经 PI_PET_TOKEN 环境变量给的才是权威的**（app/window.cjs 拉起窗时塞进去的）。
+ * 以前只认 home/token 文件：那个文件没了、或临时 home 把它盖了、或窗的 PI_PET_HOME 和
+ * 宿主不是同一个时，窗读出来是空串，而且静默当没事 —— 结果菜单里每个动作都被 401 拒掉，
+ * 用户只看到一句「操作没成功：unauthorized」，完全指不到「token 没读到」上。
+ * 文件只当兜底；两条都空时把路径报出来，别再装哑巴。
+ */
 function readTokenAndHome() {
+  const fromEnv = String(process.env.PI_PET_TOKEN || "").trim();
+  if (fromEnv) return { token: fromEnv, home: homeDir(), fromEnv: true };
+  const home = homeDir();
+  let token = "";
   try {
-    const { PATHS } = require(path.join(PKG_ROOT, "app", "paths.cjs"));
-    let token = "";
-    try { token = fs.readFileSync(PATHS.token, "utf8").trim(); } catch { /* 还没起过宿主 */ }
-    return { token, home: PATHS.home };
+    token = fs.readFileSync(path.join(home, "token"), "utf8").trim();
   } catch {
-    const home = process.env.PI_PET_HOME
-      || (process.platform === "win32"
-        ? path.join(process.env.APPDATA || path.join(os.homedir(), "AppData", "Roaming"), "pi-dsh-pet")
-        : path.join(os.homedir(), ".pi-dsh-pet"));
-    let token = "";
-    try { token = fs.readFileSync(path.join(home, "token"), "utf8").trim(); } catch { /* ignore */ }
-    return { token, home };
+    /* 拿不到就是拿不到（下面 failureDetail 会把它说清楚） */
   }
+  if (process.env.PI_PET_DEBUG === "1") {
+    console.error(`[pi-dsh-pet] 没收到 PI_PET_TOKEN，兜底读 ${path.join(home, "token")} → ${token ? "有" : "空"}`);
+  }
+  return { token, home, fromEnv: false };
+}
+
+/** 失败弹窗里那句人话：401 必须指向「token 没读到」，别让人对着 unauthorized 猜。 */
+function failureDetail(home, res, what) {
+  const why = res ? res.error || "unknown" : "no response";
+  const lines = [`${what}：${why}`];
+  if (!res || why === "unauthorized") {
+    lines.push(
+      "",
+      "宿主不认这扇窗的 token —— 鉴权 token 没读到（窗本来是从 PI_PET_TOKEN 环境变量拿的）。",
+      `兜底路径：${path.join(home, "token")}`,
+      "常见原因：数据目录被换过（PI_PET_HOME）、或那个 token 文件被删了。",
+      "解法：`pi-pet stop` 再 `pi-pet start`（会重新生成 token 并交给窗）。",
+    );
+  }
+  return lines.join("\n");
 }
 
 function pkgVersion() {
@@ -236,20 +274,26 @@ app.whenReady().then(() => {
 
   // 渲染进程：“说点什么…” → 把输入框叫到宠物头上（输入框长在气泡里）
   ipcMain.on("pet:say-ask", () => {
+    // ⚠️ 顺序要紧：先让窗可聚焦，再叫渲染进程 focus()。反过来 focus 就落在一扇
+    // focusable:false 的窗上，DOM 焦点会被系统丢掉（打不进字、Esc 也关不掉）。
+    setInputMode(true);
     if (webContentsSend) webContentsSend("pet:say-ask");
   });
+
+  // 渲染进程：输入框收工（Enter / Esc / 点别处 / 失焦）→ 把键盘焦点还给下面的窗口
+  ipcMain.on("pet:say-input-end", () => setInputMode(false));
 
   // 渲染进程 → 主进程：用户手动说的话。走宿主 /control（主进程有 token）
   ipcMain.on("pet:say-submit", async (_event, text) => {
     const t = String(text == null ? "" : text).trim();
     if (!t) return;
-    const { token } = readTokenAndHome();
+    const { token, home } = readTokenAndHome();
     const res = await callHost("say", { text: t }, token);
     if (!res || res.ok !== true) {
       dialog.showMessageBox({
         type: "warning",
         message: "没能说出来",
-        detail: `宿主没应答：${res ? res.error || "unknown" : "no response"}`,
+        detail: failureDetail(home, res, "宿主没应答"),
         buttons: ["好"],
       });
     }
@@ -257,6 +301,12 @@ app.whenReady().then(() => {
 
   // 渲染进程：右键菜单
   ipcMain.on("pet:menu", async (_event, info = {}) => {
+    // 菜单开着的时候输入框必然已经废了（原生菜单自己拿走了焦点）：顺手收掉，
+    // 不然用户会对着一个打不了字、也关不掉的框干瞪眼。
+    if (inputMode) {
+      if (webContentsSend) webContentsSend("pet:say-cancel");
+      setInputMode(false);
+    }
     const { token, home } = readTokenAndHome();
     const st = await hostState(token);
     const ctrl = (st && st.ctrl) || {};
@@ -270,7 +320,7 @@ app.whenReady().then(() => {
         dialog.showMessageBox({
           type: "warning",
           message: "操作没成功",
-          detail: `宿主（127.0.0.1:${port}）没应答或拒绝了：${res ? res.error || "unknown" : "no response"}`,
+          detail: failureDetail(home, res, `宿主（127.0.0.1:${port}）没应答或拒绝了`),
           buttons: ["好"],
         });
       }
@@ -345,6 +395,45 @@ app.whenReady().then(() => {
 
     menu.popup({ window: win });
   });
+
+  // ---- 输入模式：只在输入框开着的那一小会儿让窗可聚焦 ----
+  // 窗平时 focusable:false —— 点宠物也不把你正在打字的窗口抢走。但那样的窗**拿不到
+  // 键盘焦点**：DOM 里的 input.focus() 会被系统丢掉，于是键既打不进框、也关不掉框
+  //（框还一直挂在屏幕上，因为关框只有 Esc 和 Enter 两条路，都走键盘）。
+  let inputMode = false;
+  let inputModeAt = 0;
+
+  function setInputMode(on) {
+    if (inputMode === on || win.isDestroyed()) return;
+    inputMode = on;
+    if (on) inputModeAt = Date.now();
+    try {
+      if (process.platform === "darwin") win.setFocusableOnMac(on);
+      else win.setFocusable(on);
+    } catch (err) {
+      console.error("[pi-dsh-pet] 切可聚焦失败：", err && err.message);
+    }
+    if (!on) {
+      // 先 blur 再撤可聚焦：不可聚焦的窗交不出焦点，下面那个窗口才拿得回去
+      try { win.blur(); } catch { /* ignore */ }
+    } else {
+      // 光「可聚焦」还不够，得真的把它激活，DOM 焦点才留得住
+      try { win.focus(); } catch { /* ignore */ }
+    }
+  }
+
+  // 兜底：输入框开着的时候焦点跑掉了（用户点了别的程序）→ 叫渲染进程把框收掉。
+  // 别让一个打不了字又关不掉的框永远挂在屏幕上。
+  win.on("blur", () => {
+    if (!inputMode || win.isDestroyed()) return;
+    if (Date.now() - inputModeAt < 800) return; // 刚叫出来的那一下不算（原生菜单收起时的失焦）
+    if (webContentsSend) webContentsSend("pet:say-cancel");
+    setInputMode(false);
+  });
+
+  // 窗被收起来/关掉时复位，免得下次调用被 inputMode 卡住
+  win.on("hide", () => { inputMode = false; });
+  win.on("closed", () => { inputMode = false; });
 
   win.loadURL(url);
 

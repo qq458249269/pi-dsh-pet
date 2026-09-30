@@ -162,6 +162,13 @@ function resolveElectronBin() {
 	return found;
 }
 
+/**
+ * ctx.token：宿主手里的 REST 口令，**直接经环境变量交给窗**（PI_PET_TOKEN）。
+ * 以前窗是自己去 home/token 里读的 —— 那个文件被删、被临时 home 覆盖、或者窗的
+ * PI_PET_HOME 和宿主不是同一个时，窗就静默读到空串，于是菜单里每个动作都回
+ * 「unauthorized」（用户看到的「退出桌宠 → 操作没成功」就是它）。宿主手里本来就有，
+ * 传过去是最短也最不容易错的一条路；读文件只留作兜底。
+ */
 function createWindowManager(ctx) {
 	let child = null;
 	let pid = 0;
@@ -181,6 +188,8 @@ function createWindowManager(ctx) {
 		}
 		const isWin = process.platform === "win32";
 		const env = { ...process.env };
+		// 权威口令直接给窗（见 createWindowManager 的注释）
+		if (ctx && ctx.token) env.PI_PET_TOKEN = String(ctx.token);
 		// 国内机器走 npmmirror（GitHub / S3 不通）
 		if (isWin && !env.ELECTRON_MIRROR) {
 			env.ELECTRON_MIRROR = "https://npmmirror.com/mirrors/electron/";

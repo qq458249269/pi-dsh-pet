@@ -556,18 +556,39 @@
     bubble.appendChild(input);
     bubble.classList.add("has-input");
 
-    function submitInput() {
-      var v = input.value.trim();
+    /** 输入框开着？（主进程靠这个决定要不要把窗切成可聚焦） */
+    var inputOpen = false;
+
+    /** 收工：清框、藏气泡、告诉主进程把键盘焦点还给下面的窗口。所有关闭路径都走这里。 */
+    function closeInput() {
+      if (!inputOpen) return;
+      inputOpen = false;
       input.value = "";
       input.classList.remove("on");
       bubble.classList.remove("with-input");
       self.hideBubble();
+      if (window.__petElectron__ && window.__petElectron__.sayInputEnd) window.__petElectron__.sayInputEnd();
+    }
+
+    /** 焦点要等主进程把窗切成可聚焦才留得住，所以补两下（第一下常常被系统吐掉）。 */
+    function focusInput() {
+      if (!inputOpen) return;
+      input.focus();
+      input.select();
+      requestAnimationFrame(function () { if (inputOpen) input.focus(); });
+      setTimeout(function () { if (inputOpen) input.focus(); }, 60);
+    }
+
+    function submitInput() {
+      var v = input.value.trim();
+      closeInput();
       if (!v) return;
       if (window.__petElectron__ && window.__petElectron__.say) window.__petElectron__.say(v);
       else self.showBubble(v, { ms: 5000 });
     }
 
     self.askSay = function () {
+      inputOpen = true;
       bubble.classList.add("show");
       bubble.classList.add("with-input");
       input.classList.add("on"); // ⚠️ 不能写 style.display = ""：样式表里的 display:none
@@ -575,26 +596,33 @@
       bubble.style.display = "";
       self.clampBubble();
       pushHitRegion();
-      input.focus();
-      input.select();
+      focusInput();
     };
     input.addEventListener("keydown", function (e) {
       e.stopPropagation();
       if (e.key === "Enter") submitInput();
-      else if (e.key === "Escape") {
-        input.value = "";
-        input.classList.remove("on");
-        bubble.classList.remove("with-input");
-        self.hideBubble();
-      }
+      else if (e.key === "Escape") closeInput();
     });
     // 点输入框时别触发宠物的点击/拖拽逻辑
     input.addEventListener("mousedown", function (e) { e.stopPropagation(); });
     input.addEventListener("click", function (e) { e.stopPropagation(); });
+    // 鼠标落回框上时再要一次焦点（Windows 上第一次点击往往只是把窗激活）
+    input.addEventListener("mouseup", function () { focusInput(); });
+    // 点宠物身上 = 「不说了」：顺便把焦点还给下面的窗口
+    input.addEventListener("blur", function () {
+      setTimeout(function () {
+        if (inputOpen && document.activeElement !== input) closeInput();
+      }, 120);
+    });
+    self.closeInput = closeInput;
 
     // 右键菜单里的「说点什么…」→ 主进程叫这一声
     if (window.__petElectron__ && window.__petElectron__.onAskSay) {
       window.__petElectron__.onAskSay(function () { self.askSay(); });
+    }
+    // 主进程强制收（失焦 / 开了菜单）：别让框赖在屏幕上不走
+    if (window.__petElectron__ && window.__petElectron__.onSayCancel) {
+      window.__petElectron__.onSayCancel(function () { closeInput(); });
     }
 
     // ---- Switch to animation (dual buffer crossfade) ----
@@ -779,6 +807,8 @@
     // ---- Pointer events (click vs drag) ----
     hit.addEventListener("pointerdown", function (e) {
       e.currentTarget.classList.add("dragging");
+      // 输入框开着的时候点宠物 = 「不说了」：先收掉，别把焦点一直扣在透明窗上
+      if (self.closeInput) self.closeInput();
       self.stopMove();
       setPassthrough(false); // capture during drag
       e.currentTarget.setPointerCapture(e.pointerId);

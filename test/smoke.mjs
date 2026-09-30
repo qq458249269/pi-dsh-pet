@@ -152,6 +152,35 @@ console.log("\n头顶气泡（截断 / 不跟随）…");
 	check("文案走独立节点，不动 bubble.textContent", !/^\s*bubble\.textContent\s*=/m.test(petJs) && /bubbleText\.textContent = t/.test(petJs));
 }
 
+// ------------------------------------------------ 「说点什么…」的键盘与收尾
+// 这一整块都是**窗拿不到键盘焦点**惹的：窗平时 focusable:false，点宠物不抢你正在
+// 打字的窗口；那样的窗 DOM 里的 input.focus() 会被系统丢掉 —— 框出来了却打不进字，
+// 关框又只有 Enter / Esc 两条路（都走键盘），于是框永远赖在屏幕上。三条都钉上：
+console.log("\n「说点什么…」输入框（焦点 / 关闭 / 鉴权）…");
+{
+	const petJs = readFileSync(join(ROOT, "pi", "assets", "pet.js"), "utf8");
+	const mainJs = readFileSync(join(ROOT, "pi", "assets", "pet-electron.cjs"), "utf8");
+	const preloadJs = readFileSync(join(ROOT, "pi", "assets", "preload.cjs"), "utf8");
+	const windowCjs = readFileSync(join(ROOT, "app", "window.cjs"), "utf8");
+	// ① 叫输入框时先把窗切成可聚焦（顺序反了 focus 会被系统丢掉）
+	check("叫输入框前先开输入模式（可聚焦）", /ipcMain\.on\("pet:say-ask",[\s\S]{0,200}setInputMode\(true\)/.test(mainJs));
+	check("输入模式用 setFocusable 切（不是构造时的 focusable:false）", /win\.setFocusable\(on\)/.test(mainJs));
+	// ② 关框后要把焦点还给下面的窗口，否则宠物一直顶着别人的输入焦点
+	check("收工信号把输入模式关掉", /ipcMain\.on\("pet:say-input-end", \(\) => setInputMode\(false\)\)/.test(mainJs));
+	check("关输入模式时先 blur", /if \(!on\) \{[\s\S]{0,120}win\.blur\(\)/.test(mainJs));
+	// ③ 关框的所有路径都要走同一个 closeInput（Enter / Esc / 点宠物 / 失焦 / 主进程强收）
+	check("关框只有一个入口 closeInput", /function closeInput\(\)/.test(petJs) && /self\.closeInput = closeInput/.test(petJs));
+	check("Esc 走 closeInput（不是就地清一下）", /e\.key === "Escape"\) closeInput\(\)/.test(petJs));
+	check("点宠物身上也收框", /pointerdown[\s\S]{0,220}self\.closeInput\(\)/.test(petJs));
+	check("失焦时主进程叫渲染进程收框", /win\.on\("blur"[\s\S]{0,400}pet:say-cancel/.test(mainJs));
+	check("收框信号两头都接上了", /sayInputEnd: \(\) => ipcRenderer\.send\("pet:say-input-end"\)/.test(preloadJs) && /onSayCancel: \(cb\) => ipcRenderer\.on\("pet:say-cancel"/.test(preloadJs));
+	// ④ 菜单动作 401：token 必须由宿主经环境变量交给窗，窗不能只认 home/token 文件
+	//    （那个文件没了 / 临时 home 盖了 → 空串 → 「unauthorized」，而用户完全看不出所以然）
+	check("拉窗时把 token 交给窗（PI_PET_TOKEN）", /env\.PI_PET_TOKEN = String\(ctx\.token\)/.test(windowCjs));
+	check("窗优先认 PI_PET_TOKEN，文件只当兜底", /process\.env\.PI_PET_TOKEN/.test(mainJs) && /兜底读/.test(mainJs));
+	check("401 的报错要指向 token，而不是干巴巴一个 unauthorized", /failureDetail/.test(mainJs) && /鉴权 token 没读到/.test(mainJs));
+}
+
 // ---------------------------------------------------------------- 互斥：外部宿主
 // 先看看本机有没有别的宿主（尤其是旧版 pi 扩展起的那个）：默认必须拒绝共存。
 // PI_PET_SKIP_FOREIGN=1 只对本测试自己起的进程生效，它只关「外部状态文件」这一层。
