@@ -11,7 +11,7 @@ on:
   workflow_dispatch:
     inputs:
       dry_run:
-        description: "只算版本号、跑测试、传源码，不打 exe、不建 tag"
+        description: "只算版本号、跑测试、传源码，不打 exe、不建 tag、不发 release"
         type: boolean
         default: false
 
@@ -25,6 +25,7 @@ concurrency:
 jobs:
   # ---------------------------------------------------------------- 1. 版本号 + 源码包
   version:
+    name: 版本号 + 源码包
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.v.outputs.version }}
@@ -67,42 +68,58 @@ jobs:
         run: npm test
 
       - name: 把 package.json 的 version 写成算出来的版本号
-        run: |
-          node -e "
-            const fs=require('fs');
-            const p=JSON.parse(fs.readFileSync('package.json','utf8'));
-            p.version=process.env.VERSION;
-            fs.writeFileSync('package.json', JSON.stringify(p,null,2)+'\n');
-          "
+        run: node scripts/set-version.cjs "${{ steps.v.outputs.version }}"
+
+      # 注意：这一段里出现的 $VERSION 必须由 env: 提供。Actions 的 env 只挂在**本 step**，
+      # 挂在上一个 step 上是没用的 —— 少了就会 `set -u` 直接退出，job 变红。
+      - name: 打包 source code
         env:
           VERSION: ${{ steps.v.outputs.version }}
-
-      - name: 打包 source code
         run: |
           set -euo pipefail
           mkdir -p dist
+          # 版本号只写进 zip 里的那棵树（git write-tree = 拿暂存区写个 tree 对象），
+          # 不动 git 历史：CI 不产生提交，main 不会被推走，本地 push 也不会被拒。
           git add -A
-          git diff --cached --quiet || git commit -m "chore: release ${VERSION}" || true
-          git archive --format=zip --prefix="pi-dsh-pet-${VERSION}/" -o "dist/pi-dsh-pet-${VERSION}-source.zip" HEAD
+          TREE="$(git write-tree)"
+          git archive --format=zip --prefix="pi-dsh-pet-${VERSION}/" \
+            -o "dist/pi-dsh-pet-${VERSION}-source.zip" "$TREE"
           ls -l dist
+          # 自检：zip 里的 package.json 必须是刚算出来的版本号（unzip 不一定有，没有就跳过）
+          if command -v unzip >/dev/null 2>&1; then
+            unzip -p "dist/pi-dsh-pet-${VERSION}-source.zip" "pi-dsh-pet-${VERSION}/package.json" | grep '"version"'
+          fi
 
       - uses: actions/upload-artifact@v4
         with:
           name: pi-dsh-pet-${{ steps.v.outputs.version }}-source
           path: dist/pi-dsh-pet-*-source.zip
+          if-no-files-found: error
 
       - name: 建 tag 并推
-        if: ${{ github.ref_type != 'tag' }}
+        # dry_run 明确承诺「不建 tag」；tag push 时版本号就是 tag 本身，别重复建
+        if: ${{ github.ref_type != 'tag' && !(github.event_name == 'workflow_dispatch' && inputs.dry_run == true) }}
         run: |
+          set -euo pipefail
+          TAG="${{ steps.v.outputs.tag }}"
+          # 重跑同一个 run / 再手动触发一次时 tag 可能已经在：复用它，别把 job 搞红
+          if git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
+            echo "tag ${TAG} 已存在，复用（不重建）"
+            git ls-remote --tags origin "refs/tags/${TAG}"
+            exit 0
+          fi
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git tag -a "${{ steps.v.outputs.tag }}" -m "release ${{ steps.v.outputs.version }}"
-          git push origin "${{ steps.v.outputs.tag }}"
+          git tag -a "${TAG}" -m "release ${{ steps.v.outputs.version }}"
+          git push origin "refs/tags/${TAG}"
 
   # ---------------------------------------------------------------- 2. 打 Windows exe
   exe:
+    name: 打 Windows exe
     needs: version
-    if: ${{ inputs.dry_run != true }}
+    # push 事件里 inputs 为 null，null != true，所以老写法在 push 时是对的；
+    # 这里换成显式判断，dry_run 才真的只跳过 exe（手动触发时）。
+    if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.dry_run == true) }}
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -115,25 +132,24 @@ jobs:
           node-version: "22"
 
       - name: 同步版本号
-        run: |
-          node -e "
-            const fs=require('fs');
-            const p=JSON.parse(fs.readFileSync('package.json','utf8'));
-            p.version='${{ needs.version.outputs.version }}';
-            fs.writeFileSync('package.json', JSON.stringify(p,null,2)+'\n');
-          "
+        run: node scripts/set-version.cjs "${{ needs.version.outputs.version }}"
 
       # electron / electron-builder 只在这一步装，仓库本身保持零依赖
       - name: 装打包工具
         run: |
-          npm install --no-audit --no-fund --no-save electron@33 electron-builder@25
+          npm install --no-audit --no-fund --no-save --package-lock=false electron@33 electron-builder@25
 
+      # electronVersion 显式给出去，别让 builder 去猜（仓库 package.json 里没有 electron 依赖）
       - name: 打 exe
-        run: npx electron-builder --win --config electron-builder.yml
+        run: |
+          $v = node -p "JSON.parse(require('fs').readFileSync('node_modules/electron/package.json','utf8')).version"
+          Write-Host "electron $v"
+          npx electron-builder --win --config electron-builder.yml "-c.electronVersion=$v"
 
       - name: 传产物
         uses: actions/upload-artifact@v4
         with:
+          if-no-files-found: error
           name: pi-dsh-pet-${{ needs.version.outputs.version }}-win-x64
           path: |
             dist/*.exe
@@ -142,8 +158,10 @@ jobs:
 
   # ---------------------------------------------------------------- 3. 发 Release
   release:
+    name: 发 Release
     needs: [version, exe]
-    if: ${{ always() && needs.version.result == 'success' }}
+    # exe 失败也照样发（至少把源码放出去）；dry_run 则一律不发
+    if: ${{ always() && needs.version.result == 'success' && !(github.event_name == 'workflow_dispatch' && inputs.dry_run == true) }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
