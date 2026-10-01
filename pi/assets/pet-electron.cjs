@@ -452,8 +452,13 @@ app.whenReady().then(() => {
     applyBounds(w, h);
   });
 
-  // 拖宠物 = 搬窗。dx/dy 是**从本次按下那下算起**的位移（不是每帧增量）：
+  // 拖宠物 = 搬窗。dx/dy 是**屏幕坐标**里「从本次按下那下」算起的位移（不是每帧增量）：
   // 增量的话窗被夹在屏幕边时，宠物会越拖越落后于光标，松手才「啪」地弹回来。
+  // ⚠️⚠️ 必须是**屏幕**位移（渲染进程拿 e.screenX/e.screenY 算），不能是 clientX/Y：
+  //   clientX/Y 是**窗内**坐标 = 光标屏幕位置 - 窗原点，而窗正跟着拖拽一起动 ——
+  //   每读到的 clientX 已经把「上一帧窗走过的距离」扣掉了。当成「从按下那下算起的绝对
+  //   位移」用，每次就只补一半：匀速拖 300px 窗只走 150px（跟手比 0.50，还一格一格抖）。
+  //   实测（真光标直线拖 300px，窗落点 5ms 采样）见 DESIGN.md §9.20。
   let windowDrag = null;
   ipcMain.on("pet:window-move", (_event, m = {}) => {
     if (win.isDestroyed()) return;

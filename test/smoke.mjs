@@ -636,7 +636,14 @@ check("do-update 不会用空串盖掉刚查到的版本/提交", /if \(!s\[k\]\
 console.log("\n舞台窗（只包住宠物，不是全屏）…");
 check("主进程不再按屏幕大小开窗", !/workAreaSize/.test(elecSrc));
 check("窗落点落在工作区里（默认右下角 + 记住上次）", /workArea/.test(elecSrc) && /stage\.json/.test(elecSrc));
-check("拖宠物 = 搬窗（位移从按下那下算起）", /queueWinMove\(e\.clientX - dragState\.sx/.test(petSrc) && /windowDrag\.x \+ dx/.test(elecSrc));
+check("拖宠物 = 搬窗（位移从按下那下算起）", /queueWinMove\(dx, dy, dragState\.inset\)/.test(petSrc) && /windowDrag\.x \+ dx/.test(elecSrc));
+// ⚠️ 位移必须是**屏幕**坐标：clientX/Y 是窗内坐标，而窗正跟着拖拽一起动，
+//   拿它算「从按下那下算起的位移」= 光标位移 - 窗已走的位移 → 每次只跟上一半
+//   （实测跟手比 0.50，窗还一格一格抖。见 DESIGN.md §9.20）。
+check("搬窗位移用屏幕坐标（不是窗内 clientX —— 那样只跟一半）", /var p = screenPoint\(e\)[\s\S]{0,200}var dx = p\.x - dragState\.psx/.test(petSrc) && /queueWinMove\(dx, dy/.test(petSrc) && !/queueWinMove\(e\.clientX/.test(petSrc));
+check("按下时记下屏幕坐标基准点（psx/psy）", /psx: ps\.x[\s\S]{0,40}psy: ps\.y/.test(petSrc) && /function screenPoint\(e\)/.test(petSrc));
+check("screenX/Y 拿不到时退回 client（别把拖拽弄死）", /Number\.isFinite\(sx\) && Number\.isFinite\(sy\)/.test(petSrc) && /return \{ x: Number\(e\.clientX\) \|\| 0, y: Number\(e\.clientY\) \|\| 0 \}/.test(petSrc));
+check("主进程/preload 都写明 dx/dy 是屏幕位移", /屏幕坐标/.test(elecSrc) && /屏幕坐标/.test(preloadSrc) && /屏幕坐标/.test(petSrc));
 check("搬窗时把宠物夹在屏幕工作区内", /w\.x \+ w\.width - ir - 6/.test(elecSrc));
 check("搬完记住落点", /pet:window-drag-end/.test(elecSrc) && /endWinDrag\(\)/.test(petSrc));
 check("渲染进程报舞台尺寸（宠物 + 气泡）", /reportWindowSize\(\)/.test(petSrc) && /pet:window-size/.test(elecSrc));
@@ -652,7 +659,7 @@ check("漫游/气泡仍按窗口尺寸算（舞台=窗口，逻辑没变）", /w
 console.log("\n拖拽不许抖 / 不许有阻力…");
 check("搬窗走 rAF 合帧（不是每个 pointermove 都搬）", /function queueWinMove[\s\S]{0,320}requestAnimationFrame\(flushWinMove\)/.test(petSrc));
 check("合帧只留最新位置（旧的丢掉，不会排队追）", /movePending = \{ dx: dx, dy: dy, inset: inset \}[\s\S]{0,200}if \(!moveRaf\) moveRaf/.test(petSrc));
-check("位移仍然从按下那下算起（合帧不累积误差）", /queueWinMove\(e\.clientX - dragState\.sx, e\.clientY - dragState\.sy/.test(petSrc));
+check("位移仍然从按下那下算起（合帧不累积误差）", /var p = screenPoint\(e\)[\s\S]{0,900}var dx = p\.x - dragState\.psx[\s\S]{0,900}queueWinMove\(dx, dy, dragState\.inset\)/.test(petSrc));
 check("松手时把最后一帧落地", /settleWinMove\(\)[\s\S]{0,120}endWinDrag\(\)/.test(petSrc));
 check("主进程丢掉「其实没动」的搬窗", /pos\.x === stagePos\.x && pos\.y === stagePos\.y\) return/.test(elecSrc));
 

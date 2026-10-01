@@ -23,8 +23,12 @@ contextBridge.exposeInMainWorld("__petElectron__", {
   setHitRegion: (rects) => ipcRenderer.send("pet:hit-region", Array.isArray(rects) ? rects : []),
   /** 舞台窗要多大（设备无关像素）。主进程只改右/下边界，宠物在屏幕上的位置不变。 */
   setWindowSize: (w, h) => ipcRenderer.send("pet:window-size", { w: Number(w) || 0, h: Number(h) || 0 }),
-  /** 搬窗：dx/dy 是**从本次按下那下**算起的位移；inset 是宠物在窗里的位置（left/top/width/height），
-   *  主进程拿它把宠物夹在屏幕工作区里 —— 传增量的话窗被夹住时宠物会越拖越落后于光标。 */
+  /** 搬窗：dx/dy 是**屏幕坐标**里「从本次按下那下」算起的位移（设备无关像素，
+   *  与 getPosition/setPosition 同一套单位）；inset 是宠物在窗里的位置（left/top/width/height），
+   *  主进程拿它把宠物夹在屏幕工作区里 —— 传增量的话窗被夹住时宠物会越拖越落后于光标。
+   *  ⚠️ 必须是**屏幕**位移，不能是 clientX/Y 那种窗内位移：窗正跟着拖拽一起动，
+   *    窗内坐标每帧都已经把「上一帧窗走过的距离」扣掉了，当成绝对位移用就只跟一半
+   *    （实测跟手比 0.50，见 DESIGN.md §9.20）。 */
   moveWindow: (dx, dy, inset) => ipcRenderer.send("pet:window-move", {
     dx: Number(dx) || 0,
     dy: Number(dy) || 0,

@@ -1278,6 +1278,16 @@
       movePending = null;
     }
 
+    /** 事件的**屏幕**坐标（搬窗的位移必须用它算，见 pointermove 里的说明）。
+     *  Chromium 的 screenX/Y 与主进程 setPosition 是同一套单位（设备无关像素）。
+     *  个别环境压根不给 screenX/Y（非 Chromium 的合成事件）→ 退回 client。 */
+    function screenPoint(e) {
+      var sx = Number(e.screenX);
+      var sy = Number(e.screenY);
+      if (Number.isFinite(sx) && Number.isFinite(sy)) return { x: sx, y: sy };
+      return { x: Number(e.clientX) || 0, y: Number(e.clientY) || 0 };
+    }
+
     // ---- Pointer events (click vs drag) ----
 hit.addEventListener("pointerdown", function (e) {
       e.currentTarget.classList.add("dragging");
@@ -1291,11 +1301,15 @@ hit.addEventListener("pointerdown", function (e) {
       setPassthrough(false); // capture during drag
       e.currentTarget.setPointerCapture(e.pointerId);
       var r = container.getBoundingClientRect();
+      var ps = screenPoint(e);
       dragState = {
         active: true,
         dragging: false,
         sx: e.clientX,
         sy: e.clientY,
+        // 按下点的**屏幕**坐标：搬窗的位移拿它算（原因见 pointermove）
+        psx: ps.x,
+        psy: ps.y,
         offX: e.clientX - (r.left + r.width / 2),
         offY: e.clientY - (r.top + r.height / 2),
         // 宠物在窗里的位置：搬窗时主进程拿它把宠物夹在屏幕工作区里（不让它拖出屏幕）
@@ -1306,8 +1320,19 @@ hit.addEventListener("pointerdown", function (e) {
     hit.addEventListener("pointermove", function (e) {
       if (!dragState.active) return;
       noteActivity(); // 拖拽中也得盯着：不然拖到一半睡了就“松手了它不动”
-      var dx = e.clientX - dragState.sx;
-      var dy = e.clientY - dragState.sy;
+      // 窗只包住宠物（见 pet-electron.cjs 文件头），所以在 Electron 里「拖宠物」
+      // 实际是**搬整扇窗**：宠物在窗里的相对位置不动，看起来就是跟着手走。
+      //
+      // ⚠️⚠️ 位移必须用**屏幕**坐标算（e.screenX - 按下时的 screenX），不能用 clientX：
+      //    clientX/Y 是**窗内**坐标 = 光标屏幕位置 - 窗原点，而窗正跟着拖拽一起动 ——
+      //    也就是说每读到的 clientX 已经把「上一帧窗走过的距离」扣掉了。再拿它算
+      //    「从按下那下算起的位移」，得到的就是 `光标位移 - 窗已走的位移`，于是每次
+      //    只补一半：匀速拖 300px，窗只走 150px（跟手比 0.50，窗还会一格一格哆嗦）。
+      //    这不是滞后，是**每帧只跟上一半**（实测跟手比 0.500，见 DESIGN.md §9.20）。
+      //    屏幕坐标不随窗动，所以才是真正「光标走了多远」。
+      var p = screenPoint(e);
+      var dx = p.x - dragState.psx;
+      var dy = p.y - dragState.psy;
       if (!dragState.dragging) {
         if (Math.hypot(dx, dy) < DRAG_THRESHOLD) return;
         dragState.dragging = true;
@@ -1318,12 +1343,10 @@ if (config.animations.drag.length) {
           self.switchTo(self.anim, true, { force: true }); // 拖起来了就得立刻换姿势（已预热 → 零延迟硬切）
         }
       }
-      // 窗只包住宠物（见 pet-electron.cjs 文件头），所以在 Electron 里「拖宠物」
-      // 实际是**搬整扇窗**：宠物在窗里的相对位置不动，看起来就是跟着手走。
-      // ⚠️ 必须传「从按下那下算起的位移」而不是每帧增量：窗被夹在屏幕边时，
-      //    增量会让宠物越拖越落后于光标，松手才啪地弹回去。
       if (moveWin) {
-        queueWinMove(e.clientX - dragState.sx, e.clientY - dragState.sy, dragState.inset);
+        // 位移仍然是「从按下那下算起」而不是每帧增量（屏边夹住时增量会让宠物越拖越落后），
+        // 但它现在真的是屏幕上的绝对位移，所以既 1:1 又不累积误差。
+        queueWinMove(dx, dy, dragState.inset);
         // 命中区不用重报：形状是窗口坐标，窗一搬它跟着走，矩形没变。
         return;
       }
