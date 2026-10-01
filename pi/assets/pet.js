@@ -304,6 +304,50 @@
   }
 
   // ========================================================================
+  // 4.6 位置记忆（拖到哪儿，下次启动还在哪儿）
+  //
+  // 以前拖完就丢：宠物下一次启动又回 config.jsonc 写死的那个角落，用户得每次重拖。
+  // 现在：
+  //   写：松手 → savePosition() → preload → 主进程 → /control set-position
+  //        → 宿主落盘 home/positions.json（**比例** 0~1，不是像素：换分辨率/换屏幕
+  //        之后仍落在同一个「地方」，而不是停在旧分辨率下的坐标上跑到屏外）
+  //   读：窗连上 /ws 时宿主补发一帧 {"type":"positions",...}（老窗不认识 → 直接忽略）
+  //        → applySavedPositions() 盖掉 config 的角落。
+  // ⚠️ 只在「本次运行还没人拖过它」时套用：用户已经动过的宠物，不能被迟到的补发帧拽回去。
+  // ========================================================================
+
+  var savedPositions = {}; // id → {rx, ry}
+
+  /** 把宿主给的位置套到宠物身上（按 id；单只且只有一条记录时允许借用，见下）。 */
+  function applySavedPositions() {
+    var keys = Object.keys(savedPositions || {});
+    if (!keys.length || !pets.length) return;
+    for (var i = 0; i < pets.length; i++) {
+      var p = pets[i];
+      if (!p || p.movedLocally || p.destroyed) continue;
+      var pos = savedPositions[p.id];
+      // config.jsonc 里的 id 被改过时位置会认不出来。只有**单只 + 只有一条记录**才借：
+      // 多条记录时猜（拿 keys[0]）会把宠物放到别的只记住的地方去，那更糟。
+      if (!pos && pets.length === 1 && keys.length === 1) pos = savedPositions[keys[0]];
+      if (!pos) continue;
+      p.customPos = { rx: Number(pos.rx), ry: Number(pos.ry) };
+      if (typeof p.applyPosition === "function") p.applyPosition();
+    }
+    pushHitRegion(); // 位置变了 = 命中区变了（宠物挪走了，得跟着走）
+  }
+
+  /** 记住一只的落点（拖拽松手时调）。没有桥（浏览器里直接看）就静默跳过。 */
+  function savePosition(pet) {
+    var api = window.__petElectron__;
+    if (!api || !api.savePosition || !pet || !pet.customPos) return;
+    try {
+      api.savePosition(pet.id, pet.customPos.rx, pet.customPos.ry);
+    } catch (e) {
+      /* 主进程还没 ready —— 下次拖就存上了 */
+    }
+  }
+
+  // ========================================================================
   // 5. PetCard class (port of pet.ts PetCard component)
   // ========================================================================
 
@@ -340,6 +384,8 @@
     this.once = true;
     this.seq = 0;
     this.customPos = null; // {rx, ry}
+    this.id = cfg.id;       // 位置记忆的键（和宿主 home/positions.json 对齐）
+    this.movedLocally = false; // 本次运行里用户自己拖过：之后就别再用宿主补发的位置覆盖它
     this.dragging = false;
     this.overrideAnim = null;  // WS-driven temporary override
     this.overrideTimer = null;
@@ -428,6 +474,7 @@
       else if (corner === "top-right") { container.style.right = cfg.position.marginX + "px"; container.style.top = cfg.position.marginY + "px"; }
       else if (corner === "top-left") { container.style.left = cfg.position.marginX + "px"; container.style.top = cfg.position.marginY + "px"; }
     }
+    self.applyPosition = applyPosition; // 位置记忆套用时要重新贴位（见 4.6）
 
     // ---- Stage size ----
     stage.style.width = this.size + "px";
@@ -1030,6 +1077,8 @@
         setTimeout(function () { self.justDragged = false; }, 100);
         self.dragging = false;
         self.customPos = { rx: (e.clientX - dragState.offX) / window.innerWidth, ry: (e.clientY - dragState.offY) / window.innerHeight };
+        self.movedLocally = true;
+        savePosition(self); // 记住落点：下次启动还在这儿（宿主落盘，比例坐标）
         stage.style.transform = "translateY(" + bottomPad + "px)";
         pushHitRegion(); // 落点定死，再报一次（节流可能刚好把最后一下挡掉了）
         if (config.animations.idle.length) self.anim = pick(config.animations.idle, self.anim);
@@ -1198,6 +1247,7 @@
     var pet = new PetCard(cfg, root);
     pets.push(pet);
     pet.init();
+    applySavedPositions(); // 新加的这只也认得「上次的位置」（id 认不出就单只借位，见 4.6）
     pushHitRegion(); // 进了 pets 才量得到它（构造时它还没进数组）
   }
 
@@ -1269,6 +1319,12 @@
         if (obj.type === "bubble") {
           // v1.1: state text and anything a human typed. Old windows ignore this frame.
           applyBubble(obj);
+          return;
+        }
+        if (obj.type === "positions") {
+          // v1.2: 上次拖到哪儿（老窗不认识这帧，当普通字符串事件也无害）
+          savedPositions = obj.map && typeof obj.map === "object" ? obj.map : {};
+          applySavedPositions();
           return;
         }
       } catch (_) { /* plain string */ }

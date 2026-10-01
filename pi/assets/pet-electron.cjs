@@ -294,6 +294,20 @@ app.whenReady().then(() => {
     }
   });
 
+  // 渲染进程 → 主进程：记住拖拽落点（下次启动还在那儿）
+  // 失败不弹窗：这是后台落盘，弹窗只会打断用户（位置仍能用默认角落）。
+  ipcMain.on("pet:save-position", async (_event, payload = {}) => {
+    const id = String(payload.id || "").trim();
+    const rx = Number(payload.rx);
+    const ry = Number(payload.ry);
+    if (!id || !Number.isFinite(rx) || !Number.isFinite(ry)) return;
+    const { token } = readTokenAndHome();
+    const res = await callHost("set-position", { id, rx, ry }, token);
+    if (!res || res.ok !== true) {
+      console.error(`[pi-dsh-pet] 位置没记住（${id}）：${res ? res.error : "no response"}`);
+    }
+  });
+
   // 渲染进程：右键菜单
   ipcMain.on("pet:menu", async (_event, info = {}) => {
     // 菜单开着的时候输入框必然已经废了（原生菜单自己拿走了焦点）：顺手收掉，

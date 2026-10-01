@@ -265,6 +265,11 @@ pi-dsh-pet/
   <img src="https://raw.githubusercontent.com/SOMWHY/pi-dsh-pet/main/assets/preview/beishubiao-tuozhuai-xuankong-fankui.gif" width="160" alt="被鼠标拖拽悬空反馈">
 </p>
 
+> 💡 **拖到哪儿就记住哪儿**：松手时把落点（比例坐标）报给宿主，落盘在数据目录的
+> `positions.json`；下次启动（或右键「换一只」重启窗）还在同一个地方，不用每次重拖。
+> 换分辨率/换显示器也跟着走 —— 存的是比例不是像素。
+> 想清掉记忆：删掉 `positions.json`，或 `POST /control {action:"set-position"}` 手改。
+
 ---
 
 ## 自定义大小

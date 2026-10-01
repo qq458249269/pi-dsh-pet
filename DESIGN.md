@@ -33,7 +33,7 @@
 
 | 路径 | 作用 |
 |---|---|
-| `app/protocol.cjs` | 协议常量 + v1/v1.1 帧解析（**下行 v1 线格式一字未改**） |
+| `app/protocol.cjs` | 协议常量 + v1/v1.1/v1.2 帧解析（**下行 v1 线格式一字未改**） |
 | `app/bus.cjs` | 事件总线：多会话语义、状态机、气泡、单只闸门 |
 | `app/server.cjs` | HTTP 路由 + 鉴权 + 静态文件；WS 升级交给 wsserver |
 | `app/wsserver.cjs` | 自研 RFC6455 服务端（为了零运行时依赖） |
@@ -65,6 +65,17 @@
 - `sticky:true` = 常驻到下一次状态变化（忙碌态一直显示）；`ms>0` = 定时消失（手动说话用）
 - 老窗遇到不认识的帧会忽略 → 天然兼容，不需要版本协商
 
+### 3.2.1 下行 v1.2（位置记忆，仍是只加不改）
+
+```json
+{"type":"positions","map":{"pet-1":{"rx":0.62,"ry":0.44}}}
+```
+
+- 窗接上来时补发一次（与状态/气泡同一路径）；写回走 `POST /control {action:"set-position"}`
+- 坐标是**比例**（0~1，相对窗口宽高）不是像素：换分辨率/换屏幕后仍落在同一个地方
+- 落盘在 `home/positions.json`，键是 config.jsonc 里的宠物 id
+- 老窗不认识这帧 → 直接忽略，同一宿主能带新旧两种窗
+
 ### 3.3 上行 v1.1（生产者在 /feed 上行或 POST /event）
 
 ```jsonc
@@ -85,7 +96,7 @@
 | `POST /event` | 是 | 单条上行（curl / 脚本用） |
 | `WS /ws` | 否 | 窗下行通道（`pet.js` 发不了自定义头，所以免鉴权） |
 | `WS /feed` | 是（`?token=`） | 生产者上行通道；`?source=` 决定会话归属 |
-| `POST /control` | 是 | `shutdown / restart-window / add-pet / drop-pets / say / pause / resume / hide-window / show-window / set-ctrl / state / release-lock` |
+| `POST /control` | 是 | `shutdown / restart-window / add-pet / drop-pets / say / pause / resume / hide-window / show-window / set-ctrl / set-position / state / release-lock` |
 
 token 存在 `%APPDATA%/pi-dsh-pet/token`，**只绑 127.0.0.1**。不开 LAN。
 
@@ -98,7 +109,8 @@ token 存在 `%APPDATA%/pi-dsh-pet/token`，**只绑 127.0.0.1**。不开 LAN。
 %APPDATA%/pi-dsh-pet/
   port        12035          ← cat 一下就知道连哪个端口
   token       6f2a…          ← /feed 与 /control 的口令
-  state.json  {…}            ← 给本项目代码读（心跳、pid、角色）
+state.json  {…}            ← 给本项目代码读（心跳、pid、角色）
+  positions.json {…}         ← 窗里拖到哪儿（下次的启动位置，比例坐标）
 ```
 
 - 写入走「临时文件 + rename」：Windows 的 rename 不能覆盖已存在的目标，直接写会读到半行。
@@ -168,7 +180,10 @@ resolveTarget():
   隐藏宠物（服务留着）、在浏览器打开、复制服务地址、打开数据文件夹、关于、退出。
   （换尺寸只在 `/control set-ctrl` 里，菜单不提供：换窗代价大过收益。）
 - 「说点什么」：菜单 → `pet:say-ask` → 渲染进程在气泡位置弹出输入框 → Enter 提交 →
-  `preload.say` → 主进程带 token → `/control {action:"say"}`。
+`preload.say` → 主进程带 token → `/control {action:"say"}`。
+- 「记住位置」：拖拽松手 → `preload.savePosition` → 主进程带 token →
+  `/control {action:"set-position"}` → 落盘 `home/positions.json`（比例坐标）；
+  下次窗接上来时宿主补发一帧 `{"type":"positions"}`，`pet.js` 套用（本次运行已拖过的不动）。
 - 窗是**独立进程**：窗崩了宿主还在，`keepAlive` 会把它拉回来。打包版里这个"第二个进程"
   就是 exe 自己（`pi-dsh-pet.exe --pi-pet-window <port>`）。
 
@@ -190,7 +205,7 @@ pi-pet config           # 看/改 config.json
 ```
 
 数据目录 `PI_PET_HOME`（Windows: `%APPDATA%/pi-dsh-pet`）：
-`host.lock/owner.json`、`token`、`state.json`、`ctrl.json`、`config.json`、`log.txt`、`electron.json`。
+`host.lock/owner.json`、`token`、`state.json`、`ctrl.json`、`config.json`、`positions.json`、`log.txt`、`electron.json`。
 
 ## 8. 零依赖
 

@@ -6,6 +6,7 @@
  *   setHitRegion    把整窗的命中区裁成宠物的包围盒（正常路径，见主进程注释）
  *   openMenu        右键菜单（菜单项的动作走宿主控制面，主进程负责弹）
  *   say / onAskSay  手动输入气泡：主进程叫出输入框 → 渲染进程提交 → 主进程调宿主
+ *   savePosition    拖拽落点记忆（→ 宿主 /control set-position → home/positions.json）
  *   sayInputEnd / onSayCancel  输入框的收工信号（关框后要把键盘焦点还给下面的窗口）
  *   closeWindow     宿主退出 / WS 断了 → 关窗
  */
@@ -20,6 +21,8 @@ contextBridge.exposeInMainWorld("__petElectron__", {
   openMenu: (info) => ipcRenderer.send("pet:menu", info || {}),
   /** 手动说话：交给主进程 → 宿主 /control say → 全窗都看得到 */
   say: (text) => ipcRenderer.send("pet:say-submit", String(text == null ? "" : text)),
+  /** 记住拖拽落点（比例 0~1）。主进程代写：渲染进程手里没有 token，写不了 /control */
+  savePosition: (id, rx, ry) => ipcRenderer.send("pet:save-position", { id: String(id == null ? "" : id), rx: Number(rx), ry: Number(ry) }),
   /** 主进程叫输入框（右键菜单的「说点什么…」） */
   onAskSay: (cb) => ipcRenderer.on("pet:say-ask", () => cb()),
   /** 输入框收工：告诉主进程把窗切回不可聚焦（别一直抢着键盘焦点） */

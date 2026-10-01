@@ -71,9 +71,12 @@ async function get(port, path, token) {
 }
 
 const isBubble = (f) => f.startsWith("{\"type\":\"bubble\"");
-/** 动画帧（把气泡帧滤掉）：thinking / agent_idle / tool_call / add_pet / shutdown */
-const animFrames = (frames) => frames.filter((f) => !isBubble(f));
+/** 位置帧（v1.2，不带动画也不带气泡；滤掉以免被当成动画帧计数） */
+const isPositions = (f) => f.startsWith("{\"type\":\"positions\"");
+/** 动画帧（把气泡/位置帧滤掉）：thinking / agent_idle / tool_call / add_pet / shutdown */
+const animFrames = (frames) => frames.filter((f) => !isBubble(f) && !isPositions(f));
 const bubbleFrames = (frames) => frames.filter(isBubble).map((f) => JSON.parse(f).text);
+const positionFrames = (frames) => frames.filter(isPositions).map((f) => JSON.parse(f).map);
 
 console.log(`\npi-dsh-pet 冒烟测试  (home=${HOME} port=${PORT})\n`);
 
@@ -363,6 +366,54 @@ await sleep(120);
 const sayFrame = JSON.parse(win.frames.slice(b3).find((f) => f.startsWith("{\"type\":\"bubble\"")));
 check("say 只冒泡、不动动画", !!sayFrame && sayFrame.text === "过来玩" && sayFrame.ms > 0 && animFrames(win.frames.slice(b3)).length === 0);
 check("事件通道 say 也通", (await post(PORT, "/event", { type: "say", text: "hi" }, token)).body.ok === true);
+
+// ---------------------------------------------------------------- 位置记忆
+// 症状：拖完松手，下次启动又回 config.jsonc 写死的那个角落。
+// 修法：松手时把**比例**（rx/ry）报给宿主落盘 home/positions.json，窗接上来时宿主补发一帧。
+console.log("\n位置记忆（下次启动还在这儿）…");
+{
+	check("set-position 落盘成功", (await post(PORT, "/control", { action: "set-position", id: "pet-1", rx: 0.62, ry: 0.44 }, token)).body.ok === true);
+	const posFile = join(HOME, "positions.json");
+	const saved = existsSync(posFile) ? JSON.parse(readFileSync(posFile, "utf8")) : null;
+	check("positions.json 里存的是比例坐标", saved && saved["pet-1"] && saved["pet-1"].rx === 0.62 && saved["pet-1"].ry === 0.44, JSON.stringify(saved));
+	check("坐标不合法时被拒（不写坏文件）", (await post(PORT, "/control", { action: "set-position", id: "pet-1", rx: "abc", ry: 0.2 }, token)).body.ok === false);
+	check("缺 id 时被拒", (await post(PORT, "/control", { action: "set-position", rx: 0.5, ry: 0.5 }, token)).body.ok === false);
+	check("被拒的那次没把原来的位置冲掉", JSON.parse(readFileSync(posFile, "utf8"))["pet-1"].rx === 0.62);
+
+	// 关键一环：**新接上来的窗**要拿到补发（换窗/崩溃重开都靠它）
+	const win2 = fakeWindow(PORT);
+	await win2.ready;
+	await sleep(200);
+	const maps = positionFrames(win2.frames);
+check("新窗接上就收到位置帧", maps.length === 1 && maps[0]["pet-1"] && maps[0]["pet-1"].rx === 0.62 && maps[0]["pet-1"].ry === 0.44, JSON.stringify(win2.frames.slice(0, 3)));
+	// 位置帧是**额外**补的一帧，不能把原有的状态/气泡补发顶掉
+	const lastAnim = animFrames(win.frames).pop();
+	check("位置帧没挤掉状态补发（新窗仍拿到当前状态）", !!lastAnim && win2.frames.includes(lastAnim), `lastAnim=${lastAnim}`);
+	win2.close();
+	await sleep(80);
+
+	// 合并写：第二只不能把第一只的清掉
+	await post(PORT, "/control", { action: "set-position", id: "pet-2", rx: 0.1, ry: 0.9 }, token);
+	const merged = JSON.parse(readFileSync(posFile, "utf8"));
+	check("多只合并写（互不清空）", merged["pet-1"] && merged["pet-2"] && merged["pet-2"].ry === 0.9, JSON.stringify(merged));
+
+	// 洗白：窗与文件都不可信
+	const { sanitizePositions } = await import(pathToFileURL(join(ROOT, "app", "protocol.cjs")).href);
+	const dirty = sanitizePositions({ "": { rx: 1, ry: 1 }, a: { rx: "x", ry: 0.5 }, b: { rx: 2, ry: -1 }, c: { rx: 0.5, ry: 0.5 } });
+	check("非法 id/坐标被丢掉、越界夹回 0~1", JSON.stringify(dirty) === JSON.stringify({ b: { rx: 1, ry: 0 }, c: { rx: 0.5, ry: 0.5 } }), JSON.stringify(dirty));
+
+	// 窗侧接线（渲染进程 / preload / 主进程）
+	const petJs = readFileSync(join(ROOT, "pi", "assets", "pet.js"), "utf8");
+	const preloadJs = readFileSync(join(ROOT, "pi", "assets", "preload.cjs"), "utf8");
+	const mainJs = readFileSync(join(ROOT, "pi", "assets", "pet-electron.cjs"), "utf8");
+	check("pet.js 认 positions 帧并套用", /obj\.type === "positions"[\s\S]{0,300}applySavedPositions\(\)/.test(petJs));
+	check("拖拽松手就上报落点", /movedLocally = true[\s\S]{0,120}savePosition\(self\)/.test(petJs));
+	check("用户已经拖过的宠物不被补发帧拽回去", /if \(!p \|\| p\.movedLocally \|\| p\.destroyed\) continue/.test(petJs));
+	check("套用位置后要重报命中区（宠物挪走了）", /p\.customPos = \{ rx: Number\(pos\.rx\)[\s\S]{0,300}pushHitRegion\(\)/.test(petJs));
+	check("preload 有 savePosition 桥（渲染进程没 token）", /savePosition: \(id, rx, ry\) => ipcRenderer\.send\("pet:save-position"/.test(preloadJs));
+	check("主进程代写 /control set-position", /ipcMain\.on\("pet:save-position"[\s\S]{0,400}callHost\("set-position"/.test(mainJs));
+	check("位置存的是比例不是像素", /customPos = \{ rx: .*innerWidth, ry: .*innerHeight \}/.test(petJs));
+}
 
 // ---------------------------------------------------------------- 暂停
 console.log("\n暂停 / 恢复…");

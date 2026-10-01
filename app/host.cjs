@@ -30,6 +30,8 @@ const {
 	readCtrl,
 	writePortFile,
 	clearPortFile,
+	readPositions,
+	rememberPosition,
 	log,
 } = require("./paths.cjs");
 const {
@@ -213,7 +215,7 @@ async function start(options = {}) {
 
 	// bus 与 onStateChange 互相需要（一个要写状态文件，一个要读 bus 统计），
 	// 所以先给 hooks 一个空壳，拿到 bus 之后再回填（hooks 是活对象，每次现读）。
-	const busHooks = { onStateChange: () => {}, maxPets: () => 1, paused: () => false };
+	const busHooks = { onStateChange: () => {}, maxPets: () => 1, paused: () => false, positions: () => readPositions() };
 	const bus = createBus(busHooks);
 
 	const win = createWindowManager({
@@ -392,6 +394,16 @@ async function start(options = {}) {
 				const next = writeCtrl(patch);
 				return { ok: true, detail: "意图已更新", ctrl: next };
 			}
+			case "set-position": {
+				// 窗里拖完报上来的落点（比例）。落盘 home/positions.json，下次启动就在那儿。
+				const id = String(arg.id || "").trim();
+				if (!id) return { ok: false, error: "set-position 缺 id" };
+				const map = rememberPosition(id, arg.rx, arg.ry);
+				if (!Object.prototype.hasOwnProperty.call(map, id)) {
+					return { ok: false, error: "set-position 的坐标不合法（要 0~1 的数字）" };
+				}
+				return { ok: true, detail: "位置已记住" };
+			}
 			case "state":
 				return { ok: true, detail: "当前状态", state: ctx.state, ctrl: readCtrl(), bus: bus.stats() };
 			case "release-lock":
@@ -403,7 +415,7 @@ async function start(options = {}) {
 					error: `未知 action：${action}`,
 					hint:
 						"可用：shutdown | restart-window | add-pet | drop-pets | say | pause | resume | " +
-						"hide-window | show-window | set-ctrl | state | release-lock",
+						"hide-window | show-window | set-ctrl | set-position | state | release-lock",
 				};
 		}
 	}

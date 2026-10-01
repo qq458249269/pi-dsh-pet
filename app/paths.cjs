@@ -7,7 +7,8 @@
  * 目录选择：`$PI_PET_HOME` > Windows `%APPDATA%/pi-dsh-pet` > `~/.pi-dsh-pet`。
  * 里面放：state.json（宿主写的全局状态）/ port（**只要一个端口号，纯文本，给脚本读**）
  *        / ctrl.json（意图）/ config.json / host.lock/（单例锁）/ token（REST 鉴权）
- *        / electron.json（记住 electron.exe）/ log.txt
+ *        / positions.json（窗里拖到哪儿，下次启动还在那儿）/ electron.json（记住 electron.exe）
+ *        / log.txt
  *
  * 为什么专门再写一个 port 文件：state.json 是给本项目的代码读的（带心跳、角色、版本），
  * 而 pi 扩展 / dsh 插件 / 用户自己的脚本只想知道「现在该连哪个端口」。47653 被占时宿主
@@ -21,7 +22,7 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 
-const { MAX_PETS_CEILING, SIZES } = require("./protocol.cjs");
+const { MAX_PETS_CEILING, SIZES, sanitizePositions } = require("./protocol.cjs");
 
 /** 包根目录：app/ 的上一层。装机后是 <npm 全局>/node_modules/pi-dsh-pet。 */
 const PKG_ROOT = path.resolve(__dirname, "..");
@@ -53,6 +54,7 @@ const PATHS = {
 	token: path.join(HOME, "token"),
 	lock: path.join(HOME, "host.lock"),
 	log: path.join(HOME, "log.txt"),
+	positions: path.join(HOME, "positions.json"),
 	electronMemo: path.join(HOME, "electron.json"),
 };
 
@@ -207,6 +209,34 @@ function writeCtrl(patch) {
 	return next;
 }
 
+/* ============================== 位置记忆 ============================== */
+
+/**
+ * home/positions.json —— 窗里拖到哪儿，下次启动还在那儿。
+ *
+ * 存的是**比例**（rx/ry，相对窗口宽高）而不是像素：换分辨率、换尺寸、换显示器之后
+ * 仍然落在同一个「地方」，而不是停在旧分辨率下的某个绝对坐标（跑到屏外就再也看不见）。
+ * 键是 config.jsonc 里的宠物 id；文件坏掉/不认识时回落到空表 = 回到默认角落。
+ */
+function readPositions() {
+	try {
+		const raw = JSON.parse(fs.readFileSync(PATHS.positions, "utf8"));
+		return sanitizePositions(raw && typeof raw === "object" ? raw.map || raw : null);
+	} catch {
+		return {};
+	}
+}
+
+/** 合并写（只改给的那一只）：多只/多客户端同时拖不互相清空。 */
+function rememberPosition(id, rx, ry) {
+	const key = String(id || "").trim();
+	const next = sanitizePositions({ ...readPositions(), [key]: { rx, ry } });
+	if (!Object.prototype.hasOwnProperty.call(next, key)) return {};
+	ensureHome();
+	fs.writeFileSync(PATHS.positions, `${JSON.stringify(next, null, 2)}\n`, "utf8");
+	return next;
+}
+
 /* ============================== 日志 ============================== */
 
 const LOG_MAX_LINES = 400;
@@ -264,6 +294,8 @@ module.exports = {
 	CONFIG_DEFAULTS,
 	CTRL_DEFAULTS,
 	ensureHome,
+	readPositions,
+	rememberPosition,
 	writePortFile,
 	readPortFile,
 	clearPortFile,

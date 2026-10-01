@@ -31,7 +31,7 @@
 
 "use strict";
 
-const { ENDPOINTS, EVENTS, SIZES, parseIncoming, bubbleFrame } = require("./protocol.cjs");
+const { ENDPOINTS, EVENTS, SIZES, parseIncoming, bubbleFrame, positionsFrame } = require("./protocol.cjs");
 const { log } = require("./paths.cjs");
 
 /** 一个「agent 正在忙」的最长持续时间：超过就当会话卡住，强制放回空闲动画。 */
@@ -335,6 +335,7 @@ function createBus(hooks = {}) {
 			const onStateChange = hooks.onStateChange || (() => {});
 			const maxPets = hooks.maxPets || (() => 1);
 			const paused = hooks.paused || (() => false);
+			const positions = hooks.positions || (() => ({}));
 			const url = new URL(conn.url || (req && req.url) || "/", "http://127.0.0.1");
 			const p = url.pathname;
 			const source = url.searchParams.get("source") || "unknown";
@@ -347,6 +348,10 @@ function createBus(hooks = {}) {
 					conn.send(currentMessage);
 					if (currentBubble) conn.send(bubbleFrame(currentBubble, { sticky: currentKey !== STATE.IDLE }));
 				}
+				// 位置也要补发：换窗（右键「换一只」/restart）后回到上次拖的地方，而不是默认角落。
+				// 老窗不认识这帧（pet.js 的 onmessage 对未知 type 直接忽略）——兼容。
+				const saved = positions();
+				if (saved && Object.keys(saved).length) conn.send(positionsFrame(saved));
 				conn.on("close", () => {
 					windowClients.delete(conn);
 					log(`窗断开（剩 ${windowClients.size} 个）`);

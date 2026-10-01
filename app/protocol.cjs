@@ -31,6 +31,12 @@
  *   关键点：**动画帧仍然是 v1 裸字符串**，文字走**另起一帧 bubble**。
  *   这样老版本窗（不认识 bubble）照常动，新窗多一个气泡，两边都能用同一个宿主。
  *
+ * ── v1.2 增量（向后兼容：老窗收到会直接忽略）────────────────────
+ *   下行 → 窗： {"type":"positions","map":{"<petId>":{"rx":0.62,"ry":0.44}}}
+ *               窗接上来时补发一次（和状态/气泡同一条补发路径）。窗把拖拽落点报给宿主
+ *               （/control set-position），宿主落盘 home/positions.json，下次启动就在那儿。
+ *   坐标是**比例**（0~1，相对窗口宽高）而不是像素：换分辨率/换尺寸后仍落在同一个地方。
+ *
  * ── 未来 v2（envelope）─────────────────────────────────────────
  *   若要带 source/session/ts，正确做法是 pet.js 的 onmessage 先 JSON.parse，
  *   认不出对象再退回按裸字符串处理（向后兼容），而不是让服务端单方面改格式。
@@ -77,6 +83,8 @@ const EVENTS = {
 	say: "say",
 	/** 下行给窗的气泡帧（v1.1） */
 	bubble: "bubble",
+	/** 下行给窗的位置帧（v1.2）：记住上次拖到哪儿，下次启动还在那儿 */
+	positions: "positions",
 };
 
 /** 窗侧的尺寸档位，与 pet.js 的 SIZE_MAP 对齐。 */
@@ -223,6 +231,30 @@ function bubbleFrame(text, { sticky = false, ms = 0 } = {}) {
 	return JSON.stringify({ type: EVENTS.bubble, text: clampText(text, 80), sticky, ms: ms > 0 ? ms : 0 });
 }
 
+/** 拼一个位置帧（下行 → 窗）。坐标是比例（0~1），不是像素。 */
+function positionsFrame(map) {
+	return JSON.stringify({ type: EVENTS.positions, map: sanitizePositions(map) });
+}
+
+/**
+ * 把位置表洗成 `{ "<id>": {rx, ry} }`（比例夹在 0~1，最多留8 只）。
+ * 窗与文件都不可信（宠物 id 是字符串、比例可能写成 NaN/字符串），在这儿统一夹一次。
+ */
+function sanitizePositions(map) {
+	const out = {};
+	if (!map || typeof map !== "object") return out;
+	for (const [id, pos] of Object.entries(map)) {
+		const key = String(id || "").trim().slice(0, 64);
+		if (!key || !pos || typeof pos !== "object") continue;
+		const rx = Number(pos.rx);
+		const ry = Number(pos.ry);
+		if (!Number.isFinite(rx) || !Number.isFinite(ry)) continue;
+		out[key] = { rx: Math.min(Math.max(rx, 0), 1), ry: Math.min(Math.max(ry, 0), 1) };
+		if (Object.keys(out).length >= MAX_PETS_CEILING) break;
+	}
+	return out;
+}
+
 module.exports = {
 	VERSION,
 	ROLE,
@@ -237,5 +269,7 @@ module.exports = {
 	envelope,
 	parseIncoming,
 	bubbleFrame,
+	positionsFrame,
+	sanitizePositions,
 	clampText,
 };
