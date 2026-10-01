@@ -109,6 +109,24 @@
   opacity: 1;
   transform: translate(-50%, 0);
 }
+/* 贴到屏幕上边时头顶没地方了，气泡改挂**身下**（§9.25）：不然「边贴上了、话却说不出来」。
+   位置与间距是头顶那套的镜像（top:100% + margin-top + 反向位移），尾巴也跟着翻上去。 */
+.pet-bubble.below {
+  bottom: auto;
+  top: 100%;
+  margin-bottom: 0;
+  margin-top: 10px;
+  transform: translate(-50%, -6px);
+}
+.pet-bubble.below.show {
+  transform: translate(-50%, 0);
+}
+.pet-bubble.below::after {
+  top: auto;
+  bottom: 100%;
+  border-top-color: transparent;
+  border-bottom-color: rgba(28, 30, 38, 0.92);
+}
 /* 输入框亮着的时候别用 -webkit-box 排版（它会拿输入框当匿名 flex 项），老实用 block */
 .pet-bubble.with-input {
   display: block;

@@ -7,6 +7,7 @@
  *   setWindowSize   舞台窗要多大（渲染进程知道配置里最大的宠物 + 气泡要多少地方）
  *   moveWindow      搬整扇窗（拖宠物 = 搬窗，见文件头「别改回全屏」）
  *   endWindowDrag   松手：让主进程记住窗的落点
+ *   onDisplays      各显示器的工作区（贴边靠它，§9.25）
  *   openMenu        右键菜单（菜单项的动作走宿主控制面，主进程负责弹）
  *   say / onAskSay  手动输入气泡：主进程叫出输入框 → 渲染进程提交 → 主进程调宿主
  *   savePosition    拖拽落点记忆（→ 宿主 /control set-position → home/positions.json）
@@ -42,6 +43,19 @@ contextBridge.exposeInMainWorld("__petElectron__", {
   }),
   /** 松手（拖完）：主进程记住窗的落点，下次启动还在这儿 */
   endWindowDrag: () => ipcRenderer.send("pet:window-drag-end"),
+  /**
+   * 主进程 → 渲染进程：各显示器的 bounds / workArea（§9.25）。
+   * 拖到屏幕边时靠它算出「窗被夹住了多少」，渲染进程把那份差额挪到宠物在窗里的位置上 ——
+   * 不然宠物会停在离屏边「它在窗里贴着的那条边」那么远，贴不上边。
+   * 只在显示器变化时发（量变才发），拖拽时零开销。
+   * ⚠️ 订阅时**立刻要一份**（pet:displays-get）：did-finish-load 那次推送发生在
+   *   pet.js 的 init **之前**（init 在等 /config.jsonc），光靠推送会漏掉开头这一份 ——
+   *   实测就是这个坑：窗量得出来，可工作区列表一直是空的，贴边滑移全程不触发。
+   */
+  onDisplays: (cb) => {
+    ipcRenderer.on("pet:displays", (_e, list) => cb(Array.isArray(list) ? list : []));
+    ipcRenderer.send("pet:displays-get");
+  },
   /** 弹右键菜单；info 里的 state/pets 由渲染进程提供（主进程只管菜单本身） */
   openMenu: (info) => ipcRenderer.send("pet:menu", info || {}),
   /** 手动说话：交给主进程 → 宿主 /control say → 全窗都看得到 */

@@ -574,12 +574,46 @@ const cs = { w: num(windowDrag.w, 0), h: num(windowDrag.h, 0) };
     writeStagePos(home, currentPos());
   });
 
+  // ---- 屏幕工作区：推给渲染进程一份（§9.25）----
+  //
+  // 拖宠物时「能不能贴到屏幕边」是两个自由度的事：屏幕位置 = 窗的位置 + 宠物在窗里的位置。
+  // 主进程只管第一个（把整扇窗夹在屏内，§9.23），第二个自由度主进程看不见 ——
+  // 于是窗一夹住，宠物就停在离屏边「它在窗里贴着的那条边」那么远（头顶 150、底下 60、
+  // 左右 32），也就是「拖到边上还差一大块、贴不上」。
+  // 修法在渲染进程（pet.js 的 slideTo）：拿这份工作区算出窗被夹住的**差额**，
+  // 把差额挪到宠物在窗里的位置上。**不新增每帧 IPC**，只在这里推一次列表。
+  function pushDisplays() {
+    if (win.isDestroyed() || !webContentsSend) return;
+    let list = [];
+    try {
+      list = screen.getAllDisplays().map((d) => ({
+        bounds: { x: d.bounds.x, y: d.bounds.y, width: d.bounds.width, height: d.bounds.height },
+        workArea: { x: d.workArea.x, y: d.workArea.y, width: d.workArea.width, height: d.workArea.height },
+      }));
+    } catch {
+      return; // 量不到就保持上一次那份
+    }
+    webContentsSend("pet:displays", list);
+  }
+  for (const ev of ["display-added", "display-removed", "display-metrics-changed"]) {
+    try {
+      screen.on(ev, pushDisplays);
+    } catch {
+      /* 平台/版本没这个事件：忽略 */
+    }
+  }
+  // 渲染进程一订阅就要一份（did-finish-load 那次推送早于 pet.js 的 init，会漏掉）
+  ipcMain.on("pet:displays-get", (e) => {
+    if (win && !win.isDestroyed() && e.sender === win.webContents) pushDisplays();
+  });
+
   // 加载完 5s 还没拿到包围盒 = 渲染进程没起来（配置拉失败、pet.js 报错…）。
   // 这时候宁可让整窗不可命中，也别让它当一整块矩形拦在屏幕最上层：
   // ⚠️ 这里**不能**用 setShape([]) —— 传空数组 = “恢复默认矩形”，正好是反效果
   //（整块透明窗把下面所有窗口的点击全吃掉，必须把鼠标移出那块 1×1 才恢复）。
   // 「整窗不收鼠标事件」只有 setIgnoreMouseEvents(true) 这一条路。
   win.webContents.once("did-finish-load", () => {
+    pushDisplays(); // 渲染进程一上来就要有工作区（贴边靠它，§9.25）
     setTimeout(() => {
       if (gotRegion || shapeBroken || win.isDestroyed()) return;
       console.error("[pi-dsh-pet] 5s 内没收到命中区（渲染进程没起来？）→ 整窗穿透，别挡屏幕");

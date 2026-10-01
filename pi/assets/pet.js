@@ -275,7 +275,10 @@ var HIT_PAD_X = 10;
   /** 气泡头顶要让出来的：外边距 10 + 贴边 8。
       （尾巴那 6px 是画在气泡框**下面**的，正好落在 10px 的外边距里，不占头顶空间；
         早先按 36 算，白白少给一行 —— 见 §9.21 的实测） */
-  var BUBBLE_CHROME_H = 18;
+var BUBBLE_CHROME_H = 18;
+  /** 气泡与容器之间的外边距（pet.css 的 margin-bottom / .below 的 margin-top）。
+      算「无偏移时气泡在哪」时必须算上它，忘了就恒差 10px（实测偏移差 10）。 */
+  var BUBBLE_GAP = 10;
   /**
    * 舞台窗的留白（§9.24）：窗 = 宠物 + 四边 padding。
    *
@@ -291,10 +294,105 @@ var HIT_PAD_X = 10;
    *   贴右上角后动画右边离窗边只剩 marginX=24px，左边却空着 376px，
    *   看着就是「动画被窗边切了一角 / 显示不全」）。真正该给的是**高度**
    *   （头顶 150 装气泡），宽度按内容自适应，见 stageSize()。
+   *
+   * ⚠️⚠️ 但**留白**和**行程**是两回事（§9.25）：留白是装饰（撤了），行程是动画要用的道
+   *   —— 撤到 32 之后窗里只剩 24px 能走，而走路动画一程 60~320px，于是走路动画
+   *   放不出来、放出来也只挪两步就被夹住（用户口径：「动画左右被裁剪限制」）。
+   *   所以左右要给的不是常数，是**按配置算出来的行程**（见 roamRoom）。
    */
   var STAGE_PAD_X = 32;
   var STAGE_PAD_TOP = 150;
   var STAGE_PAD_BOTTOM = 60;
+
+  /**
+   * 漫游（走路）要的**横向行程**：窗宽里除了动画还得有多少能走的道（§9.25）。
+   *
+   * 口径与 planMove 完全一致 —— 那边要求落点中心落在
+   *   [margin + 半宽, 窗宽 − margin − 半宽] 里，所以「走得满一趟」的条件是
+   *   **窗宽 − 动画宽 ≥ 2×margin + maxDist**。减掉两侧本来就有的留白，缺多少补多少。
+   * 为什么不写死一个数：moves 是配置（minDist/maxDist/margin 谁都能改），
+   * 写死就会出现「配置要 320、窗只给 64」——动画被限制在原地，或者走到窗边被切。
+   * 拿不到 moves（配置没到）就按 0 补：先摆着，配置到了会重报窗宽（reportWindowSize）。
+   */
+  function roamRoom(sidePad) {
+    var pad = Math.max(0, Number(sidePad) || 0);
+    var moves = (config && config.animations && config.animations.moves) || null;
+    if (!moves) return 0;
+    var d = moves.default || {};
+    var maxDist = Math.max(0, Number(d.maxDist) || 0);
+    var margin = Math.max(0, Number(d.margin) || 0);
+    (moves.actions || []).forEach(function (a) {
+      var p = (a && a.params) || {};
+      var md = Number(p.maxDist);
+      var mg = Number(p.margin);
+      if (isFinite(md) && md > 0) maxDist = Math.max(maxDist, md);
+      if (isFinite(mg) && mg > 0) margin = Math.max(margin, mg);
+    });
+    if (!(maxDist > 0)) return 0;
+    return Math.max(0, Math.ceil(maxDist + 2 * margin - 2 * pad));
+  }
+
+  /**
+   * 显示器工作区（渲染进程自己的一份，§9.25）。
+   *
+   * 为什么渲染进程也得有一份：拖宠物时「能不能贴到屏幕边」是**两个自由度**的事 ——
+   *   屏幕位置 = 窗的位置 + 宠物在窗里的位置。
+   * 主进程只管第一个（它把整扇窗夹在屏内，§9.23），第二个自由度以前是**死的** ——
+   * 拖拽全程宠物在窗里一动不动。于是窗一被屏幕边夹住，宠物就永远差
+   * 「它在窗里贴着的那条边」那么远：头顶 150、底下 60、左右 32 —— 那「一大块距离」，
+   * 也就是「拖到边上贴不上」。
+   * 修法：主进程把各显示器的工作区推过来（pet:displays，量变时才发），
+   * 渲染进程拿它算出窗被夹住的那份**差额**，把差额挪到宠物在窗里的位置上（见 slideTo）。
+   * 每帧**不新增任何 IPC**，而宠物照旧贴着光标、贴到边时正好贴住。
+   * 拿不到（老主进程 / 没发过来）就退回老行为：窗夹住、宠物停在原地。
+   */
+  var displayList = [];
+  function setDisplays(list) {
+    displayList = (Array.isArray(list) ? list : [])
+      .filter(function (d) {
+        return d && d.workArea && isFinite(Number(d.workArea.x)) && isFinite(Number(d.workArea.width));
+      })
+      .map(function (d) {
+        return { bounds: d.bounds || d.workArea, work: d.workArea };
+      });
+  }
+  /** 等价于主进程的 screen.getDisplayNearestPoint({x,y})：先找含着该点的屏，否则找中心最近的。 */
+  function workAreaNear(x, y) {
+    if (!displayList.length) return null;
+    var px = Number(x) || 0;
+    var py = Number(y) || 0;
+    var best = null;
+    var bestD = Infinity;
+    for (var i = 0; i < displayList.length; i++) {
+      var d = displayList[i];
+      var b = d.bounds || d.work;
+      if (px >= b.x && px < b.x + b.width && py >= b.y && py < b.y + b.height) return d.work;
+      var cx = b.x + b.width / 2;
+      var cy = b.y + b.height / 2;
+      var dd = (px - cx) * (px - cx) + (py - cy) * (py - cy);
+      if (dd < bestD) {
+        bestD = dd;
+        best = d.work;
+      }
+    }
+    return best;
+  }
+  /**
+   * 窗的位置夹进这块工作区：**整扇窗**在屏内（§9.23 的口径，和主进程同一套数 ——
+   * 两边算法不一样的话，窗和宠物就会各夹各的，贴边时差出一截）。
+   * 窗比屏还宽/高时区间会翻过来，这时靠上/靠左摆。
+   */
+  function clampWinToScreen(want, winW, winH, wa) {
+    if (!wa) return { x: Math.round(want.x), y: Math.round(want.y) };
+    var loX = wa.x;
+    var hiX = wa.x + wa.width - winW;
+    var loY = wa.y;
+    var hiY = wa.y + wa.height - winH;
+    return {
+      x: Math.round(loX > hiX ? loX : Math.min(Math.max(want.x, loX), hiX)),
+      y: Math.round(loY > hiY ? loY : Math.min(Math.max(want.y, loY), hiY)),
+    };
+  }
   /** 气泡封顶：再宽也不超过这个数（超宽气泡会横跨半个屏，看着不像「宠物说话」） */
   var BUBBLE_W_MAX = 820;
   /**
@@ -327,18 +425,23 @@ function topOffsetOf(cfg) {
    *   留白是**气泡的舞台**。站位是「上次停哪儿」，会被 resize 反复重新套用；
    *   实测那条把宠物钉在窗顶的记录（ry 算出来正好 0）套上后头顶 0 留白，
    *   气泡被压成 846x24 的一条、字全裁没了（§9.23）。
-   *   漫游只改 left 不改 top（纵向由站位打底），横向窗里还有 400px 可夹 —— 所以
-   *   卡住站位这一头就够了，漫游行程不受影响。
+   *   漫游只改 left 不改 top（纵向由站位打底），横向窗里还有整条漫游道可夹。
+   *
+   * ⚠️⚠️ 横向的下界从 STAGE_PAD_X 改成 **0**（§9.25）：贴边是**屏幕**上的概念，
+   *   而窗和宠物的偏移是两个自由度。夹在 32 就等于「永远不许宠物贴到窗边」——
+   *   拖到屏幕边（窗也被夹到屏幕边）时宠物还差 32，而且下次启动这 32 还会把它拽回来。
+   *   横向留白的气泡问题 clampBubble 已经管了（它按**窗**夹），不需要在这儿再留一道。
+   *   纵向仍留 topOffsetOf：站位是要重复套用的，头顶必须一直有气泡的舞台。
    *
    * ⚠️ 窗比「宠物 + 两侧留白」还窄时（多开时窗按最大的那只算，小的那只就在区间外）
    *   区间会翻过来，这时取中间值而不是硬贴左边 —— 否则照样贴到窗边、同样没头顶。
    */
-  function stageKeepIn(left, top, size, cfg) {
+function stageKeepIn(left, top, size, cfg) {
     var petH = (size * 9) / 16;
     var W = window.innerWidth;
     var H = window.innerHeight;
-    var loX = STAGE_PAD_X;
-    var hiX = W - size - STAGE_PAD_X;
+    var loX = 0;
+    var hiX = W - size;
     if (hiX < loX) loX = hiX = Math.max(0, (W - size) / 2);
     var loY = topOffsetOf(cfg);
     var hiY = H - petH - bottomPadOf(cfg);
@@ -347,6 +450,26 @@ function topOffsetOf(cfg) {
       left: Math.min(Math.max(left, loX), hiX),
       top: Math.min(Math.max(top, loY), hiY),
     };
+  }
+
+  /**
+   * 舞台内的横向居中位置（§9.26）。
+   *
+   * 为什么单独一个函数：摆位（applyPosition）、多开错位、站位回夹三处都要它 ——
+   * 散开写就会出现「一只居中、另一只贴边」这种看着像 bug 的不一致。
+   *
+   * 多开：两只都居中会**完全重叠**（以前靠 corner 的 left/right 两支错开，
+   * §9.26 起那两支改成居中了）。所以按序号在「舞台里的横向行程」上等分：
+   * 一只 → 正中间；n 只 → 从最左到最右等距（仍然对称，不会有一侧全空）。
+   * 位置记忆（customPos）优先，记住的落点不受这个影响。
+   */
+function centeredLeft(size, index, total) {
+    var W = window.innerWidth;
+    var lane = Math.max(0, W - size);
+    var n = Math.max(1, total || 1);
+    var i = Math.max(0, Math.min(index || 0, n - 1));
+    if (n === 1) return Math.round(lane / 2);
+    return Math.round((lane * i) / (n - 1));
   }
   /** 漫游/拖拽时每帧都在动，而主进程每次都要 SetWindowRgn：50ms 一次（20fps）跟手又不至于卡 */
   var HIT_THROTTLE_MS = 50;
@@ -666,9 +789,12 @@ var api = window.__petElectron__;
   /** Shared config (loaded from /config.jsonc + WebSocket update) */
   var config = null;
 
-  function PetCard(cfg, rootEl) {
+function PetCard(cfg, rootEl, slot) {
     var self = this;
     this.cfg = cfg;
+    // 多开时在舞台里第几格（§9.26 的居中/错位）：构造时传进来，别在 applyPosition 里
+    // 反查 pets —— 构造那一刻 self 还没进数组（indexOf = -1），第一只会被摆到最左。
+    this.slot = Math.max(0, Number(slot) || 0);
     // 尺寸只认 petSizeOf（height 优先 / size 兜底）：别处再读一次 cfg.size 就又一份算法
     this.size = petSizeOf(cfg);
     this.facing = "left";
@@ -763,9 +889,14 @@ var api = window.__petElectron__;
     // ---- Position (corner-based initial) ----
     applyPosition();
     pushHitRegion();
-    window.addEventListener("resize", function () {
+window.addEventListener("resize", function () {
       noteActivity(); // resize = 用户动了窗
-      if (self.customPos) applyPosition();
+      // ⚠️ 每次 resize 都要重新摆位（§9.26）：居中位置是按**窗宽**算的，
+      //   而窗宽是拿到配置之后才报上去的（构造宠物时窗还是主进程那个 620 默认值）。
+      //   只在有位置记忆时重摆的话，「刚摆好」的宠物会停在 620 上算出来的位置：
+      //   实测窗涨到 822 之后宠物还留在 left=79（左右留白 79/281，不居中）。
+      //   有记忆的按记忆夹回去（stageKeepIn），没记忆的回到舞台正中。
+      applyPosition();
       // 窗一变，气泡的可用空间和对齐全变了（头顶行数、左右放不放得下）：重新夹一次。
       // 不夹的话，气泡会保持旧的位置 —— 窗从 620 缩到 566 那一下，右边就少一截，
       // 句子末尾直接被窗边切掉（§9.21 实测）。
@@ -791,16 +922,21 @@ if (self.customPos) {
         self.customPos.ry = (keep.top + halfH) / window.innerHeight;
         return;
       }
-      container.style.removeProperty("top");
+container.style.removeProperty("top");
       container.style.removeProperty("bottom");
       container.style.removeProperty("left");
       container.style.removeProperty("right");
       var corner = cfg.position.corner;
-      if (corner === "bottom-right") { container.style.right = cfg.position.marginX + "px"; container.style.bottom = cfg.position.marginY + "px"; }
-      else if (corner === "bottom-left") { container.style.left = cfg.position.marginX + "px"; container.style.bottom = cfg.position.marginY + "px"; }
-      // 贴上边的:top 用 topOffsetOf()（至少留出气泡的头顶预留，见 §9.21）
-      else if (corner === "top-right") { container.style.right = cfg.position.marginX + "px"; container.style.top = topOffsetOf(cfg) + "px"; }
-      else if (corner === "top-left") { container.style.left = cfg.position.marginX + "px"; container.style.top = topOffsetOf(cfg) + "px"; }
+      // ---- 横向一律居中（§9.26）----
+      // 以前按 corner 写 `right/left = marginX`：窗宽自适应之后（动画宽 + 余量 + 漫游行程），
+      // 贴一侧摆位会让**另一侧空出一整块**（实测 size 462 / 窗 822：右边贴 24 时左边空 336），
+      // 用户看着就是「舞台歪着、有一大块没用上」。现在两侧留白对称，舞台才叫舞台。
+      // corner 的 left/right 两支不再决定窗内位置（窗在屏幕哪一侧由窗的位置记忆决定）。
+container.style.left = centeredLeft(self.size, self.slot, Math.max(pets.length, self.slot + 1)) + "px";
+      // 纵向还由 corner 决定（top-* 贴上、bottom-* 贴下），这个别动：
+      //   头顶那截是气泡的舞台（topOffsetOf），底下是脚下留白（marginY）。
+      if (corner === "bottom-right" || corner === "bottom-left") { container.style.bottom = cfg.position.marginY + "px"; }
+      else { container.style.top = topOffsetOf(cfg) + "px"; }
     }
     self.applyPosition = applyPosition; // 位置记忆套用时要重新贴位（见 4.6）
 
@@ -917,7 +1053,7 @@ if (self.customPos) {
 
     var bubbleTimer = null;
 
-    /** 气泡贴到屏幕边（宠物拖到边角）时把它挪回来，不然半边在屏幕外 = 看着被切了一半。
+  /** 气泡贴到屏幕边（宠物拖到边角）时把它挪回来，不然半边在屏幕外 = 看着被切了一半。
         偏移走 left/bottom（不在 transition 里，改完立刻到位，不会一边补一边抖）。 */
 self.clampBubble = function () {
       if (!bubble.classList.contains("show")) return;
@@ -925,15 +1061,20 @@ self.clampBubble = function () {
       if (!r || !(r.width > 0) || !(r.height > 0)) return;
       var W = window.innerWidth;
       var H = window.innerHeight;
-      var dx = 0;
-      var dy = 0;
 
       // ---- 高度：按头顶**真实**空间收（§9.21）----
-      // 以前高度交给 CSS 的「最多三行」：宠物贴上边时（corner: top-*，top = marginY）
+      // 以前高度交给 CSS 的「最多三行」：宠物贴上边时（corner: top-*,top = marginY）
       // 头顶只有 marginY 那么点，一行都塞不下，气泡要么顶出窗外被切，要么被挤到宠物身上。
       // 现在按容器顶到窗顶的距离算能塞几行，写 max-height + 行数，两个方向都封死。
       var cr = container.getBoundingClientRect();
-      var room = Math.max(24, Math.round(cr.top - BUBBLE_CHROME_H));
+      // ---- 头顶没地方就挂身下（§9.25）----
+      // 贴边是**允许**的了（拖到屏幕上边时头顶就是 0），这时气泡必须换边，不然
+      // 「贴边贴上了、话却说不出来」。下面更宽就挂下面（宠物脚底下有 bottomPad 那截）。
+var roomAbove = Math.max(0, Math.round(cr.top - BUBBLE_CHROME_H));
+      var roomBelow = Math.max(0, Math.round(H - cr.bottom - BUBBLE_CHROME_H));
+      var below = roomBelow > roomAbove;
+      var room = Math.max(24, below ? roomBelow : roomAbove);
+      cr = container.getBoundingClientRect(); // 上面被写样式弄脏了？重拿一份干净的（下方 baseL/baseT 用它）
       var withInput = bubble.classList.contains("with-input");
       if (withInput) {
         // 输入框在气泡**底部**（bubbleText 之后 append），封整个气泡会把框裁掉
@@ -952,16 +1093,68 @@ self.clampBubble = function () {
         bubble.style.webkitLineClamp = String(lines);
       }
 
-      if (r.left < 8) dx = 8 - r.left;
-      else if (r.right > W - 8) dx = W - 8 - r.right;
-      if (r.top < 8) dy = 8 - r.top;
-      else if (r.bottom > H - 8) dy = H - 8 - r.bottom;
+      // 换边（class 管位置与尾巴方向；两个方向都要先清掉另一个方向的内联值，
+      // 不然上一轮写下的 bottom/top 会和这一轮的 top/bottom 叠着算，位置飘）。
+      // ⚠️ 这里的比较是 **!=**（量过的坑）：写成 == 就是「已经在这一侧时才切」，
+      //   等于永远不切 —— 结果 room 算的是「身下」的值、位置也按身下写，class 却是头顶，
+      //   top/bottom 同时被指定 → 高度被压成只剩内边距（实测贴上边时气泡 16px 高）。
+      if (below !== bubble.classList.contains("below")) {
+        bubble.classList.toggle("below", below);
+        bubble.style.removeProperty("top");
+        bubble.style.removeProperty("bottom");
+        if (below) bubble.style.removeProperty("left");
+      }
+      // ⚠️⚠️ 高度/换边写完之后**必须重新量**：上面那两步会改变几何 ——
+      //   ① max-height / 行数一变，文字重新折行，**宽度也跟着变**（实测 63 字在
+      //      622px 宽下折 2 行、在 574px 下折 3 行，宽度差 48px）；
+      //   ② 换边后 top/bottom 换了一套，位置全变。
+      //   拿旧几何算 dx/dy = 把气泡夹在旧位置上（实测贴右边时探出窗边 40px，
+      //   而 showBubble 那次「下一帧再夹」也救不回来：文字宽度不再变，夹取也认为
+      //   自己是对的）。这里量的是布局，代价可以忽略。
+      r = bubble.getBoundingClientRect();
+      if (!r || !(r.width > 0) || !(r.height > 0)) return;
+
+var dx = 0;
+      // dy 的口径：**正值 = 往下挪**（两个方向各按各的来）
+      var dy = 0;
+      // ⚠️⚠️ 偏移是**绝对**的，不是增量（实测踩过的坑：算增量、写绝对）。
+      //   写下去的是 `left: calc(50% ± X)` —— X 是相对「容器水平居中位」的**总偏移**，
+      //   每次写都把上一次的 X 顶掉。而「差多少」的算法（dx = 8 - r.left）算的是增量：
+      //   容器一动，气泡跟着容器平移（`50%` 是相对容器的），读到的 r.left 已经是新位置，
+      //   于是每次只补回一部分，实测往左拖时气泡在 -42 / -30 之间来回磨（欠 40px），
+      //   贴右边同理探出窗边 40px，而且**永远夹不准**（离得越远差得越多）。
+      //   正确算法：先把「X=0 时气泡的绝对左边」算出来，再把想要的绝对位置减掉它。
+var baseL = cr.left + (cr.width - r.width) / 2;
+      // 竖向的「居中位」：头顶那套是 bottom:100% + margin-bottom，身下那套是 top:100% + margin-top
+      //（都写在 pet.css 里，10px；忘了算它，偏移就会恒差 10px）。
+      var baseT = below ? cr.bottom + BUBBLE_GAP : cr.top - BUBBLE_GAP - r.height;
+      var wantL = r.left;
+      var wantT = r.top;
+      if (wantL < 8) wantL = 8;
+      else if (r.right > W - 8) wantL = W - 8 - r.width;
+      // 挂头顶时越界 = 顶出窗顶；挂身下时越界 = 掉出窗底。
+      // （另一个方向不会越界：高度已经按「那边的真实空间」封死了。）
+      if (below) {
+        if (r.bottom > H - 8) wantT = H - 8 - r.height;
+        else if (r.top < 8) wantT = 8;
+      } else {
+        if (r.top < 8) wantT = 8;
+        else if (r.bottom > H - 8) wantT = H - 8 - r.height;
+      }
+      dx = Math.round(wantL - baseL);
+      dy = Math.round(wantT - baseT);
       // 写一样的值没有代价，但每帧都写新值会让浏览器白排一次版
       if (!dx) bubble.style.removeProperty("left");
       else bubble.style.left = "calc(50% + " + Math.round(dx) + "px)";
-      // bottom 越大越靠上，所以往下挪是减
-      if (!dy) bubble.style.removeProperty("bottom");
-      else bubble.style.bottom = "calc(100% - " + Math.round(dy) + "px)";
+      if (below) {
+        if (!dy) bubble.style.removeProperty("top");
+        else bubble.style.top = "calc(100% " + (dy > 0 ? "+ " : "- ") + Math.round(Math.abs(dy)) + "px)";
+        bubble.style.removeProperty("bottom");
+      } else {
+        if (!dy) bubble.style.removeProperty("bottom");
+        else bubble.style.bottom = "calc(100% " + (dy > 0 ? "- " : "+ ") + Math.round(Math.abs(dy)) + "px)";
+        bubble.style.removeProperty("top");
+      }
     };
 
     self.showBubble = function (text, opts) {
@@ -1512,8 +1705,55 @@ hit.addEventListener("pointerdown", function (e) {
         offY: e.clientY - (r.top + r.height / 2),
         // 宠物在窗里的位置：搬窗时主进程拿它把宠物夹在屏幕工作区里（不让它拖出屏幕）
         inset: { left: r.left, top: r.top, width: r.width, height: r.height },
+        // 窗左上角的**屏幕**坐标：slideTo 靠它推「窗被屏幕边夹住了多少」（§9.25）。
+        // 口径就是「光标屏幕坐标 − 光标在窗里的坐标」—— 无边框无滚动时 clientX/Y
+        // 就是窗内坐标，所以两者一减就是窗原点。⚠️ 别拿容器的偏移去推（量过的坑）：
+        //   写成 `ps.x - (clientX - r.left)` 等于假设「光标按在容器正中」，用户按住的是
+        //   宠身的哪一块就偏多少（命中框左右各留 10px，按中间就偏 10）。实测偏 10px 时
+        //   贴左边的宠物停在离边 302 而不是 0（而且偏多少取决于按哪儿，看起来像“随机”）。
+        win0: { x: Math.round(ps.x - e.clientX), y: Math.round(ps.y - e.clientY) },
+        // 这次拖拽的窗内基准落点（slideTo 在它之上加差额，pointerup 也不再看 clientX）
+        base: { x: r.left, y: r.top },
+        // 上一帧写进去的窗内偏移：没变就不重排（slideTo 每帧都调）
+        slideAt: null,
       };
     });
+
+    /**
+     * 拖拽时把宠物在**窗里**的位置挪一挪，让它照旧贴着光标，哪怕窗已经被屏幕边夹住（§9.25）。
+     *
+     * 「贴边」是两个自由度：屏幕位置 = 窗的位置 + 宠物在窗里的位置。以前第二个自由度
+     * 全程不动，于是窗一夹住，宠物就差「它在窗里贴着的那条边」那么多 —— 头顶 150、
+     * 底下 60、左右 32（实测），也就是用户说的「拖到边上还差一大块、贴不上」。
+     * 现在：窗照旧整扇夹在屏内（气泡按**窗**夹取，窗在屏内它就必然可见，§9.23），
+     * 窗夹不住的那份**差额**原样加到宠物在窗里的偏移上：
+     *   屏幕上 → 宠物照常 1:1 跟手，贴到边时正好贴住（窗不出屏、宠物不出屏）；
+     *   窗内   → 偏移永远夹在 [0, 窗宽−动画宽] / [0, 窗高−动画高−脚底下移] 里，
+     *            所以动画**不会被窗边切掉**（这是「动画左右被裁剪」那条的另一半）。
+     * 纯计算：偏移是「光标位移」的函数而不是累加的，来回拖不会漂；窗没被夹时差额恒为 0，
+     * 于是一行 DOM 都不写（老行为逐帧不变）。
+     */
+    function slideTo(dx, dy) {
+      var d = dragState;
+      if (!d.active || !d.win0) return;
+      var winW = window.innerWidth;
+      var winH = window.innerHeight;
+      var want = { x: d.win0.x + dx, y: d.win0.y + dy };
+      // 显示器按**宠物**落点选（与主进程 pet:window-move 同一口径：窗落点 + 宠物在窗里的偏移）
+      var wa = workAreaNear(want.x + d.inset.left + 20, want.y + d.inset.top + 20);
+      var at = clampWinToScreen(want, winW, winH, wa);
+      var left = Math.min(Math.max(d.base.x + (want.x - at.x), 0), Math.max(0, winW - self.size));
+      // 纵向算上下移量（脚底对齐 translateY），不然拖到窗底时脚底那截会挂到窗外
+      var top = Math.min(Math.max(d.base.y + (want.y - at.y), 0), Math.max(0, winH - halfH * 2 - bottomPad));
+      if (d.slideAt && Math.abs(d.slideAt.x - left) < 0.5 && Math.abs(d.slideAt.y - top) < 0.5) return;
+      d.slideAt = { x: left, y: top };
+      container.style.left = Math.round(left) + "px";
+      container.style.top = Math.round(top) + "px";
+      container.style.right = "auto";
+      container.style.bottom = "auto";
+      clampBubbles(); // 气泡夹的是**窗**：宠物在窗里挪了就得跟着重夹一次
+      pushHitRegion(); // 形状是窗坐标：宠物在窗里动了，形状不跟着动就点不到它了
+    }
 
     hit.addEventListener("pointermove", function (e) {
       if (!dragState.active) return;
@@ -1544,8 +1784,10 @@ if (config.animations.drag.length) {
       if (moveWin) {
         // 位移仍然是「从按下那下算起」而不是每帧增量（屏边夹住时增量会让宠物越拖越落后），
         // 但它现在真的是屏幕上的绝对位移，所以既 1:1 又不累积误差。
+        // 窗被屏幕边夹住的那部分差额，渲染进程自己补到宠物在窗里的位置上（§9.25）——
+        // 不补的话宠物会停在离屏边「它在窗里贴着的那条边」那么远，贴不上边。
+        slideTo(dx, dy);
         queueWinMove(dx, dy, dragState.inset);
-        // 命中区不用重报：形状是窗口坐标，窗一搬它跟着走，矩形没变。
         return;
       }
       // 拖拽也要夹在屏幕内（舞台的下移量这时是 none，所以按 halfH 算下边界）
@@ -1576,7 +1818,14 @@ if (config.animations.drag.length) {
         self.justDragged = true;
         setTimeout(function () { self.justDragged = false; }, 100);
         self.dragging = false;
-self.customPos = { rx: (e.clientX - dragState.offX) / window.innerWidth, ry: (e.clientY - dragState.offY) / window.innerHeight, w: window.innerWidth, h: window.innerHeight };
+        // 落点按**容器实际位置**算，不再拿 e.clientX 反推（§9.25）：
+        //   窗被屏幕边夹住时宠物在窗里的位置是被 slideTo 挪过的，
+        //   `clientX − offX` 得到的是「光标该在的地方」，不是宠物真正的落点 ——
+        //   差出来的正好是贴边那一段，存下去下次启动就又「贴不上边」了。
+        var W1 = window.innerWidth;
+        var H1 = window.innerHeight;
+        var rc = container.getBoundingClientRect();
+self.customPos = { rx: (rc.left + halfW) / W1, ry: (rc.top + halfH) / H1, w: W1, h: H1 };
         self.movedLocally = true;
         savePosition(self); // 记住落点：下次启动还在这儿（宿主落盘，比例坐标）
         stage.style.transform = "translateY(" + bottomPad + "px)";
@@ -1788,7 +2037,7 @@ self.customPos = { rx: (e.clientX - dragState.offX) / window.innerWidth, ry: (e.
    */
   function reportWindowSize() {
     var s = stageSize();
-    applyBubbleMaxWidth(s.w);
+    applyBubbleMaxWidth(s.w, s.petW);
     var api = window.__petElectron__;
     if (!api || !api.setWindowSize || !config) return;
     try {
@@ -1835,7 +2084,11 @@ self.customPos = { rx: (e.clientX - dragState.offX) / window.innerWidth, ry: (e.
     //   窗一比「动画 + 余量」宽，气泡（封顶 = 窗宽-16）就比动画宽很多，居中时必被
     //   clampBubble 推到贴一边 —— 实测 592 宽的气泡居中于 462 的动画，左探 196px、右探 16px。
     //   宁可气泡窄一点（字多几行），也不要歪。
-    var w = maxW + sidePad * 2;
+    // ⚠️⚠️ 但横向必须再留**漫游行程**（§9.25，roamRoom）：只有留白没有行程的话，
+    //   窗里能走的道 = 2×留白 − 2×margin = 24px，而走路动画一程 60~320px ——
+    //   planMove 直接返回 null（走路动画放不出来），放得出来的那几步也立刻被夹住，
+    //   用户看着就是「动画左右被裁剪、被限制在原地」。
+    var w = maxW + sidePad * 2 + roamRoom(sidePad);
     return {
       petW: maxW,
       w: w,
@@ -1846,14 +2099,21 @@ self.customPos = { rx: (e.clientX - dragState.offX) / window.innerWidth, ry: (e.
   /**
    * 气泡能有多宽（写进 CSS 变量 --bubble-max-w，pet.css 那侧只读它）。
    *
-   * = min(窗宽 - 16, BUBBLE_W_MAX)：窗宽 - 16 是 clampBubble 夹得住的上限
-   * （左右各留 8）；BUBBLE_W_MAX 封顶，免得小屏上横跨半个屏。
+   * = min(窗宽 − 16, 围着宠物的那圈, BUBBLE_W_MAX)：
+   *   窗宽 − 16 是 clampBubble 夹得住的上限（左右各留 8）；
+   *   ⚠️ 窗宽不再直接当封顶（§9.25）：横向多出来的那截是**漫游行程**，不是给气泡的 ——
+   *     拿窗宽当封顶，气泡就会宽过动画近一倍（窗 740 / 动画 380 → 气泡 724），
+   *     宠物一漫游到道的一头，clampBubble 把它推到贴一边，看着就是「歪」。
+   *     气泡该围着**宠物**长：宠物宽 + 160，下限 420。
+   *   BUBBLE_W_MAX 封顶，免得小屏上横跨半个屏。
    * ⚠️ 这个数是**外框**宽（.pet-bubble 是 border-box）：按内容盒算的话会差
    *   24px padding + 2px border，气泡就比窗宽，夹取永远夹不住（§9.22）。
    */
-  function applyBubbleMaxWidth(winW) {
+  function applyBubbleMaxWidth(winW, petW) {
     try {
       var w = Math.min(Math.max(240, Math.round(winW) - 16), BUBBLE_W_MAX);
+      var around = Math.max(420, (Number(petW) || 0) + 160);
+      w = Math.min(w, Math.round(around), BUBBLE_W_MAX);
       document.documentElement.style.setProperty("--bubble-max-w", w + "px");
     } catch (e) {
       /* 老浏览器不支持自定义属性：CSS 里那个兜底值还在 */
@@ -1878,8 +2138,8 @@ var SIZE_MAP = { small: 380, normal: 400, large: 540 };
       size: size,
       position: { corner: corner, marginX: 30 + Math.floor(Math.random() * 60), marginY: 30 + Math.floor(Math.random() * 120) }
     };
-    var root = document.getElementById("pet-root");
-    var pet = new PetCard(cfg, root);
+var root = document.getElementById("pet-root");
+    var pet = new PetCard(cfg, root, pets.length);
     pets.push(pet);
     pet.init();
     // 新宠物进屋：既重新起计空闲计时器，醒来晚了也得马上把它冻住
@@ -2042,14 +2302,20 @@ var SIZE_MAP = { small: 380, normal: 400, large: 540 };
     var raw = JSON.parse(stripJsonc(text));
     config = assertClientConfig(raw);
 
-    // 窗要开多大：只包住最大的那只宠物 + 它头顶的气泡（气泡最宽 420，还要能问字）。
+    // 窗要开多大：只包住最大的那只宠物 + 头顶气泡 + 横向漫游行程（§9.25）。
     // 拿到配置就报，晚了窗会先按主进程那个 620x560 的默认大小摆一下再跳一下。
     reportWindowSize();
 
+    // 主进程推来的显示器工作区（拖到屏幕边时靠它算出窗被夹住的那份差额，§9.25）。
+    // 主进程在 did-finish-load 和显示器变化时才发，平常零开销。
+    if (window.__petElectron__ && window.__petElectron__.onDisplays) {
+      window.__petElectron__.onDisplays(function (list) { setDisplays(list); });
+    }
+
     // Create pet instances
     var root = document.getElementById("pet-root");
-    config.pets.forEach(function (cfg) {
-      var pet = new PetCard(cfg, root);
+config.pets.forEach(function (cfg, i) {
+      var pet = new PetCard(cfg, root, i);
       pets.push(pet);
     });
 

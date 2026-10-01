@@ -481,7 +481,10 @@ check("洗白：非法 id/坐标被丢掉、越界夹回 0~1", JSON.stringify(di
 check("套用位置后要重报命中区（宠物挪走了）", /p\.customPos = \{ rx: rescalePos\([\s\S]{0,400}pushHitRegion\(\)/.test(petJs));
 check("preload 有 savePosition 桥（渲染进程没 token）", /savePosition: \(id, rx, ry, w, h\) => ipcRenderer\.send\("pet:save-position"/.test(preloadJs));
 check("主进程代写 /control set-position", /ipcMain\.on\("pet:save-position"[\s\S]{0,400}callHost\("set-position"/.test(mainJs));
-check("位置存的是比例不是像素", /customPos = \{ rx: [^}]*innerWidth, ry: [^}]*innerHeight/.test(petJs));
+// ⚠️ 落点一律存**比例 + 当时窗宽高**（窗口尺寸变了才能换算回去）。
+//   pointerup 那处必须拿 container 的实际矩形（rc），不能拿 e.clientX 反推 ——
+//   贴边滑移会改写容器在窗里的位置，反推出来的是「光标该在的地方」，差着贴边那一截。
+check("位置存的是比例不是像素", /p\.customPos = \{ rx: rescalePos\(/.test(petJs) && /customPos = \{ rx: \(done\.left \+ halfW\) \/ W, ry: \(done\.top \+ halfH\) \/ H, w: W, h: H \}/.test(petJs) && /customPos = \{ rx: \(rc\.left \+ halfW\) \/ W1, ry: \(rc\.top \+ halfH\) \/ H1, w: W1, h: H1 \}/.test(petJs));
 }
 
 // ---------------------------------------------------------------- 暂停
@@ -697,8 +700,20 @@ check("气泡宽度跟着窗宽走（--bubble-max-w = 窗宽 - 16），最多 6 
 check("气泡 border-box（max-width 按外框算，夹取才夹得住）", /\.pet-bubble \{[\s\S]{0,2400}box-sizing: border-box/.test(petCss));
 // ⚠️ 气泡的宽度上限只许有一个出处：窗宽算一次 → CSS 变量 → pet.css 读它。
 //   写死过一次（pet.css 560 / pet.js 按窗宽 620），多出来的留白就白留了（§9.22）。
-check("气泡上限只有一个出处（stageSize → --bubble-max-w → pet.css）", /function stageSize\(/.test(petSrc) && /function applyBubbleMaxWidth\(/.test(petSrc) && /applyBubbleMaxWidth\(s\.w\)/.test(petSrc) && /Math\.round\(winW\) - 16/.test(petSrc) && !/560px/.test(petCss));
-check("气泡高度由 clampBubble 按头顶空间写（不再写死三行）", /var room = Math\.max\(24, Math\.round\(cr\.top - BUBBLE_CHROME_H\)\)/.test(petSrc) && /bubble\.style\.maxHeight = room \+ "px"/.test(petSrc) && /bubble\.style\.webkitLineClamp = String\(lines\)/.test(petSrc));
+check("气泡上限只有一个出处（stageSize → --bubble-max-w → pet.css）", /function stageSize\(/.test(petSrc) && /function applyBubbleMaxWidth\(/.test(petSrc) && /applyBubbleMaxWidth\(s\.w, s\.petW\)/.test(petSrc) && /Math\.round\(winW\) - 16/.test(petSrc) && !/560px/.test(petCss));
+// ⚠️ 上限还得**跟着宠物走**（§9.25）：窗宽是拿「漫游行程」撑出来的（宠物 + 2×留白 + maxDist），
+//   直接按窗宽封顶，漫游余量会顺手把气泡撑肥一截（实测能到 820）。宠物宽 + 160 才是大头。
+check("气泡不跟着漫游余量变胖（上限 = min(窗宽-16, 宠物宽+160, 820)）", /var around = Math\.max\(420, \(Number\(petW\) \|\| 0\) \+ 160\)/.test(petSrc) && /var BUBBLE_W_MAX = 820/.test(petSrc));
+check("气泡高度由 clampBubble 按头顶空间写（空间不够就翻到身下）", /var roomAbove = Math\.max\(0, Math\.round\(cr\.top - BUBBLE_CHROME_H\)\)/.test(petSrc) && /var roomBelow = Math\.max\(0, Math\.round\(H - cr\.bottom - BUBBLE_CHROME_H\)\)/.test(petSrc) && /var below = roomBelow > roomAbove/.test(petSrc) && /bubble\.style\.maxHeight = room \+ "px"/.test(petSrc) && /bubble\.style\.webkitLineClamp = String\(lines\)/.test(petSrc));
+// ⚠️ 换边的比较是 **!=**（实测过的坑）：写成 == 就是「已经在这一侧时才切」= 永远不切，
+//   room 算身下、位置也按身下写、class 却是头顶 → top/bottom 同时给，高度被压成只剩内边距
+//   （实测贴上边时气泡 622×16，字全裁没）。
+check("气泡翻边的 class 比较是不等号（贴上边时挂身下，不是压在头顶）", /if \(below !== bubble\.classList\.contains\("below"\)\)/.test(petSrc) && /\.pet-bubble\.below \{[\s\S]{0,200}top: 100%/.test(petCss));
+// ⚠️ 夹取的偏移是**绝对**的：写下去的是 `left: calc(50% ± X)`（相对容器居中位），不是增量。
+//   算增量的话容器一动就只补回一部分，实测左右各欠 40px、怎么夹都夹不准。
+check("夹取偏移按「居中位 + 绝对偏移」算（不是增量，否则拖一次差 40px）", /var baseL = cr\.left \+ \(cr\.width - r\.width\) \/ 2/.test(petSrc) && /dx = Math\.round\(wantL - baseL\)/.test(petSrc) && /var baseT = below \? cr\.bottom \+ BUBBLE_GAP : cr\.top - BUBBLE_GAP - r\.height/.test(petSrc));
+// 高度/换边写完会重新折行、宽度跟着变：拿旧宽度算偏移就是夹在旧位置上（实测差 48px）
+check("写完高度/换边重新量几何再算偏移", /r = bubble\.getBoundingClientRect\(\);\r?\n\s*if \(!r \|\| !\(r\.width > 0\)/.test(petSrc));
 check("行数按空间收（空间不够就少几行，而不是把话抽掉）", /Math\.min\(6, Math\.floor\(\(room - 14\) \/ BUBBLE_LINE_H\)\)/.test(petSrc) && /var BUBBLE_LINE_H = 18\.85/.test(petSrc));
 // 「说点什么」输入框在气泡**底部**（bubbleText 之后 append），封整个气泡会把框裁掉 → 只封文字
 check("输入态只封文字、给输入框留出 44px（不然框被裁掉没法打字）", /bubble\.classList\.contains\("with-input"\)[\s\S]{0,700}bubbleText\.style\.maxHeight = Math\.max\(20, room - BUBBLE_INPUT_H\)/.test(petSrc) && /var BUBBLE_INPUT_H = 44/.test(petSrc));
@@ -706,12 +721,35 @@ check("输入态只封文字、给输入框留出 44px（不然框被裁掉没�
 check("气泡下一帧再夹一次（刚 show 时量的是上一段文案的布局）", /requestAnimationFrame\(function \(\) \{ self\.clampBubble\(\); \}\)/.test(petSrc));
 check("窗一变就重新夹气泡（高度/宽度都变了）", /window\.addEventListener\("resize"[\s\S]{0,600}clampBubbles\(\)/.test(petSrc));
 
-// ------------------------------------------------ 留白是宠物的禁区（§9.23）
+// ------------------------------------------------ 留白是宠物的禁区（§9.23 → §9.25）
 // 症状：「上下高度不够 气泡无法完全显示」。量出来的根：位置记忆里 ry=0.2764627…
 //   套上去正好把宠物钉在窗顶（top=0）—— 头顶 0 留白，气泡被压成 846x24 的一条、字全裁没了。
-// 修法：站位记忆套回来时，宠物在**窗里**也必须给气泡留出舞台（左右 24、顶 150、底 60）。
-//   漫游/拖动不夹（clampPos 仍按 0 起夹）：漫游只改 left 不改 top，横向窗里还有几十 px 可夹。
-check("站位记忆也要给气泡留舞台（宠物不许贴到窗顶/窗边）", /function stageKeepIn\(/.test(petSrc) && /stageKeepIn\(cp\.rx \* window\.innerWidth - halfW, cp\.ry \* window\.innerHeight - halfH, self\.size, cfg\)/.test(petSrc) && /var loY = topOffsetOf\(cfg\)/.test(petSrc) && /var hiY = H - petH - bottomPadOf\(cfg\)/.test(petSrc) && /var loX = STAGE_PAD_X/.test(petSrc) && !/Math\.max\(cp\.ry \* window\.innerHeight - halfH, 0\)/.test(petSrc));
+// 修法：站位记忆套回来时，宠物在**窗里**也必须给气泡留出舞台（顶 150、底 60）。
+//   左右留给 roamRoom（§9.25：横向要贴边，留白全砍掉，行程改由窗宽给）。
+//   漫游/拖动不夹（clampPos 仍按 0 起夹）：漫游只改 left 不改 top。
+// ------------------------------------------------ 贴边是两个自由度（§9.25）
+// 症状一：「拖不到边，中间空一大块」；症状二：「动画在左右被限制住」。
+//   病根：贴边其实有**两个**自由度 —— 屏幕位置 = 窗位置 + 宠物在窗里的位置，
+//   而主进程只管夹第一个，第二个是死值 → 差值恒等于「它在窗里贴着的那条边」。
+//   修法：窗照旧整扇夹在屏内（气泡按窗夹才安全），差额由渲染进程把宠物在窗里滑出去顶到屏边；
+//   横向不再留常数（那截会砍掉漫游行程），改成**按 moves 配置推出来的 roamRoom。
+// 实测（2560×1400 屏、size 462）：拖过屏边 400px 后 left 0 / right 0 / up 0 / down 22
+//   （22 = 画布脚下那截空白，脚贴着边），四个方向窗都完整在 workArea 内，气泡也没被裁。
+check("横向站位贴边（不许再留常数 STAGE_PAD_X，那截会砍掉漫游行程）", /var loX = 0;/.test(petSrc) && /var hiX = W - size;/.test(petSrc) && !/var loX = STAGE_PAD_X/.test(petSrc));
+// 漫游行程 = max(maxDist + 2×margin) − 2×留白，窗宽再加上它：窗太窄时 planMove 直接
+//   return null（动画根本不播），这就是「动画在左右被限制住」。
+check("窗宽按漫游行程给足（maxDist 走得到，动画不播不了）", /function roamRoom\(sidePad\)/.test(petSrc) && /maxDist = Math\.max\(maxDist, md\)/.test(petSrc) && /margin = Math\.max\(margin, mg\)/.test(petSrc) && /Math\.ceil\(maxDist \+ 2 \* margin - 2 \* pad\)/.test(petSrc) && /var w = maxW \+ sidePad \* 2 \+ roamRoom\(sidePad\)/.test(petSrc));
+// 贴边的第二个自由度：窗被屏幕边夹住时，差额原样加到宠物在窗内的偏移上（不新增每帧 IPC）
+check("贴边差额走宠物在窗内的偏移（slideTo，不靠每帧 IPC）", /function slideTo\(/.test(petSrc) && /var want = \{ x: d\.win0\.x \+ dx, y: d\.win0\.y \+ dy \}/.test(petSrc) && /clampBubbles\(\);[\s\S]{0,120}pushHitRegion\(\)/.test(petSrc) && /function workAreaNear\(/.test(petSrc));
+check("主进程把工作区推给渲染进程（贴边滑移要知道屏边在哪）", /function pushDisplays\(/.test(elecSrc) && /ipcMain\.on\("pet:displays-get"/.test(elecSrc) && /screen\.getAllDisplays\(\)/.test(elecSrc) && /onDisplays: \(cb\)/.test(readFileSync(join(ROOT, "pi", "assets", "preload.cjs"), "utf8")) && /onDisplays\(function \(list\) \{ setDisplays\(list\); \}\)/.test(petSrc));
+// 换屏/改分辨率也要重推：不然多屏拔掉一块之后还按老屏边滑（会滑到屏外）
+check("显示器变化就重推工作区（added / removed / metrics-changed 都要）", /for \(const ev of \["display-added", "display-removed", "display-metrics-changed"\]\)/.test(elecSrc) && /screen\.on\(ev, pushDisplays\)/.test(elecSrc));
+// ⚠️ init() 得排在 reportWindowSize() 之后：did-finish-load 那次推送早于配置加载完，
+//   没这一手订阅的话 onDisplays 一个工作区都收不到，贴边滑移整段不触发（实测：拖不动）。
+check("订阅工作区排在报尺寸之后（否则收不到 did-finish-load 那次）", /reportWindowSize\(\);[\s\S]{0,300}onDisplays\(function \(list\)/.test(petSrc));
+// win0 = 屏幕坐标 − 窗内坐标。写成 `ps.x − (clientX − rect.left)` 就等于「假设光标按在
+//   容器正中」：探针按在命中框中心（比容器中心偏 10px）时，左边就差 10px、贴边停在 302。
+check("拖拽基准 win0 = 屏幕坐标减窗内坐标（别拿容器偏移推算）", /win0: \{ x: Math\.round\(ps\.x - e\.clientX\), y: Math\.round\(ps\.y - e\.clientY\) \}/.test(petSrc));
 // 窗比「宠物 + 两侧留白」还窄时区间会翻过来（多开时窗按最大的那只算）：
 //   这时取中间值，不然照样贴边、同样没头顶。
 check("窗太窄时留白区间取中间（不翻车成贴边）", /if \(hiX < loX\) loX = hiX = Math\.max\(0, \(W - size\) \/ 2\)/.test(petSrc) && /if \(hiY < loY\) loY = hiY = Math\.max\(0, \(H - petH\) \/ 2\)/.test(petSrc));
@@ -719,6 +757,18 @@ check("窗太窄时留白区间取中间（不翻车成贴边）", /if \(hiX < l
 check("夹取后回写 customPos（漫游起点和 DOM 一致）", /self\.customPos\.rx = \(keep\.left \+ halfW\) \/ window\.innerWidth/.test(petSrc));
 // 窗高公式和站位区间共用同一份 corner 算法（又一份算法就又一处对不上，§9.22 的教训）
 check("窗底留白 corner 算法只有一份（stageSize 与 stageKeepIn 共用）", /function bottomPadOf\(/.test(petSrc) && /botPad = Math\.max\(botPad, bottomPadOf\(cfg\)\)/.test(petSrc) && !/botPad = Math\.max\(botPad, Math\.max\(mY, STAGE_PAD_BOTTOM\)\)/.test(petSrc));
+
+// ------------------------------------------------ 舞台自适应宽度 + 居中（§9.26）
+// 症状：舞台（窗）宽起来之后，按 corner 贴一侧摆位 → 另一侧空出一整块透明窗
+//   （实测 size 462 / 窗 822：right=24 时左边空 336），看着就是「舞台歪着、有一大片没用」。
+// 修法：① 窗宽完全由内容自适应（动画宽 + 余量 + 漫游行程，见上）；② 窗内横向一律居中。
+// 实测（窗 822 / 宠物 462）：左留白 180 = 右留白 180。
+check("舞台内横向居中（不许再按 corner 贴一侧）", /function centeredLeft\(size, index, total\)/.test(petSrc) && /container\.style\.left = centeredLeft\(self\.size, self\.slot/.test(petSrc) && !/container\.style\.right = cfg\.position\.marginX/.test(petSrc) && !/container\.style\.left = cfg\.position\.marginX/.test(petSrc));
+// ⚠️ resize 必须重新摆位：构造宠物时窗还是主进程那个 620 默认宽，居中位置按窗宽算，
+//   窗涨到 822 之后不重摆，宠物会停在 620 上算出来的 left=79（79/281，不居中）。
+check("窗一变就重新摆位（不然停在旧窗宽算出的位置上）", /window\.addEventListener\("resize",[\s\S]{0,400}\n\s*applyPosition\(\);/.test(petSrc) && !/if \(self\.customPos\) applyPosition\(\);/.test(petSrc));
+// 多开：两只都居中会完全重叠（以前靠 corner 的 left/right 两支错开，§9.26 起那两支改成居中）
+check("多开按序号在舞台里错开（都居中会叠在一起）", /function PetCard\(cfg, rootEl, slot\)/.test(petSrc) && /this\.slot = Math\.max\(0, Number\(slot\) \|\| 0\)/.test(petSrc) && /config\.pets\.forEach\(function \(cfg, i\)/.test(petSrc) && /return Math\.round\(\(lane \* i\) \/ \(n - 1\)\)/.test(petSrc));
 
 // 位置记忆换算：窗内比例是**相对窗**的，而舞台窗会变（这一版左右留白 80→200，宽 622→862）：
 //   老落点 rx=0.5797 直接套上去，宠物水平平移 (862-622)*0.58 = 139px（「启动后宠物自己跑了一边」）。
