@@ -305,7 +305,9 @@ function runCli(args) {
 // ---------------------------------------------------------------- 起宿主
 console.log("启动宿主（serve 模式，无窗）…");
 const host = spawn(process.execPath, [join(ROOT, "bin", "pi-pet.cjs"), "serve", "--port", String(PORT)], {
-	env: { ...process.env, PI_PET_HOME: HOME, PI_PET_SKIP_FOREIGN: "1" },
+	// PI_PET_NO_UPDATE：不自动查更新（测试里不该动网络）
+	// PI_PET_UPDATE_NO_FETCH：手动 check-update 也只比本地 ref（快，且不需要网）
+	env: { ...process.env, PI_PET_HOME: HOME, PI_PET_SKIP_FOREIGN: "1", PI_PET_NO_UPDATE: "1", PI_PET_UPDATE_NO_FETCH: "1" },
 	stdio: ["ignore", "pipe", "pipe"],
 });
 let hostLog = "";
@@ -574,6 +576,52 @@ check("同一个锁抢不到第二次", probeAcquire(probeLock).ok === false);
 probeRelease(probeLock);
 check("释放后能再抢到", probeAcquire(probeLock).ok === true);
 probeRelease(probeLock);
+
+// ---------------------------------------------------------------- 检查更新
+// 查/装都走控制面；实现全在 app/updater.cjs，这里验证「动作存在、回包形状对、
+// 不会顺手把本地改动冲掉」（PI_PET_UPDATE_NO_FETCH 让它不碰网络）。
+console.log("\n检查更新…");
+const updSrc = readFileSync(join(ROOT, "app", "updater.cjs"), "utf8");
+const hostSrc = readFileSync(join(ROOT, "app", "host.cjs"), "utf8");
+const serverSrc = readFileSync(join(ROOT, "app", "server.cjs"), "utf8");
+const elecSrc = readFileSync(join(ROOT, "pi", "assets", "pet-electron.cjs"), "utf8");
+const petSrc = readFileSync(join(ROOT, "pi", "assets", "pet.js"), "utf8");
+const preloadSrc = readFileSync(join(ROOT, "pi", "assets", "preload.cjs"), "utf8");
+
+const chk = (await post(PORT, "/control", { action: "check-update" }, token)).body;
+check("check-update 有回包", !!chk);
+check("check-update 回带 update 摘要（mode/version/current）", !!(chk.update && chk.update.mode && chk.update.version));
+check("check-update 不把宿主带崩（宿主还活着）", (await get(PORT, "/health")).body.role === "pi-pet-host");
+check("装法认得出来（本仓库是 git 检出）", chk.update.mode === "git", `mode=${chk.update && chk.update.mode}`);
+check("/state 里也带得上一份更新信息", typeof (await get(PORT, "/state", token)).body.state.update === "object");
+
+check("更新只认 --ff-only（不要自动 merge）", /pull", "--ff-only/.test(updSrc));
+check("工作区脏就拒绝自动更（别冲掉用户的本地改动）", /dirty\(info\.dir\)[\s\S]{0,400}有本地改动/.test(updSrc));
+check("git 模式认远端分支而不是写死 origin/main", /rev-parse", "--abbrev-ref", "--symbolic-full-name", "@\{u\}"/.test(updSrc));
+check("npm 非全局装只报告不代劳", /info\.global[\s\S]{0,600}只报告不代劳/.test(updSrc));
+check("自动检查有开关（PI_PET_NO_UPDATE / 间隔 / 延迟）", /PI_PET_NO_UPDATE/.test(updSrc) && /PI_PET_UPDATE_GAP_MS/.test(updSrc) && /PI_PET_UPDATE_DELAY_MS/.test(updSrc));
+check("自动检查按 home/update.json 限频", /PI_PET_UPDATE_GAP_MS[\s\S]{0,1200}readStateFile\(home, "update\.json"\)[\s\S]{0,900}gapMs/.test(updSrc));
+check("host 起动就自动查 + 自动装 + 换窗", /updater\.autoUpdate\(PATHS\.home, \{[\s\S]{0,400}win\.restart\(/.test(hostSrc));
+check("update-info 在 listen 之前就有（不然第一下请求吃到 TDZ）", hostSrc.indexOf("updater.readUpdateInfo(PATHS.home)") < hostSrc.indexOf("await listen(server"));
+check("control 可以是 Promise（server 那头 await）", /await ctx\.control\(/.test(serverSrc));
+check("宿主不会 spawnSync 卡死自己", !/spawnSync\s*\(/.test(hostSrc));
+check("菜单里有「检查更新」", /label: "检查更新…"/.test(elecSrc));
+check("菜单更新走宿主（check-update / do-update）", /callHost\("check-update"/.test(elecSrc) && /callHost\("do-update"/.test(elecSrc));
+check("菜单更新请求的超时给到分钟级（git fetch / npm i 很慢）", /callHost\("check-update", \{\}, token, 240000\)/.test(elecSrc));
+check("自动更新不需要用户点（宿主自己拉）", /PI_PET_NO_UPDATE=1 → 不自动检查更新/.test(updSrc));
+// ⚠️ 这里不真调 do-update：测试跑在这棵真仓库上，pull 会动工作区。
+check("do-update 不会用空串盖掉刚查到的版本/提交", /if \(!s\[k\]\) delete s\[k\]/.test(hostSrc));
+
+// ---------------------------------------------------------------- 舞台窗（小窗，别改回全屏）
+console.log("\n舞台窗（只包住宠物，不是全屏）…");
+check("主进程不再按屏幕大小开窗", !/workAreaSize/.test(elecSrc));
+check("窗落点落在工作区里（默认右下角 + 记住上次）", /workArea/.test(elecSrc) && /stage\.json/.test(elecSrc));
+check("拖宠物 = 搬窗（位移从按下那下算起）", /moveWin\(e\.clientX - dragState\.sx/.test(petSrc) && /windowDrag\.x \+ dx/.test(elecSrc));
+check("搬窗时把宠物夹在屏幕工作区内", /w\.x \+ w\.width - ir - 6/.test(elecSrc));
+check("搬完记住落点", /pet:window-drag-end/.test(elecSrc) && /endWinDrag\(\)/.test(petSrc));
+check("渲染进程报舞台尺寸（宠物 + 气泡）", /reportWindowSize\(\)/.test(petSrc) && /pet:window-size/.test(elecSrc));
+check("preload 三个新口都齐", /setWindowSize/.test(preloadSrc) && /moveWindow/.test(preloadSrc) && /endWindowDrag/.test(preloadSrc));
+check("漫游/气泡仍按窗口尺寸算（舞台=窗口，逻辑没变）", /window\.innerWidth/.test(petSrc) && /function clampPos\(/.test(petSrc));
 
 // ---------------------------------------------------------------- 收尾
 console.log("\n收尾…");

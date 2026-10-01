@@ -2,14 +2,22 @@
  * pet-electron.cjs — Electron 主进程
  *
  * 启动方式：宿主（app/host.cjs）用 `electron pet-electron.cjs <port>` 拉起。
- * 职责：开一扇全屏透明置顶窗，加载宿主提供的 http://127.0.0.1:<port>。
+ * 职责：开一扇**只包住宠物的小**透明置顶窗，加载宿主提供的 http://127.0.0.1:<port>。
  *
- * 鼠标命中：窗是全屏的，但**只有宠物那块能被点到**（别处的点击要落到下面的窗口上）。
+ * ⚠️⚠️ 千万别把这扇窗改回「全屏」。全屏透明置顶窗是桌面宠物的头号性能杀手：
+ *   ① 它每产生一帧，DWM 都得把**整块桌面**重新合成一遍（连着下面所有窗口一起），
+ *      也就是在跟别的程序抢合成预算 —— 症状就是「桌宠一开，浏览器/IDE 的后台
+ *      窗口就不刷新了」。窗口小 10 倍，单帧填充率就小 10 倍。
+ *   ② 全屏意味着它跟**每一扇**窗都相交，Windows 于是没法把任何后台窗口判成
+ *      「被遮住了」，那些窗口就一直满速画，没人帮它们降频。
+ *   所以：窗 = 宠物的小舞台（pet.js 那边按窗口尺寸算漫游/气泡夹取，不变），
+ *   想把宠物放到屏幕别处就**搬窗**（拖宠物 = 搬窗，见 pet:window-move）。
+ *
+ * 鼠标命中：窗里大部分是空的，但**只有宠物那块能被点到**（别处的点击要落到下面的窗口上）。
  *   Windows/Linux 用 setShape() 把整窗的命中区裁成宠物的包围盒，渲染进程每次动一动
- *   （漫游 / 拖拽 / 换位置 / 冒气泡）就把新包围盒经 preload 送过来。
- *   ⚠️ 别再用「鼠标进命中框 → setIgnoreMouseEvents(false)」那套：窗是全屏的，一关穿透
- *   整块屏幕的点击都被这扇透明窗吃掉，下面所有窗口都点不动（卡死），必须把鼠标移出
- *   宠物才恢复。老 Electron 没有 setShape 时才退回那套（见下）。
+ *   （漫游 / 换位置 / 冒气泡）就把新包围盒经 preload 送过来。
+ *   ⚠️ 别再用「鼠标进命中框 → setIgnoreMouseEvents(false)」那套：虽然窗小了，但一关
+ *   穿透这一块（连气泡）的点击就被吃掉。老 Electron 没有 setShape 时才退回那套（见下）。
  *
  * 右键菜单：渲染进程把「当前状态/只数/命中信息」发过来，主进程在这里拼原生菜单，
  * 菜单项的动作**全部走宿主的控制面**（POST /control，带 token）——
@@ -83,8 +91,9 @@ function hostState(token) {
   });
 }
 
-/** 调宿主的控制面。所有菜单项的动作都走这里，不在 Electron 侧另搞一套状态。 */
-function callHost(action, body, token) {
+/** 调宿主的控制面。所有菜单项的动作都走这里，不在 Electron 侧另搞一套状态。
+ *  timeoutMs：更新类动作（git fetch / npm i -g）要另给，默认 2.5s 不够。 */
+function callHost(action, body, token, timeoutMs) {
   return new Promise((resolve) => {
     const payload = Buffer.from(JSON.stringify({ action, ...(body || {}) }), "utf8");
     const req = http.request(
@@ -93,7 +102,7 @@ function callHost(action, body, token) {
         port,
         path: "/control",
         method: "POST",
-        timeout: 2500,
+        timeout: Number(timeoutMs) > 0 ? Number(timeoutMs) : 2500,
         headers: { "content-type": "application/json", "content-length": payload.length, ...(token ? { authorization: `Bearer ${token}` } : {}) },
       },
       (res) => {
@@ -158,16 +167,58 @@ function pkgVersion() {
   catch { return "?"; }
 }
 
-app.whenReady().then(() => {
-  const { width: sw, height: sh } = screen.getPrimaryDisplay().workAreaSize;
+/**
+ * 窗的落点记忆（home/stage.json）：{x, y}，窗左上角的屏幕坐标。
+ * 搬过窗（拖宠物）就记住，下次启动还在那儿 —— 不然每次都弹回右下角。
+ */
+function readStagePos(home) {
+  try {
+    const j = JSON.parse(fs.readFileSync(path.join(home, "stage.json"), "utf8"));
+    const x = Math.round(Number(j && j.x));
+    const y = Math.round(Number(j && j.y));
+    if (Number.isFinite(x) && Number.isFinite(y)) return { x, y };
+  } catch {
+    /* 没有 / 坏了就用默认角落 */
+  }
+  return null;
+}
 
-  // 全屏透明浮层：宠物能在屏幕任何地方漫游。
+function writeStagePos(home, pos) {
+  try {
+    fs.writeFileSync(path.join(home, "stage.json"), JSON.stringify({ x: Math.round(pos.x), y: Math.round(pos.y) }));
+  } catch (err) {
+    // 落盘失败不打断用户（这次不记住，下次还是默认角落而已）
+    console.error("[pi-dsh-pet] 窗位置没记住：", err && err.message);
+  }
+}
+
+app.whenReady().then(() => {
+  const { home } = readTokenAndHome();
+  // 舞台尺寸：先按常规档摆，渲染进程拿到配置后会报准数（pet:window-size）。
+  const STAGE = { w: 620, h: 560 };
+
+  // 默认摆在主屏右下角（宠物在舞台里也是靠下的，观感上就是「趴在右下角」）。
+  const wa0 = screen.getPrimaryDisplay().workArea;
+  const saved = readStagePos(home);
+  const start = saved && screen.getAllDisplays().length
+    ? (() => {
+        const d = screen.getDisplayNearestPoint({ x: saved.x + 20, y: saved.y + 20 });
+        const w = d.workArea;
+        // 显示器拔过/分辨率变过时旧坐标可能整个跑到屏幕外 → 夹回来
+        return {
+          x: Math.min(Math.max(saved.x, w.x - STAGE.w + 60), w.x + w.width - 60),
+          y: Math.min(Math.max(saved.y, w.y - 40), w.y + w.height - 40),
+        };
+      })()
+    : { x: wa0.x + wa0.width - STAGE.w - 24, y: wa0.y + wa0.height - STAGE.h - 8 };
+
+  // 透明置顶浮层：**只有宠物这么点大**，不是全屏（见文件头「别改回全屏」）。
   // setIgnoreMouseEvents 让点击穿透到下面的窗口；命中框由渲染进程动态开/关。
   const win = new BrowserWindow({
-    width: sw,
-    height: sh,
-    x: 0,
-    y: 0,
+    width: STAGE.w,
+    height: STAGE.h,
+    x: start.x,
+    y: start.y,
     frame: false,
     transparent: true,
     alwaysOnTop: true,
@@ -186,8 +237,8 @@ app.whenReady().then(() => {
   const SHAPE_OK = typeof win.setShape === "function" && process.env.PI_PET_NO_SHAPE !== "1";
   let shapeBroken = false;
   let gotRegion = false;
-  /** SetWindowRgn 是重活：这扇窗是**全屏**的，改一次形状就要让 DWM 把整块桌面
-   *  重新合成一遍（也就是又一次跟别的窗口抢合成预算）。所以两头都掐着：
+  /** SetWindowRgn 是重活：改一次形状就要让 DWM 把这扇窗这块地方重新合成一遍
+   *  （也就是又一次跟别的窗口抢合成预算）。所以两头都掐着：
    *    ① 量化到 2px —— 亚像素抖动不重画（不动的宠物不该一直重画）；
    *    ② 两次之间至少隔 SHAPE_GAP_MS —— 漫游时渲染进程 20fps 的上报不能变成
    *       20 次 SetWindowRgn；被节流的那次**攒最新的一份**（落点不能丢）。 */
@@ -219,7 +270,7 @@ app.whenReady().then(() => {
 
   if (SHAPE_OK) {
     // 窗口一直收事件；「谁能点到」交给 setShape。开始先给一个 1×1 的点，
-    // 免得渲染进程还没算出包围盒时整屏透明窗把点击全吃了。
+    // 免得渲染进程还没算出包围盒时这整块透明窗把点击吃了。
     // （PI_PET_NO_SHAPE=1 只用来排查「形状模式是不是坏了」，别在正常运行时开）
     win.setIgnoreMouseEvents(false);
     try {
@@ -285,10 +336,76 @@ app.whenReady().then(() => {
     else win.setIgnoreMouseEvents(false);
   });
 
+  // ---- 舞台窗：尺寸 / 搬动 / 收工 ----
+  //
+  // 以前窗是全屏的，漫游和拖拽都在窗里进行。现在窗只包住宠物：想把它放到屏幕别处，
+  // 就是**搬窗**（拖宠物 → 主进程搬窗，宠物在窗里的相对位置不变，所以看起来跟着手走）。
+  // 这样单帧填充率小一个数量级，DWM 的合成压力也跟着小一个数量级。
+  const num = (v, d) => (Number.isFinite(Number(v)) ? Number(v) : d);
+
+  /** 把窗夹在某块屏的工作区里（至少露出 minVis）。pos 是期望的左上角。 */
+  function clampToDisplay(pos, minVis) {
+    const d = screen.getDisplayNearestPoint({ x: pos.x + 40, y: pos.y + 40 });
+    const w = d.workArea;
+    return {
+      x: Math.round(Math.min(Math.max(pos.x, w.x - minVis.w + 60), w.x + w.width - minVis.w)),
+      y: Math.round(Math.min(Math.max(pos.y, w.y - minVis.h + 60), w.y + w.height - minVis.h)),
+    };
+  }
+
+  // 渲染进程报上来的舞台尺寸（它知道配置里最大的宠物 + 气泡要多少地方）
+  ipcMain.on("pet:window-size", (_event, m = {}) => {
+    if (win.isDestroyed()) return;
+    const w = Math.round(Math.min(Math.max(num(m.w, STAGE.w), 200), 6000));
+    const h = Math.round(Math.min(Math.max(num(m.h, STAGE.h), 200), 6000));
+    if (w === win.getContentBounds()[2] && h === win.getContentBounds()[3]) return;
+    // 只改右/下边界（左上不动）：宠物在窗里的偏移不变 → 它在屏幕上的位置也不变
+    const pos = clampToDisplay(win.getPosition(), { w, h });
+    win.setBounds({ x: pos.x, y: pos.y, width: w, height: h });
+    if (process.env.PI_PET_DEBUG === "1") console.error(`[pi-dsh-pet] 舞台窗 → ${w}x${h} @ ${pos.x},${pos.y}`);
+  });
+
+  // 拖宠物 = 搬窗。dx/dy 是**从本次按下那下算起**的位移（不是每帧增量）：
+  // 增量的话窗被夹在屏幕边时，宠物会越拖越落后于光标，松手才「啪」地弹回来。
+  let windowDrag = null;
+  ipcMain.on("pet:window-move", (_event, m = {}) => {
+    if (win.isDestroyed()) return;
+    const dx = num(m.dx, 0);
+    const dy = num(m.dy, 0);
+    if (!dx && !dy) return;
+    if (!windowDrag) {
+      const p = win.getPosition();
+      windowDrag = { x: p[0], y: p[1] };
+    }
+    // 宠物在窗里的位置（渲染进程量好的）：把它夹在屏幕工作区里，别拖到屏幕外找不着
+    const il = num(m.left, 0);
+    const it = num(m.top, 0);
+    const ir = il + num(m.width, 0);
+    const ib = it + num(m.height, 0);
+    const want = { x: windowDrag.x + dx, y: windowDrag.y + dy };
+    const d = screen.getDisplayNearestPoint({ x: want.x + il + 20, y: want.y + it + 20 });
+    const w = d.workArea;
+    const pos = {
+      x: Math.round(Math.min(Math.max(want.x, w.x - il + 6), w.x + w.width - ir - 6)),
+      y: Math.round(Math.min(Math.max(want.y, w.y - it + 6), w.y + w.height - ib - 6)),
+    };
+    win.setPosition(pos.x, pos.y);
+  });
+
+  // 松手：记下窗的落点，下次启动还在这儿
+  ipcMain.on("pet:window-drag-end", () => {
+    if (!windowDrag || win.isDestroyed()) {
+      windowDrag = null;
+      return;
+    }
+    windowDrag = null;
+    writeStagePos(home, { x: win.getPosition()[0], y: win.getPosition()[1] });
+  });
+
   // 加载完 5s 还没拿到包围盒 = 渲染进程没起来（配置拉失败、pet.js 报错…）。
   // 这时候宁可让整窗不可命中，也别让它当一整块矩形拦在屏幕最上层：
   // ⚠️ 这里**不能**用 setShape([]) —— 传空数组 = “恢复默认矩形”，正好是反效果
-  //（整屏透明窗把下面所有窗口的点击全吃掉，必须把鼠标移出那块 1×1 才恢复）。
+  //（整块透明窗把下面所有窗口的点击全吃掉，必须把鼠标移出那块 1×1 才恢复）。
   // 「整窗不收鼠标事件」只有 setIgnoreMouseEvents(true) 这一条路。
   win.webContents.once("did-finish-load", () => {
     setTimeout(() => {
@@ -305,9 +422,9 @@ app.whenReady().then(() => {
 
   // ---- 睡 / 醒：这扇窗看不见的时候，别再产生新帧 ----
   //
-  // 为什么这么要紧：它是**全屏透明置顶**的，每产生一帧，DWM 就得把整块桌面重新
-  // 合成一遍（连着下面所有窗口一起）。于是「一直在动」= 一直在跟别的程序抢合成
-  // 预算 —— 症状就是「桌宠一开，浏览器/IDE 的后台窗口就不刷新了」。
+  // 为什么这么要紧：它是透明置顶的，每产生一帧，DWM 就得把它下面的桌面那块
+  // 重新合成一遍（连着下面的窗口一起）。于是「一直在动」= 一直在跟别的程序抢
+  // 合成预算 —— 症状就是「桌宠一开，浏览器/IDE 的后台窗口就不刷新了」。
   // 看不见的时候（最小化 / 屏保锁屏 / 挂起）画面没人看，就该彻底停下来。
   function sendPower(sleep) {
     if (win.isDestroyed()) return;
@@ -436,8 +553,8 @@ app.whenReady().then(() => {
         type: "checkbox",
         checked: powerSave,
         // 省电 ≠ 暂停：暂停是「不理 agent 状态」，省电是「一帧都不产生」。
-        // 全屏透明窗每一帧都要重算整块桌面合成，冻住就不会抢别的窗口的渲染预算；
-        // 气泡文字照常更新（照旧能「说点什么」）。落盘 ctrl.json，重启后还是省电。
+        // 透明置顶窗每一帧都要让 DWM 重合成它底下那块桌面，冻住就不会抢别的窗口的
+        // 渲染预算；气泡文字照常更新（照旧能「说点什么」）。落盘 ctrl.json，重启后还是省电。
         click: () => run("power-save", { on: !powerSave }),
       },
       {
@@ -448,6 +565,13 @@ app.whenReady().then(() => {
         click: () => askSay(),
       },
 { label: "换一只（重启窗）", click: () => run("restart-window") },
+      {
+        label: "检查更新…",
+        // 查/装都走宿主的 check-update / do-update（更新逻辑全在 app/updater.cjs，
+        // 宿主是唯一的状态持有者 —— 菜单和 pi/dsh/curl 用的是同一套 API）。
+        // ⚠️ 超时给到 240s：git fetch / npm i -g 慢起来很常见（菜单这边别自己先放弃了）。
+        click: () => checkUpdate(),
+      },
       // ⚠️ 这里原来还有一档「尺寸（换窗后生效）」子菜单（小/中/大），已按用户意见拿掉：
       //    换尺寸要重启整扇窗，代价远大于收益，而且最小档还得为了气泡不被裁而顶着下限。
       //    想换尺寸仍然可以走 API：/control {action:"set-ctrl", size, restartNonce}
@@ -460,16 +584,25 @@ app.whenReady().then(() => {
       { label: "打开数据文件夹", click: () => shell.openPath(home) },
       {
         label: "关于",
-        click: () => {
+        click: async () => {
           const version = pkgVersion();
+          const stAbout = await hostState(token);
+          const up = (stAbout && stAbout.state && stAbout.state.update) || {};
           const detail = [
             `pi-dsh-pet ${version}`,
+            up.current ? `提交：${up.current}` : "",
+            up.mode
+              ? `装法：${up.mode === "git" ? "git 检出（可自动更新）" : up.mode === "npm" ? "npm" : "打包版 / 解压即用（不能自动更新）"}`
+              : "",
+            up.lastCheck ? `上次查更新：${new Date(up.lastCheck).toLocaleString()}` : "",
             `服务：${url}`,
             `宿主 pid：${(st && st.state && st.state.pid) || "?"}，运行 ${Math.round((Date.now() - ((st && st.state && st.state.startedAt) || Date.now())) / 1000)}s`,
             `数据目录：${home}`,
             "",
             "左键：互动　拖拽：移动　右键：菜单",
-          ].join("\n");
+          ]
+            .filter(Boolean)
+            .join("\n");
           try {
             dialog.showMessageBox({ type: "info", message: "桌面宠物", detail, buttons: ["好"] });
           } catch {
@@ -484,6 +617,67 @@ app.whenReady().then(() => {
 
     menu.popup({ window: win });
   });
+
+  // ---- 检查更新（菜单项 → 宿主 check-update / do-update） ----
+  //
+  // 为什么不自己跑 git：更新逻辑在 app/updater.cjs，宿主是唯一的状态持有者；
+  // 窗只管问 + 把结果写成人话对话框（顺便提醒宿主自己的代码要 pi-pet restart）。
+  // 超时给到 4 分钟：npm i -g / git pull 慢起来很常见，窗这边别自己先放弃了。
+  async function checkUpdate() {
+    const { token, home } = readTokenAndHome();
+    const note = (u) => (u && u.note ? `\n\n${u.note}` : "");
+    const lines = (u) => {
+      const modeText =
+        u.mode === "git" ? "git 检出（可自动更新）" : u.mode === "npm" ? "npm" : "打包版 / 解压即用（不能自动更新）";
+      return [
+        `当前：${u.version || "?"}${u.current ? `（提交 ${u.current}）` : ""}`,
+        u.latest ? `最新：${u.latest}${u.behind ? `（落后 ${u.behind} 个提交）` : ""}` : "",
+        `装法：${modeText}`,
+        note(u).trim(),
+      ]
+        .filter(Boolean)
+        .join("\n");
+    };
+    let res = null;
+    try {
+      res = await callHost("check-update", {}, token, 240000);
+    } catch (err) {
+      res = null;
+    }
+    const u = (res && res.update) || {};
+    if (!res || res.ok !== true) {
+      dialog.showMessageBox({
+        type: "warning",
+        message: "检查更新失败",
+        detail: failureDetail(home, res, "宿主没应答或查不了更新") + (u.note ? `\n\n${u.note}` : ""),
+        buttons: ["好"],
+      });
+      return;
+    }
+    if (!u.hasUpdate) {
+      dialog.showMessageBox({ type: "info", message: "已经是最新", detail: lines(u), buttons: ["好"] });
+      return;
+    }
+    const canApply = (u.mode === "git") || (u.mode === "npm" && u.global === true);
+    const buttons = canApply ? ["现在更新", "以后再说"] : ["好"];
+    const { response } = await dialog.showMessageBox({
+      type: canApply ? "question" : "info",
+      message: "有新版本",
+      detail: `${lines(u)}\n\n更新完会自动换一扇窗（渲染层立刻用上新代码）。\n宿主自己的代码要下次 \`pi-pet restart\` 才换。`,
+      buttons,
+      defaultId: 0,
+      cancelId: buttons.length - 1,
+    });
+    if (buttons[response] !== "现在更新") return;
+    const ap = await callHost("do-update", {}, token, 300000);
+    const au = (ap && ap.update) || {};
+    dialog.showMessageBox({
+      type: ap && ap.ok === true ? "info" : "warning",
+      message: ap && ap.ok === true ? "更新完成" : "没更成",
+      detail: (ap && ap.detail) || (au.note || "宿主没应答"),
+      buttons: ["好"],
+    });
+  }
 
   // ---- 输入模式：只在输入框开着的那一小会儿让窗可聚焦 ----
   // 窗平时 focusable:false —— 点宠物也不把你正在打字的窗口抢走。但那样的窗**拿不到

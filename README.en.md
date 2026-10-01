@@ -15,6 +15,8 @@ A floating deepseek chan living in the **pi coding agent**: idle breathing, rand
 
 > Forked from [dsh-pet](https://github.com/PC2005-cloud/dsh-pet) ([npm](https://www.npmjs.com/package/dsh-pet)). This repo adapts it for the pi platform with Electron transparent overlay windows and pi event integration. Original dsh-pet users should use the npm package.
 
+> 💡 The window **only wraps the pet**, it is not fullscreen: a fullscreen transparent always-on-top window makes DWM recomposite the whole desktop every frame, which starves other apps' background windows of their render budget ("launch the desktop pet and my browser stops repainting"). **Drag the pet** to move it (drag = move the whole window); the drop point is remembered for next launch.
+
 ---
 
 ## Quick Start
@@ -66,6 +68,21 @@ pi-dsh-pet/
 All 91 animations — see the [main README](./README.md) for the full gallery.
 
 ---
+
+## Moving & Updates
+
+- **Move**: drag the pet (it moves the window; remembered in `%APPDATA%/pi-dsh-pet/stage.json`).
+  `POST /control {"action":"set-position"}` instead sets the pet's stance **inside** the window
+  (proportional coords, `positions.json`) — two different things on purpose.
+- **Updates**: the host checks on startup (12s delay, at most once per 6h) and installs
+  automatically; right-click → "Check for updates…" does it on demand. git checkouts
+  (`git pull --ff-only`) and global npm installs are fully automatic; other layouts only
+  report the current version and where to update by hand.
+  **Never** auto-updates a dirty working tree (it would clobber your local changes) and
+  **never** merges — a diverged branch is reported instead.
+  Opt out with `PI_PET_NO_UPDATE=1`, or check without installing with `PI_PET_UPDATE=check`.
+  After an update only the **window** is restarted (renderer code is new immediately);
+  the host's own code needs the next `pi-pet restart`.
 
 ## Customizing Size
 

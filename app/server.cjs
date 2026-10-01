@@ -213,17 +213,19 @@ function createServer(ctx) {
 			if (body === null) return sendJson(res, 400, { ok: false, error: "bad json body" });
 			const action = typeof body.action === "string" ? body.action : "";
 			if (!action) return sendJson(res, 400, { ok: false, error: "action required" });
-			const result = ctx.control(action, body);
-			return sendJson(res, result.ok ? 200 : 400, result);
+			// ⚠️ 必须 await：control 可能是 Promise（check-update 要跑 git fetch/pull，
+			//    同步 spawnSync 会把宿主这个 HTTP 服务卡住几分钟）。
+			const result = await ctx.control(action, body);
+			return sendJson(res, result && result.ok ? 200 : 400, result);
 		}
 
 		if (p === ENDPOINTS.control && req.method === "GET") {
 			// 让 GET 也能改（curl 友好）：?action=add_pet&size=small
-			const result = ctx.control(url.searchParams.get("action") || "", {
+			const result = await ctx.control(url.searchParams.get("action") || "", {
 				action: url.searchParams.get("action") || "",
 				size: url.searchParams.get("size") || undefined,
 			});
-			return sendJson(res, result.ok ? 200 : 400, result);
+			return sendJson(res, result && result.ok ? 200 : 400, result);
 		}
 
 		if (p === ENDPOINTS.event && req.method === "GET") {

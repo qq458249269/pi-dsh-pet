@@ -39,6 +39,7 @@
 | `app/wsserver.cjs` | 自研 RFC6455 服务端（为了零运行时依赖） |
 | `app/window.cjs` | 找 electron、拉起窗进程、看护（掉了拉回来） |
 | `app/single.cjs` | 单例锁（mkdir 原子性）、token、状态文件、pid 探活 |
+| `app/updater.cjs` | 检查更新 / 自动更新（git 检出 · npm 全局装 · 其它只报告） |
 | `app/host.cjs` | 组装：探已有宿主 → 抢锁 → 监听 → tick 心跳 |
 | `app/electron.cjs` | **打包 exe 时的入口**（宿主模式 / 窗模式二合一） |
 | `app/main.cjs` | CLI：start serve status stop restart feed add say port token config doctor |
@@ -88,8 +89,8 @@
   换窗、重启都还保持着
 - 手动切：`POST /control {action:"power-save", on:true|false}`（等价于
   `set-ctrl {powerSave}`），或右键菜单的「省电模式」
-- 为什么需要它：这扇窗是**全屏透明置顶**的，每一帧都要 DWM 重算整块桌面合成，
-  一直动就等于一直抢别的窗口的渲染预算（见 §9.17）
+- 为什么需要它：这扇窗虽然只包住宠物，但仍是**透明置顶**的，每一帧都要 DWM 重合成它
+  底下那块桌面，一直动就等于一直抢别的窗口的渲染预算（见 §9.17）
 - 窗**看不见**时（最小化 / 屏保锁屏 / 挂起）主进程另走 IPC `pet:power` 喊它睡，
   不经过宿主也生效
 
@@ -113,7 +114,7 @@
 | `POST /event` | 是 | 单条上行（curl / 脚本用） |
 | `WS /ws` | 否 | 窗下行通道（`pet.js` 发不了自定义头，所以免鉴权） |
 | `WS /feed` | 是（`?token=`） | 生产者上行通道；`?source=` 决定会话归属 |
-| `POST /control` | 是 | `shutdown / restart-window / add-pet / drop-pets / say / pause / resume / power-save / hide-window / show-window / set-ctrl / set-position / state / release-lock` |
+| `POST /control` | 是 | `shutdown / restart-window / add-pet / drop-pets / say / pause / resume / power-save / hide-window / show-window / set-ctrl / set-position / check-update / do-update / state / release-lock`（**check-update / do-update 是 Promise**，见 §6.3） |
 
 token 存在 `%APPDATA%/pi-dsh-pet/token`，**只绑 127.0.0.1**。不开 LAN。
 
@@ -127,7 +128,9 @@ token 存在 `%APPDATA%/pi-dsh-pet/token`，**只绑 127.0.0.1**。不开 LAN。
   port        12035          ← cat 一下就知道连哪个端口
   token       6f2a…          ← /feed 与 /control 的口令
 state.json  {…}            ← 给本项目代码读（心跳、pid、角色）
-  positions.json {…}         ← 窗里拖到哪儿（下次的启动位置，比例坐标）
+positions.json {…}         ← 宠物在窗里的站位（比例坐标）
+  stage.json      {x,y}      ← 窗落在哪儿（窗左上角屏幕像素，搬窗才写）
+  update.json     {…}        ← 上次查/更更新到哪儿了（自动检查限频也看它）
 ```
 
 - 写入走「临时文件 + rename」：Windows 的 rename 不能覆盖已存在的目标，直接写会读到半行。
@@ -190,23 +193,68 @@ resolveTarget():
 
 ## 6. 窗（`pi/assets/pet.js` + `pet-electron.cjs`）
 
-- 全屏透明置顶窗，默认整窗**鼠标穿透**；渲染进程在宠物命中框内 hover 时通过
-  `preload.setPassthrough(false)` 临时关掉穿透，于是能点、能拖。
+### 6.1 舞台窗：只包住宠物，**不是全屏**
+
+- 窗 = 宠物的小舞台（默认 620×560，渲染进程拿到配置后按「最大宠物 + 头顶气泡」重算，
+  经 `pet:window-size` 报给主进程）。透明置顶、整窗**鼠标穿透**；命中框由渲染进程动态
+  经 `pet:hit-region` + `setShape()` 裁出来，只有宠物那块能被点/能拖。
+- ⚠️ **别改回全屏**。全屏透明置顶窗是桌面宠物的头号性能杀手：
+  ① 每一帧都要让 DWM 把**整块桌面**重新合成一遍（连带下面所有窗口）—— 症状就是
+  「桌宠一开，浏览器/IDE 的后台窗口就不刷新了」；② 全屏意味着它跟每一扇窗都相交，
+  Windows 没法把任何后台窗口判成「被遮住了」，那些窗口就一直满速画。
+- 想把宠物放到屏幕别处 → **拖它 = 搬整扇窗**（`pet:window-move`）。宠物在窗里的相对
+  位置不变，看起来就是跟着手走。传的是「从按下那下算起的位移」而不是每帧增量：
+  增量的话窗被夹在屏幕边时宠物会越拖越落后于光标，松手才啪地弹回去。
+  松手时窗左上角落进 `home/stage.json`（`{x,y}`），下次启动还在那儿（显示器拔过/
+  分辨率变过时旧坐标自动夹回可见范围）。删掉它就回默认右下角。
+- 注意：**窗位置记忆**（`stage.json`，搬整扇窗）与 **宠物站位记忆**（`positions.json`，
+  比例坐标）**是两回事**，后者走 `/control set-position`。
+
+### 6.2 交互与省电
+
 - 右键菜单用 Electron 原生 `Menu`（透明穿透窗上 HTML 菜单会飘/穿），所有动作都走
-  `/control`：当前状态、事件来源、暂停响应、**省电模式**、说点什么、换一只、添加一只、
-  隐藏宠物（服务留着）、在浏览器打开、复制服务地址、打开数据文件夹、关于、退出。
+  `/control`：当前状态、事件来源、暂停响应、**省电模式**、说点什么、换一只、**检查更新**、
+  添加一只、隐藏宠物（服务留着）、在浏览器打开、复制服务地址、打开数据文件夹、关于、退出。
   （换尺寸只在 `/control set-ctrl` 里，菜单不提供：换窗代价大过收益。）
-- **省电 / 空闲别硬烧**（这扇窗是全屏透明置顶的，每一帧都要 DWM 重算整块桌面合成，
-  见 §9.17）：空闲 `timing.idleSleepMs`（默认 45s）就把动画冻在当前帧；窗最小化 / 锁屏 /
-  挂起时主进程用 `pet:power` 喊它睡；右键菜单「省电模式」是无条件省电（落盘 `ctrl.json`），
-  气泡文字照常更新。
+- **省电 / 空闲别硬烧**（这扇窗虽然小，但仍是透明置顶的，每一帧都要 DWM 重合成它底下
+  那块桌面，见 §9.17）：空闲 `timing.idleSleepMs`（默认 45s）就把动画冻在当前帧；窗最小化 /
+  锁屏 / 挂起时主进程用 `pet:power` 喊它睡；右键菜单「省电模式」是无条件省电（落盘
+  `ctrl.json`），气泡文字照常更新。核心原则：**没事的时候不产生帧**。
 - 「说点什么」：菜单 → `pet:say-ask` → 渲染进程在气泡位置弹出输入框 → Enter 提交 →
 `preload.say` → 主进程带 token → `/control {action:"say"}`。
-- 「记住位置」：拖拽松手 → `preload.savePosition` → 主进程带 token →
+- 「记住位置」（宠物在窗里的站位）：拖拽松手 → `preload.savePosition` → 主进程带 token →
   `/control {action:"set-position"}` → 落盘 `home/positions.json`（比例坐标）；
   下次窗接上来时宿主补发一帧 `{"type":"positions"}`，`pet.js` 套用（本次运行已拖过的不动）。
 - 窗是**独立进程**：窗崩了宿主还在，`keepAlive` 会把它拉回来。打包版里这个"第二个进程"
   就是 exe 自己（`pi-dsh-pet.exe --pi-pet-window <port>`）。
+
+### 6.3 检查更新 / 自动更新（`app/updater.cjs`）
+
+桌宠有**两种能自动更的装法**，各认各的，其余装法只报告：
+
+| 装法 | 怎么认 | 怎么更 | 自动 |
+|---|---|---|---|
+| git 检出（pi 扩展装法 / `git clone`） | 存在 `.git` | `git fetch` 比远端 → `git pull --ff-only` | ✅ |
+| npm 全局装 | 路径在 `npm root -g` 下面 | 查 registry → `npm i -g pi-dsh-pet@latest` | ✅ |
+| npm 非全局装 / 解压即用 / asar 打包版 | 都不是 | 只报当前版本 + 该去哪儿手动更 | ❌ |
+
+三条硬规矩，每条都对应一个真实的坑：
+
+1. **不碰脏工作区**：`git status --porcelain` 非空就拒绝自动更 —— 用户本地改了
+   `pet.js` 还没提交时 pull 过去会让人丢改动，那比没更新糟糕得多。
+2. **只用 `--ff-only`**：宁可报「有更新但拉不下来（本地有分叉）」也不自动 merge。merge
+   冲突留在一堆 webm/代码里是最难收的一种烂摊子。
+3. **不 spawnSync**：宿主就是这个 HTTP/WS 服务，同步等 git/npm 等于全机断网。所以
+   `control()` **可以是 Promise**，`server.cjs` 那头 `await ctx.control(...)`；
+   菜单侧超时给到分钟级（`callHost("check-update", {}, token, 240000)`）。
+
+自动检查：宿主起来 `PI_PET_UPDATE_DELAY_MS`（默认 12s，别抢起窗的 IO）后查一次，
+间隔 `PI_PET_UPDATE_GAP_MS`（默认 6h）限频（落盘 `home/update.json`），全程**只写日志
+不弹窗**（启动时弹窗打断用户，而这类事天天发生）。
+
+⚠️ **更新完宿主进程自己不会换代码**：它是 detached 的，没人负责再拉起它。所以调用方只
+**换一扇窗**（渲染层 `pet.js`/`pet.css` 立刻是新的），`app/*` 的新代码要等下次
+`pi-pet restart` —— 这点在对话框里也写给用户了。
 
 ## 7. 运维命令
 
@@ -226,7 +274,7 @@ pi-pet config           # 看/改 config.json
 ```
 
 数据目录 `PI_PET_HOME`（Windows: `%APPDATA%/pi-dsh-pet`）：
-`host.lock/owner.json`、`token`、`state.json`、`ctrl.json`、`config.json`、`positions.json`、`log.txt`、`electron.json`。
+`host.lock/owner.json`、`token`、`state.json`、`ctrl.json`、`config.json`、`positions.json`、`stage.json`、`update.json`、`log.txt`、`electron.json`。
 
 ## 8. 零依赖
 
@@ -268,14 +316,15 @@ pi-pet config           # 看/改 config.json
 16. **CI 断言不能拿别人规范化过的字符串当契约。** 断言过「产物名里必须有版本号」，
     结果挂在 electron-builder 把 `2026.09.30.0002` 规范化成 `2026.9.3-0.2` 上。
     断言只能钉在**我们自己定的契约**上（固定文件名、asar 存在且够大）。
-17. **全屏透明窗 = 一直在抢整块桌面的合成预算。** 这扇窗是屏幕大小的透明置顶窗，
-    它每产生一帧，DWM 就得把整块桌面重新合成一遍（连着下面所有窗口一起）。待机链本来
-    就在不停地抽动画，于是别的程序的后台窗口永远抢不到合成预算，症状是
-    「桌宠一开，浏览器/IDE 就不刷新了」。**唯一的治法是不产生帧**：空闲
-    `timing.idleSleepMs`（默认 45s）就 `video.pause()` 冻在当前帧、停漫游 rAF、不再上报
-    命中区；唤醒口子有 WS 事件 / 鼠标碰到宠物 / 右键菜单 / 输入框 / resize / 页签可见性，
-    以及主进程的最小化 / 锁屏 / 挂起（`pet:power`）。别再为了“手感平滑”把 sleep 关掉。
-18. **别拿全屏窗的“每次改形状/样式”当小事。** `setShape()`（SetWindowRgn）、
+17. **透明置顶窗 = 一直在抢它底下那块桌面的合成预算。** 每产生一帧，DWM 就得把这块地方
+    重新合成一遍（连着下面的窗口一起）。待机链本来就在不停地抽动画，于是别的程序的后台
+    窗口永远抢不到合成预算，症状是「桌宠一开，浏览器/IDE 就不刷新了」。
+    治法有两个，**两个都要**：① 窗别开成全屏 —— 之前就是屏幕大小的透明置顶窗，等于整块
+    桌面每帧重合成一次（见 §6.1）；② **不产生帧** —— 空闲 `timing.idleSleepMs`（默认 45s）
+    就 `video.pause()` 冻在当前帧、停漫游 rAF、不再上报命中区；唤醒口子有 WS 事件 / 鼠标
+    碰到宠物 / 右键菜单 / 输入框 / resize / 页签可见性，以及主进程的最小化 / 锁屏 /
+    挂起（`pet:power`）。别再为了“手感平滑”把 sleep 关掉。
+18. **别拿这扇窗的“每次改形状/样式”当小事。** `setShape()`（SetWindowRgn）、
     漫游时 60fps 的 `style.left` 都落在同一条重合成路径上，而且主进程那次还是跨进程调用。
     所以两头都掐：主进程侧 2px 量化后去重 + `SHAPE_GAP_MS`（60ms）节流（被节流的那份要
     **攒最新的**，落点不能丢），窗侧命中区 2px 量化 + 漫游写样式封顶 30fps。

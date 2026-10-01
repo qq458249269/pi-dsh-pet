@@ -48,6 +48,7 @@ const {
 const { createBus } = require("./bus.cjs");
 const { createServer, listen } = require("./server.cjs");
 const { createWindowManager } = require("./window.cjs");
+const updater = require("./updater.cjs");
 
 const TICK_MS = 2000;
 const STATE_WRITE_MIN_GAP_MS = 5000;
@@ -239,6 +240,12 @@ const busHooks = { onStateChange: () => {}, maxPets: () => 1, paused: () => fals
 busHooks.paused = () => readCtrl().paused === true;
 	busHooks.power = () => readCtrl().powerSave === true;
 
+	// 更新信息（「关于」框和 /state 看它）：开机先从 home/update.json 里读上次的结果，
+	// 之后由 check-update / do-update / 自动检查刷新。
+	// ⚠️ 必须在 createServer **之前**声明：server 一 listen 就可能收到请求，
+	//    而 control() 里要用它 —— 晚于监听声明 = 那一下请求吃到 TDZ。
+	let updateInfo = updater.readUpdateInfo(PATHS.home);
+
 	const onWsConnection = (conn, req) => bus.handleConnection(conn, req);
 
 	const { server } = createServer({
@@ -418,6 +425,23 @@ const next = writeCtrl(patch);
 			}
 			case "state":
 				return { ok: true, detail: "当前状态", state: ctx.state, ctrl: readCtrl(), bus: bus.stats() };
+			case "check-update":
+				// 查更新是异步的（要 fetch 远端）：server 那头已经 await 了（见 server.cjs）。
+				// ⚠️ 别用 spawnSync —— 宿主就是这个 HTTP/WS 服务，卡住几分钟等于全机断网。
+				return updater.check().then((r) => {
+					updateInfo = { ...updateInfo, ...updateSummary(r), lastCheck: Date.now() };
+					return updateResult(r, "检查完了");
+				});
+			case "do-update":
+				return updater.apply().then((ap) => {
+					if (!ap.ok) return updateResult(ap, "没更成");
+					// 换了渲染层的代码 → 换一扇窗，1.5s 后新代码接管
+					if (ap.changed !== false) {
+						win.restart(readCtrl().size || cfg.size, state.port, () => readCtrl().desired !== false);
+					}
+					updateInfo = { ...updateInfo, ...updateSummary(ap), lastApplied: Date.now() };
+					return updateResult({ ...ap, hasUpdate: false }, "更新完成", true);
+				});
 			case "release-lock":
 				releaseLock();
 				return { ok: true, detail: "锁已释放" };
@@ -427,9 +451,40 @@ const next = writeCtrl(patch);
 					error: `未知 action：${action}`,
 					hint:
 "可用：shutdown | restart-window | add-pet | drop-pets | say | pause | resume | " +
-						"power-save | hide-window | show-window | set-ctrl | set-position | state | release-lock",
+						"power-save | hide-window | show-window | set-ctrl | set-position | check-update | do-update | " +
+						"state | release-lock",
 				};
 		}
+	}
+
+	/** 把 updater 的结果拼成控制面回包（菜单/对话框直接吃这个形状）。 */
+	function updateResult(r, prefix, okOverride) {
+		const ok = okOverride === undefined ? r.ok === true : okOverride === true;
+		return {
+			ok,
+			detail: `${prefix}：${r.note || (r.hasUpdate ? "有新版" : "已是最新")}`,
+			update: { ...updateSummary(r), hasUpdate: r.hasUpdate === true, note: r.note || "" },
+		};
+	}
+
+/**
+	 * updater 的原始结果 → 给 /state / 关于框看的那份摘要。
+	 * ⚠️ 空串的键**要丢掉**（返回 undefined 而不是 ""）：apply() 只回 {ok,mode,note,changed}，
+	 *    直接铺开会用空串盖掉 check 阶段拿到的 version/current —— 表现是「刚更新完，
+	 *    关于框里的提交号和 /state 的版本突然空了」。
+	 *global/behind 是布尔/数字，默认值本身就是安全方向（不自动代劳 / 落后 0），所以留着。
+	 */
+	function updateSummary(r) {
+		const s = {
+			mode: r.mode || "",
+			global: r.global === true,
+			version: r.version || "",
+			current: r.current || "",
+			latest: r.latest || "",
+			behind: Number(r.behind) || 0,
+		};
+		for (const k of ["mode", "version", "current", "latest"]) if (!s[k]) delete s[k];
+		return s;
 	}
 
 	/* ---- 7. 心跳 tick ---- */
@@ -498,6 +553,7 @@ const next = writeCtrl(patch);
 			state.restarts = win.getRestarts();
 			state.windowPid = win.getPid();
 			state.electron = win.electronBin() || "";
+			state.update = { ...updateInfo };
 			writeState(state);
 		}
 	}, TICK_MS);
@@ -515,6 +571,17 @@ const next = writeCtrl(patch);
 		log(`宿主已起：127.0.0.1:${port}  pid ${process.pid}  home=${PATHS.home}  端口文件 ${PATHS.port}`);
 		win.launch(state.size, port);
 	}
+
+	// 启动后自动检查更新，有新版就装上（延迟一会儿，别抢起窗的 IO；6h 内不重复查）。
+	// ⚠️ 只换**窗**：宿主是 detached 的、没人负责再拉起它，它自己不能重启；
+	//    app/* 的新代码要等下次 `pi-pet restart`（这点在对话框里也写给用户）。
+	updater.autoUpdate(PATHS.home, {
+		log,
+		onUpdated: () => {
+			log("更新完了 → 换一扇窗（渲染层立刻用上新代码）");
+			win.restart(readCtrl().size || cfg.size, state.port, () => readCtrl().desired !== false);
+		},
+	}).catch(() => { /* 失败已经落过日志了 */ });
 
 	return {
 		started: true,

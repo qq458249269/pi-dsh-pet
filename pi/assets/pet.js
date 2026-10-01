@@ -373,6 +373,16 @@
     }
   }
 
+  /**
+   * Electron 里的「拖宠物」和「挪容器」是两回事：
+   *   窗只包住宠物（见 pet-electron.cjs 文件头），所以拖 = 搬窗（moveWin 有值）。
+   *   浏览器里没有窗可搬，就退回「在视口里挪容器」（moveWin 为 null）。
+   * 两个口都在就优先搬窗：漫游/站位已经在窗内完成了，不搬窗用户就没法把宠物
+   * 放到别的显示器上去。
+   */
+  var moveWin = (window.__petElectron__ && window.__petElectron__.moveWindow) || null;
+  var endWinDrag = (window.__petElectron__ && window.__petElectron__.endWindowDrag) || null;
+
   // ========================================================================
   // 4.7 空闲休眠（别抢别的窗口的渲染预算）
   //
@@ -1172,6 +1182,8 @@
         sy: e.clientY,
         offX: e.clientX - (r.left + r.width / 2),
         offY: e.clientY - (r.top + r.height / 2),
+        // 宠物在窗里的位置：搬窗时主进程拿它把宠物夹在屏幕工作区里（不让它拖出屏幕）
+        inset: { left: r.left, top: r.top, width: r.width, height: r.height },
       };
     });
 
@@ -1190,6 +1202,15 @@
           self.switchTo(self.anim, true, { force: true }); // 拖起来了就得立刻换姿势
         }
       }
+      // 窗只包住宠物（见 pet-electron.cjs 文件头），所以在 Electron 里「拖宠物」
+      // 实际是**搬整扇窗**：宠物在窗里的相对位置不动，看起来就是跟着手走。
+      // ⚠️ 必须传「从按下那下算起的位移」而不是每帧增量：窗被夹在屏幕边时，
+      //    增量会让宠物越拖越落后于光标，松手才啪地弹回去。
+      if (moveWin) {
+        moveWin(e.clientX - dragState.sx, e.clientY - dragState.sy, dragState.inset);
+        // 命中区不用重报：形状是窗口坐标，窗一搬它跟着走，矩形没变。
+        return;
+      }
       // 拖拽也要夹在屏幕内（舞台的下移量这时是 none，所以按 halfH 算下边界）
       var dp = clampPos(e.clientX - dragState.offX - halfW, e.clientY - dragState.offY - halfH, 0);
       container.style.left = dp.left + "px";
@@ -1204,6 +1225,7 @@
       var wasDragging = dragState.dragging;
       dragState.active = false;
       dragState.dragging = false;
+      if (endWinDrag) endWinDrag(); // 搬完窗：让主进程记住这扇窗落在哪儿
       e.currentTarget.classList.remove("dragging");
       // Restore passthrough if mouse has already left the hitbox
       if (passthrough === false) {
@@ -1408,6 +1430,29 @@
   var addPetSeq = 0; // counter for auto-generated pet ids
   var bubbleTarget = null; // 最近一次被右键的宠物：手动输入与气泡优先出现在它头上
 
+  /**
+   * 报「这扇窗要多大」给主进程（Electron 才有意义，浏览器里静默跳过）。
+   *
+   * 窗只包住宠物，尺寸 = 最大的宠物 + 气泡头顶预留 + 一点边：
+   *   宽：气泡 max-width 420、宠物最宽 540（大档），取 620 封底
+   *   高：16:9 的宠物高 + 气泡（两三行字 + 输入框 ≈ 240）
+   * ⚠️ 别为了「小一点」把预留拿掉：窗口一窄，头顶气泡就被夹着抽字/挤成一团。
+   */
+  function reportWindowSize() {
+    var api = window.__petElectron__;
+    if (!api || !api.setWindowSize || !config) return;
+    var maxW = 0;
+    config.pets.forEach(function (cfg) {
+      if (Number(cfg.size) > maxW) maxW = Number(cfg.size);
+    });
+    if (!maxW) maxW = 400;
+    try {
+      api.setWindowSize(Math.max(620, maxW + 80), Math.max(560, Math.round((maxW * 9) / 16) + 260));
+    } catch (e) {
+      /* 主进程还没 ready：那就用它的默认尺寸，窗也不会因此坏掉 */
+    }
+  }
+
 /** Maps size arg to px width.
       ⚠️ 最小档别再往小了：气泡是 16:9 舞台头顶的 max-content 块（最宽 420px），舞台太窄时
       气泡和动画一起被挤到屏幕边上，看着像「被裁了一半」。380 起。 */
@@ -1589,6 +1634,10 @@
     var text = await resp.text();
     var raw = JSON.parse(stripJsonc(text));
     config = assertClientConfig(raw);
+
+    // 窗要开多大：只包住最大的那只宠物 + 它头顶的气泡（气泡最宽 420，还要能问字）。
+    // 拿到配置就报，晚了窗会先按主进程那个 620x560 的默认大小摆一下再跳一下。
+    reportWindowSize();
 
     // Create pet instances
     var root = document.getElementById("pet-root");
