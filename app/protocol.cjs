@@ -37,6 +37,13 @@
  *               （/control set-position），宿主落盘 home/positions.json，下次启动就在那儿。
  *   坐标是**比例**（0~1，相对窗口宽高）而不是像素：换分辨率/换尺寸后仍落在同一个地方。
  *
+* ── v1.3 增量（向后兼容：老窗收到会直接忽略）────────────────────
+ *   下行 → 窗： {"type":"power","sleep":true|false}
+ *               省电开关。true = 动画冻在当前那一帧（不再产生任何新帧），
+ *               气泡/文字照常更新；false = 接着放。
+ *               由右键菜单的「省电模式」切，落盘 ctrl.json（换窗、重启都还在），
+ *               窗接上来时补发一次。老窗不认识这帧（当普通字符串事件也无害）。
+ *
  * ── 未来 v2（envelope）─────────────────────────────────────────
  *   若要带 source/session/ts，正确做法是 pet.js 的 onmessage 先 JSON.parse，
  *   认不出对象再退回按裸字符串处理（向后兼容），而不是让服务端单方面改格式。
@@ -83,8 +90,10 @@ const EVENTS = {
 	say: "say",
 	/** 下行给窗的气泡帧（v1.1） */
 	bubble: "bubble",
-	/** 下行给窗的位置帧（v1.2）：记住上次拖到哪儿，下次启动还在那儿 */
+/** 下行给窗的位置帧（v1.2）：记住上次拖到哪儿，下次启动还在那儿 */
 	positions: "positions",
+	/** 下行给窗的省电帧（v1.3）：冻住动画，别再跟别的窗口抢合成预算 */
+	power: "power",
 };
 
 /** 窗侧的尺寸档位，与 pet.js 的 SIZE_MAP 对齐。 */
@@ -231,6 +240,15 @@ function bubbleFrame(text, { sticky = false, ms = 0 } = {}) {
 	return JSON.stringify({ type: EVENTS.bubble, text: clampText(text, 80), sticky, ms: ms > 0 ? ms : 0 });
 }
 
+/**
+ * 拼一个省电帧（下行 → 窗）。`sleep` = true 表示「冻在当前那一帧」：
+ * 这扇窗是全屏透明置顶的，每产生一帧 DWM 就得把整块桌面重新合成一遍，
+ * 一直动就会把别的程序后台窗口的渲染预算挤掉（症状：桌宠一开，别人的窗口卡）。
+ */
+function powerFrame(sleep) {
+	return JSON.stringify({ type: EVENTS.power, sleep: sleep === true });
+}
+
 /** 拼一个位置帧（下行 → 窗）。坐标是比例（0~1），不是像素。 */
 function positionsFrame(map) {
 	return JSON.stringify({ type: EVENTS.positions, map: sanitizePositions(map) });
@@ -268,8 +286,9 @@ module.exports = {
 	normalizeIncoming,
 	envelope,
 	parseIncoming,
-	bubbleFrame,
+bubbleFrame,
 	positionsFrame,
+	powerFrame,
 	sanitizePositions,
 	clampText,
 };

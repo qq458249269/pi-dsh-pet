@@ -178,8 +178,11 @@ const CTRL_DEFAULTS = {
 	maxPets: 1,
 	size: "normal",
 	restartNonce: 0,
-	/** 暂停响应：宠物继续自己玩，但不跟着 agent 状态变（右键菜单切）。 */
+/** 暂停响应：宠物继续自己玩，但不跟着 agent 状态变（右键菜单切）。 */
 	paused: false,
+	/** 省电模式：把动画冻在当前那一帧（右键菜单切）。窗是全屏透明置顶的，
+	 *  每产生一帧 DWM 都要重算整块桌面 —— 不动就不会抢别的窗口的渲染预算。 */
+	powerSave: false,
 	/** 要不要开着窗（false = 服务留着、窗收起来；pi-pet show 恢复）。 */
 	window: true,
 };

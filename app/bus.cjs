@@ -31,7 +31,7 @@
 
 "use strict";
 
-const { ENDPOINTS, EVENTS, SIZES, parseIncoming, bubbleFrame, positionsFrame } = require("./protocol.cjs");
+const { ENDPOINTS, EVENTS, SIZES, parseIncoming, bubbleFrame, positionsFrame, powerFrame } = require("./protocol.cjs");
 const { log } = require("./paths.cjs");
 
 /** 一个「agent 正在忙」的最长持续时间：超过就当会话卡住，强制放回空闲动画。 */
@@ -116,7 +116,9 @@ function createBus(hooks = {}) {
 	let currentBubble = null;
 	let lastBubbleAt = 0;
 	/** 最近一次「完成」：done 事件带回来的文案，空闲后短时间内还显示它。 */
-	let lastDone = null;
+let lastDone = null;
+	/** 省电模式（右键菜单切）：true = 窗把动画冻在当前帧，不再产生新帧。 */
+	let powerSave = false;
 	let port = 0;
 	let seq = 0;
 
@@ -251,6 +253,19 @@ function createBus(hooks = {}) {
 		return { ok: true, detail: `已说：${t}`, sent };
 	}
 
+/**
+	 * 省电模式：冻住动画。窗是**全屏透明置顶**的，每一帧都要 DWM 把整块桌面重新
+	 * 合成一遍 —— 一直动就等于一直抢别的程序（浏览器/IDE/播放器）后台窗口的渲染预算。
+	 * 这里只发一帧意图，具体「暂停视频、停 rAF」由窗侧执行（老窗不认识这帧，无害）。
+	 */
+	function setPower(on) {
+		const next = on === true;
+		if (next === powerSave) return false;
+		powerSave = next;
+		log(`省电模式 → ${next ? "开（动画冻住）" : "关"}（${windowClients.size} 个窗）`);
+		return broadcast(powerFrame(next)) > 0;
+	}
+
 	/** 生产者上行。`sourceId` 用来把同一个人的多条连接归到一个会话状态里。 */
 	function ingest(raw, source = "unknown", maxPets = 1, sourceId = null, paused = false) {
 		const ev = parseIncoming(raw);
@@ -335,7 +350,8 @@ function createBus(hooks = {}) {
 			const onStateChange = hooks.onStateChange || (() => {});
 			const maxPets = hooks.maxPets || (() => 1);
 			const paused = hooks.paused || (() => false);
-			const positions = hooks.positions || (() => ({}));
+const positions = hooks.positions || (() => ({}));
+			const power = hooks.power || (() => powerSave);
 			const url = new URL(conn.url || (req && req.url) || "/", "http://127.0.0.1");
 			const p = url.pathname;
 			const source = url.searchParams.get("source") || "unknown";
@@ -351,7 +367,9 @@ function createBus(hooks = {}) {
 				// 位置也要补发：换窗（右键「换一只」/restart）后回到上次拖的地方，而不是默认角落。
 				// 老窗不认识这帧（pet.js 的 onmessage 对未知 type 直接忽略）——兼容。
 				const saved = positions();
-				if (saved && Object.keys(saved).length) conn.send(positionsFrame(saved));
+if (saved && Object.keys(saved).length) conn.send(positionsFrame(saved));
+				// 省电模式也要补发：开着省电重启后仍然是省电（不能只在菜单里改了就丢）
+				conn.send(powerFrame(power() === true));
 				conn.on("close", () => {
 					windowClients.delete(conn);
 					log(`窗断开（剩 ${windowClients.size} 个）`);
@@ -417,9 +435,11 @@ function createBus(hooks = {}) {
 		sessions,
 		broadcast,
 		ingest,
-		say,
+say,
 		refreshBubbles,
 		drive,
+		setPower,
+		power: () => powerSave,
 		handleConnection,
 		stats,
 		reapStaleSessions,
@@ -429,8 +449,9 @@ function createBus(hooks = {}) {
 			feedSockets.clear();
 			currentKey = null;
 			currentMessage = null;
-			currentBubble = null;
+currentBubble = null;
 			lastDone = null;
+			powerSave = false;
 		},
 	};
 }

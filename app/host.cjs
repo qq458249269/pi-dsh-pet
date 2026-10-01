@@ -215,7 +215,7 @@ async function start(options = {}) {
 
 	// bus 与 onStateChange 互相需要（一个要写状态文件，一个要读 bus 统计），
 	// 所以先给 hooks 一个空壳，拿到 bus 之后再回填（hooks 是活对象，每次现读）。
-	const busHooks = { onStateChange: () => {}, maxPets: () => 1, paused: () => false, positions: () => readPositions() };
+const busHooks = { onStateChange: () => {}, maxPets: () => 1, paused: () => false, positions: () => readPositions(), power: () => false };
 	const bus = createBus(busHooks);
 
 	const win = createWindowManager({
@@ -236,7 +236,8 @@ async function start(options = {}) {
 
 	busHooks.onStateChange = onStateChange;
 	busHooks.maxPets = () => Number(readCtrl().maxPets) || cfg.maxPets || 1;
-	busHooks.paused = () => readCtrl().paused === true;
+busHooks.paused = () => readCtrl().paused === true;
+	busHooks.power = () => readCtrl().powerSave === true;
 
 	const onWsConnection = (conn, req) => bus.handleConnection(conn, req);
 
@@ -358,8 +359,16 @@ async function start(options = {}) {
 				// 窗侧没有「删掉除第一只以外所有只」的命令；靠换窗达到同样效果
 				win.restart(arg.size || readCtrl().size || cfg.size, state.port, () => true);
 				return { ok: true, detail: "换一扇窗（多余的只随旧窗一起没）" };
-			case "say":
+case "say":
 				return bus.say(arg.text, Number(arg.ms) || 0);
+			case "power-save": {
+				// 省电模式：把动画冻在当前帧（不产生新帧 → 不抢别的窗口的合成预算）。
+				// 落盘 ctrl.json：换窗、重启都还保持着，直到用户自己关掉。
+				const on = arg.on === true || arg.sleep === true || arg.powerSave === true;
+				writeCtrl({ powerSave: on });
+				bus.setPower(on);
+				return { ok: true, detail: on ? "省电模式已开（动画冻住，气泡文字照常）" : "已退出省电模式" };
+			}
 			case "pause":
 			case "resume": {
 				const next = action === "pause";
@@ -386,12 +395,15 @@ async function start(options = {}) {
 				if (typeof arg.keepAlive === "boolean") patch.keepAlive = arg.keepAlive;
 				if (typeof arg.paused === "boolean") patch.paused = arg.paused;
 				if (typeof arg.window === "boolean") patch.window = arg.window;
-				if (SIZES.includes(arg.size)) patch.size = arg.size;
+if (SIZES.includes(arg.size)) patch.size = arg.size;
+				if (typeof arg.powerSave === "boolean") patch.powerSave = arg.powerSave;
 				if (Number.isInteger(arg.maxPets) && arg.maxPets >= 1 && arg.maxPets <= MAX_PETS_CEILING) {
 					patch.maxPets = arg.maxPets;
 				}
 				if (Number.isInteger(arg.restartNonce)) patch.restartNonce = arg.restartNonce;
-				const next = writeCtrl(patch);
+const next = writeCtrl(patch);
+				// powerSave 也走 set-ctrl 时要立刻告诉窗（否则菜单/API 改了，画面上没反应）
+				if (typeof arg.powerSave === "boolean") bus.setPower(arg.powerSave);
 				return { ok: true, detail: "意图已更新", ctrl: next };
 			}
 			case "set-position": {
@@ -414,8 +426,8 @@ async function start(options = {}) {
 					ok: false,
 					error: `未知 action：${action}`,
 					hint:
-						"可用：shutdown | restart-window | add-pet | drop-pets | say | pause | resume | " +
-						"hide-window | show-window | set-ctrl | set-position | state | release-lock",
+"可用：shutdown | restart-window | add-pet | drop-pets | say | pause | resume | " +
+						"power-save | hide-window | show-window | set-ctrl | set-position | state | release-lock",
 				};
 		}
 	}

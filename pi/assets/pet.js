@@ -34,13 +34,15 @@
    * 节奏参数（可选，写在 config.jsonc 的 timing 里）。写错/漏写都回落到默认值 ——
    * 手感参数不值得为它把整扇窗搞崩（assertClientConfig 抛错 = 宠物直接不出现）。
    *
-   *   minPlayMs   一段动画**最少**播多久才允许被别人切走（毫秒）
-   *   idleDwellMs 待机动画播完之后原地续播多久再由链子往下抽（毫秒）
+   *   minPlayMs    一段动画**最少**播多久才允许被别人切走（毫秒）
+   *   idleDwellMs  待机动画播完之后原地续播多久再由链子往下抽（毫秒）
+   *   idleSleepMs  多久没动静就把动画**整个冻住**（毫秒，0 = 不冻，见 4.7）
    *
-   * 这两个数是同一件事的两头：minPlayMs 治「动画没演完就被切一半」，
-   * idleDwellMs 治「待机太短，一口气连着演、看着一直忙个不停」。
+   * 这三个数是同一件事的三头：minPlayMs 治「动画没演完就被切一半」，
+   * idleDwellMs 治「待机太短，一口气连着演、看着一直忙个不停」，
+   * idleSleepMs 治「一直在动，把别的窗口的渲染预算都抢走了」（见 4.7）。
    */
-  var TIMING_DEFAULT = { minPlayMs: 2600, idleDwellMs: 6000 };
+  var TIMING_DEFAULT = { minPlayMs: 2600, idleDwellMs: 6000, idleSleepMs: 45000 };
 
   function readTiming(raw) {
     var t = raw && typeof raw === "object" ? raw : {};
@@ -49,7 +51,11 @@
       if (!isFinite(v) || v < 0) return def;
       return Math.min(60000, Math.round(v));
     }
-    return { minPlayMs: num("minPlayMs", TIMING_DEFAULT.minPlayMs), idleDwellMs: num("idleDwellMs", TIMING_DEFAULT.idleDwellMs) };
+    return {
+      minPlayMs: num("minPlayMs", TIMING_DEFAULT.minPlayMs),
+      idleDwellMs: num("idleDwellMs", TIMING_DEFAULT.idleDwellMs),
+      idleSleepMs: num("idleSleepMs", TIMING_DEFAULT.idleSleepMs),
+    };
   }
 
   /** 窗里到处都要问这两个数（config 可能还没加载完，所以都带兜底） */
@@ -191,10 +197,18 @@
   var HIT_PAD_BOTTOM = 10;
   /** 漫游/拖拽时每帧都在动，而主进程每次都要 SetWindowRgn：50ms 一次（20fps）跟手又不至于卡 */
   var HIT_THROTTLE_MS = 50;
+  /** 命中区量化到 2px 的网格。不动的宠物不该因为亚像素抖动一直让主进程重裁形状
+   *  （主进程那边每次 setShape = 一次全屏重合成，见 pet-electron.cjs 的说明）。 */
+  var HIT_QUANT = 2;
   var regionQueued = false;
   var regionTimer = null;
   var lastRegionKey = "";
   var lastRegionAt = 0;
+
+  /** 量化：把亚像素抖动抹平（主进程只认量化后的值，这边也就只按量化后的值去重） */
+  function quant2(v) {
+    return Math.round(Number(v) / HIT_QUANT) * HIT_QUANT;
+  }
 
   /** 把每只宠物的可见气泡夹在屏幕内（超出就往回挪），挪完再算命中区，
       保证主进程拿到的形状和屏幕上画出来的是同一个位置。 */
@@ -230,10 +244,10 @@
         }
       }
       out.push({
-        x: box.left,
-        y: box.top,
-        width: box.right - box.left,
-        height: box.bottom - box.top,
+        x: quant2(box.left),
+        y: quant2(box.top),
+        width: Math.max(HIT_QUANT, quant2(box.right - box.left)),
+        height: Math.max(HIT_QUANT, quant2(box.bottom - box.top)),
       });
     }
     // 「掉线了」提示条长在屏幕右上角，不在宠物身上，一并算进去免得被裁掉
@@ -241,7 +255,12 @@
     if (banner && banner.classList && banner.classList.contains("show")) {
       var rr = banner.getBoundingClientRect();
       if (rr && rr.width > 0) {
-        out.push({ x: rr.left - 4, y: rr.top - 4, width: rr.width + 8, height: rr.height + 8 });
+        out.push({
+          x: quant2(rr.left) - 4,
+          y: quant2(rr.top) - 4,
+          width: quant2(rr.width) + 8,
+          height: quant2(rr.height) + 8,
+        });
       }
     }
     return out;
@@ -275,8 +294,11 @@
    * 请求上报命中区。同一帧里的多次请求会合并，连续移动时按 HIT_THROTTLE_MS 节流。
    * ⚠️ 被节流挡掉的那次**必须补一个尾巴定时器**，否则这次移动就永远丢了：
    *   rAF 只在我们主动排下一次时才跑，不排就没有「下一帧」这回事。
+   *
+   * force=true = 无视「睡着了不报」（删掉一只宠物时必须报，否则形状留在老地方）。
    */
-  function pushHitRegion() {
+  function pushHitRegion(force) {
+    if (asleep && !force) return; // 冻住时位置不变，形状也就不会变
     if (regionQueued || regionTimer) return;
     var wait = HIT_THROTTLE_MS - (Date.now() - lastRegionAt);
     if (wait <= 0) {
@@ -302,6 +324,10 @@
       pushHitRegion();
     }, wait);
   }
+
+  /** 漫游时写样式/上报命中区的帧率上限（毫秒/帧）。全屏透明窗每改一次样式就得
+   *  重合成一次（见 4.7），60fps 的漫游 = 每秒 60 次全屏重合成。 */
+  var MOVE_FRAME_MS = 33;
 
   // ========================================================================
   // 4.6 位置记忆（拖到哪儿，下次启动还在哪儿）
@@ -345,6 +371,92 @@
     } catch (e) {
       /* 主进程还没 ready —— 下次拖就存上了 */
     }
+  }
+
+  // ========================================================================
+  // 4.7 空闲休眠（别抢别的窗口的渲染预算）
+  //
+  // 症状：这扇窗是**全屏透明 + 置顶**的。它每产生一帧，DWM 就得把整块桌面重新合成一遍
+  // （连带下面所有窗口一起）。而待机链本来就在不停地抽动画 —— 于是宠物永远有新帧，
+  // 别的程序（浏览器、IDE、播放器）的后台窗口就抢不到合成预算了：
+  // 「桌宠一开，别人的窗口就不刷新 / 卡成幻灯片」。
+  //
+  // 修法只有一个原则：**没事的时候别产生帧**。
+  //   · 空闲超过 timing.idleSleepMs（默认 45s）→ 冻在当前那一帧：
+  //     视频 pause()、漫游的 rAF 停、命中区不再上报。逻辑（定时器）还留着，
+  //     所以醒来时状态机还在原地，不会有「要重新选一段动画」的突变。
+  //   · 任何活动立刻醒：WS 事件（思考中/写代码/气泡）、鼠标碰到宠物、右键菜单、
+  //     「说点什么」输入框、窗尺寸变了。
+  //   · 主进程也会喊：窗被最小化 / 屏保锁屏 / 系统挂起 → 睡（pet:power，见 pet-electron.cjs）。
+  //   · 用户手动开的省电模式（右键菜单）是无条件的，睡到他自己关掉为止。
+  //
+  // 睡 ≠ 暂停响应（那个是「不理 agent 状态」）：省电时气泡文字照常更新，
+  // 只是没有新帧而已。
+  // ========================================================================
+
+  var sleepTimer = null;
+  var asleep = false;    // 冻住了吗（= 全屏一帧都不再产生）
+  var powerSave = false; // 用户手动开的省电模式：没它就别自动醒
+  var lastMoveActivity = 0;
+
+  function idleSleepMs() {
+    var ms = config && config.timing ? Number(config.timing.idleSleepMs) : TIMING_DEFAULT.idleSleepMs;
+    return isFinite(ms) && ms >= 0 ? ms : TIMING_DEFAULT.idleSleepMs;
+  }
+
+  /** 睡：所有宠物冻在当前帧。
+   *  ⚠️ 不因为「已经 asleep」就早退：省电模式下新加一只宠物时，它照样得冻住
+   *  （PetCard.sleep/wake 自己幂等，这里只是多走一遍）。
+   */
+  function goSleep() {
+    asleep = true;
+    for (var i = 0; i < pets.length; i++) {
+      if (pets[i] && typeof pets[i].sleep === "function") pets[i].sleep();
+    }
+  }
+
+  /** 醒：接着当前这一帧往下放（pause/play 不改 currentTime，不会跳回第一帧）。 */
+  function goWake() {
+    asleep = false;
+    for (var i = 0; i < pets.length; i++) {
+      if (pets[i] && typeof pets[i].wake === "function") pets[i].wake();
+    }
+  }
+
+/** 有活动了：先醒，再把空闲计时器推后。窗里所有的用户输入/事件入口都走这里。 */
+  function noteActivity() {
+    if (asleep && !powerSave) goWake();
+    armIdle();
+  }
+
+  /** 指针是不是真落在宠物（含它的气泡/输入框）上。
+   *  ⚠️ 这扇窗是 setIgnoreMouseEvents(true, { forward: true })：整个窗的 mousemove
+   *  都会被转发到渲染进程（包括宠物以外的整块屏幕）。照单全收的话，用户随便动一下
+   *  鼠标就永远睡不着了（等于没做）。所以必须问一句「指针真在宠物身上吗」。
+   */
+  function pointerOnPet(x, y) {
+    var el = document.elementFromPoint(x, y);
+    if (!el || !el.closest) return false;
+    return !!el.closest(".pet-hit, .pet-bubble");
+  }
+
+  /** 重排「多久没动静就睡」。省电模式 = 立刻睡，且只有用户自己能让它醒。 */
+  function armIdle() {
+    if (sleepTimer) {
+      clearTimeout(sleepTimer);
+      sleepTimer = null;
+    }
+    if (powerSave) {
+      goSleep();
+      return;
+    }
+    var ms = idleSleepMs();
+    if (!(ms > 0) || !pets.length) return;
+    sleepTimer = setTimeout(function () {
+      sleepTimer = null;
+      if (powerSave || !pets.length) return;
+      goSleep();
+    }, ms);
   }
 
   // ========================================================================
@@ -403,6 +515,8 @@
     this.queuedTimer = null;
     this.dwellTimer = null;          // 待机停留计时器
     this.destroyed = false;
+    this.asleep = false;             // 冻住（见 4.7）
+    this.asleepNext = null;          // 冻住期间「该演哪一段」，醒来补上
 
     // ---- Refs ----
     this.gen = 0;
@@ -449,6 +563,7 @@
     applyPosition();
     pushHitRegion();
     window.addEventListener("resize", function () {
+      noteActivity(); // resize = 用户动了窗
       if (self.customPos) applyPosition();
       pushHitRegion();
     });
@@ -542,11 +657,13 @@
     };
 
     hit.addEventListener("mouseenter", function () {
+      noteActivity(); // 鼠标碰到宠物 = 有活动（冻着的宠物靠这个醒，见 4.7）
       setPassthrough(false);
       hit.style.cursor = "grab";
       self.setHover(true);
     });
     hit.addEventListener("mouseleave", function () {
+      noteActivity();
       setPassthrough(true);
       hit.style.cursor = "";
       self.setHover(false);
@@ -559,6 +676,7 @@
     // control API, so the menu and pi/dsh/curl all drive the same state owner.
     hit.addEventListener("contextmenu", function (e) {
       e.preventDefault();
+      noteActivity(); // 右键菜单也总是「有人在看」
       if (!window.__petElectron__ || !window.__petElectron__.openMenu) return;
       bubbleTarget = self;
       window.__petElectron__.openMenu({
@@ -612,6 +730,7 @@
       opts = opts || {};
       var t = String(text == null ? "" : text);
       if (!t) return;
+      noteActivity(); // 有话说 = 有活动（气泡靠这个醒）
       if (bubbleText.textContent !== t) bubbleText.textContent = t;
       bubble.classList.add("show");
       bubble.classList.toggle("sticky", opts.sticky === true);
@@ -689,6 +808,7 @@
 
     self.askSay = function () {
       inputOpen = true;
+      noteActivity(); // 输入框开着期间不许睡（不然打字时宠物是冻着的）
       bubble.classList.add("show");
       bubble.classList.add("with-input");
       input.classList.add("on"); // ⚠️ 不能写 style.display = ""：样式表里的 display:none
@@ -735,6 +855,12 @@
     // 和状态驱动的 override 才立刻打断 —— 打断本来就是它们的本意。
     this.switchTo = function (next, nextOnce, opts) {
       if (!next) return;
+      // 冻住时**连 src 都不换**（换 src = 解码首帧 + 一次重绘，那正是要省掉的开销）。
+      // 只记下该演哪一段，醒来（wake）再补上。
+      if (self.asleep) {
+        self.asleepNext = { anim: next, once: nextOnce };
+        return;
+      }
       var force = !!(opts && opts.force);
       if (!force && !self.canInterrupt()) {
         self.queueSwitch(next, nextOnce);
@@ -768,8 +894,8 @@
         self.playing = next;   // 屏幕上真正在放的（判定「演到哪了」只看它）
         self.playedAt = Date.now();
         target.style.transform = self.facingRef === "right" ? "scaleX(-1)" : "";
-        target.play().catch(function () {});
-        if (self.pendingMove) self.startMoveDrive(target);
+        if (!self.asleep) target.play().catch(function () {});
+        if (self.pendingMove && !self.asleep) self.startMoveDrive(target);
       };
       target.addEventListener("loadeddata", onReady);
       if (target.readyState >= 2) onReady();
@@ -836,8 +962,11 @@
       try {
         front.loop = true;
         front.onended = null;
-        var p = front.play();
-        if (p && p.catch) p.catch(function () {});
+        // 冻住时别偷跑：不然待机停留会把暂停的视频重新放起来（等于没睡）
+        if (!self.asleep) {
+          var p = front.play();
+          if (p && p.catch) p.catch(function () {});
+        }
       } catch (e) {
         /* 续播失败也别把链子卡住：下面的计时器照样接上 */
       }
@@ -946,6 +1075,10 @@
       var duration = (isFinite(el.duration) && el.duration > 0) ? el.duration : 10.09;
       var travelWindow = Math.max(0.1, duration - leadSec - tailSec);
       var token = ++self.moveToken;
+      // 漫游的位移写样式 + 上报命中区是这一段最贵的两步（见 4.7）：
+      // 全屏透明窗每改一次样式就要重合成一次，所以这里把帧率封在 30fps ——
+      // 观感上看不出（漫游本来就慢），合成压力直接砍半。
+      var lastWrite = 0;
 
       var step = function () {
         if (self.moveToken !== token) return;
@@ -958,15 +1091,21 @@
         else ratioX = startRatio + dir * totalRatio * ((t - leadSec) / travelWindow);
         var px = ratioX * W;
         var py = startYRatio * H;
-        var mp = clampPos(px - halfW, py - halfH, bottomPad);
-        container.style.left = mp.left + "px";
-        container.style.top = mp.top + "px";
-        container.style.right = "auto";
-        container.style.bottom = "auto";
-        // 漫游中每一帧位置都在变：命中区必须跟着走，否则形状留在出发点，
-        // 宠物移到哪儿就点不到了（旧位置还会留一块点不动的「鬼影」区）
-        pushHitRegion();
-        if (t < duration - tailSec) self.moveRef = requestAnimationFrame(step);
+        var last = t >= duration - tailSec;
+        var now = Date.now();
+        // 最后一帧必须写进去（否则会停在倒数第二帧的位置上）
+        if (last || now - lastWrite >= MOVE_FRAME_MS) {
+          lastWrite = now;
+          var mp = clampPos(px - halfW, py - halfH, bottomPad);
+          container.style.left = mp.left + "px";
+          container.style.top = mp.top + "px";
+          container.style.right = "auto";
+          container.style.bottom = "auto";
+          // 漫游中每一帧位置都在变：命中区必须跟着走，否则形状留在出发点，
+          // 宠物移到哪儿就点不到了（旧位置还会留一块点不动的「鬼影」区）
+          pushHitRegion();
+        }
+        if (!last) self.moveRef = requestAnimationFrame(step);
         else {
           self.moveRef = null;
           // 存**实际落点**而不是计划点：贴边时 clampPos 会把宠物夹回屏内，
@@ -1038,6 +1177,7 @@
 
     hit.addEventListener("pointermove", function (e) {
       if (!dragState.active) return;
+      noteActivity(); // 拖拽中也得盯着：不然拖到一半睡了就“松手了它不动”
       var dx = e.clientX - dragState.sx;
       var dy = e.clientY - dragState.sy;
       if (!dragState.dragging) {
@@ -1169,7 +1309,50 @@
       self.stopMove();
       if (self.overrideTimer) clearTimeout(self.overrideTimer);
       container.remove();
-      pushHitRegion(); // 别把已经删掉的宠物的位置留在命中区里
+      // force：睡着了也要报（不然形状留在已经删掉的宠物老地方，那儿会点不动也点不出东西）
+      pushHitRegion(true);
+    };
+
+    // ---- 睡 / 醒（见 4.7） ----
+    //
+    // 睡 = 「一帧都不再产生」：视频暂停（不 pause 的话播放引擎还在出帧，
+    // 全屏透明窗每一帧都要 DWM 重合成，于是变成跟别的窗口抢渲染预算）。
+    // 定时器/状态机都不动 —— 醒来时宠物还站在原地、还接着放，逻辑没丢。
+    this.sleep = function () {
+      if (self.asleep || self.destroyed) return;
+      self.asleep = true;
+      // 漫游的 rAF 是 60fps 写样式 —— 睡前必须停，否则「静止」还在烧 CPU
+      if (self.moveRef !== null) {
+        cancelAnimationFrame(self.moveRef);
+        self.moveRef = null;
+      }
+      self.pendingMove = null;
+      try {
+        videoA.pause();
+        videoB.pause();
+      } catch (e) {
+        /* pause 失败也别把逻辑卡住 */
+      }
+    };
+
+    this.wake = function () {
+      if (!self.asleep || self.destroyed) return;
+      self.asleep = false;
+      // 睡着时排队的「该演哪一段」现在补上；没有就接着当前这一帧往下放
+      // （pause/play 不改 currentTime，不会跳回第一帧）。
+      var q = self.asleepNext;
+      self.asleepNext = null;
+      if (q) {
+        self.switchTo(q.anim, q.once, { force: true });
+        return;
+      }
+      var front = self.frontIdx === 0 ? videoA : videoB;
+      try {
+        var p = front.play();
+        if (p && p.catch) p.catch(function () {});
+      } catch (e) {
+        /* 续播失败就当没醒：下个事件还会再试 */
+      }
     };
 
     // ---- Start playing ----
@@ -1247,6 +1430,10 @@
     var pet = new PetCard(cfg, root);
     pets.push(pet);
     pet.init();
+    // 新宠物进屋：既重新起计空闲计时器，醒来晚了也得马上把它冻住
+    //（省电模式下 init() 会 play()，不补这一下新来的就在满速放）
+    if (asleep) pet.sleep();
+    noteActivity();
     applySavedPositions(); // 新加的这只也认得「上次的位置」（id 认不出就单只借位，见 4.6）
     pushHitRegion(); // 进了 pets 才量得到它（构造时它还没进数组）
   }
@@ -1264,6 +1451,20 @@
     var target = bubbleTarget && bubbleTarget.showBubble ? bubbleTarget : pets[0];
     if (obj.sticky !== true && !(Number(obj.ms) > 0)) obj.ms = 5000;
     target.showBubble(obj.text, { ms: obj.ms, sticky: obj.sticky === true });
+  }
+
+/**
+   * 省电帧（v1.3，见 4.7）：on = 冻住动画（气泡文字照常更新）。
+   * 用户手动开的省电模式**不会自己醒** —— 只有关掉省电才醒（不然一动鼠标
+   * 就又满速解码了，那还不如不开）。
+   */
+  function applyPowerFrame(on) {
+    powerSave = on === true;
+    if (powerSave) goSleep();
+    else {
+      goWake();
+      armIdle();
+    }
   }
 
   /** Apply a tool override */
@@ -1302,6 +1503,7 @@
     ws.onopen = function () {
       console.log("[pi-dsh-pet] WebSocket connected");
       reconnectAttempts = 0;
+      noteActivity();
       var banner = document.getElementById(DISCONNECT_BANNER_ID);
       if (banner) banner.classList.remove("show");
       pushHitRegion(); // 提示条没了，命中区跟着收回来
@@ -1312,6 +1514,11 @@
       // Try JSON first
       try {
         var obj = JSON.parse(msg);
+        if (obj.type === "power") {
+          // v1.3: 省电开关（老窗不认识这帧，无害）
+          applyPowerFrame(obj.sleep === true);
+          return;
+        }
         if (obj.type === "tool_call") {
           applyToolOverride(obj.tool);
           return;
@@ -1323,6 +1530,7 @@
         }
         if (obj.type === "positions") {
           // v1.2: 上次拖到哪儿（老窗不认识这帧，当普通字符串事件也无害）
+          noteActivity(); // 位置帧会让宠物挪窝，得先醒（不然报告的形状停在老地方）
           savedPositions = obj.map && typeof obj.map === "object" ? obj.map : {};
           applySavedPositions();
           return;
@@ -1330,6 +1538,7 @@
       } catch (_) { /* plain string */ }
 
       // Plain string events
+      noteActivity(); // 宿主来了消息 = 有人在用（agent 干活时宠物该一直醒着）
       var anim = EVENT_ANIM_MAP[msg];
       if (anim) {
         applyEventOverride(anim);
@@ -1349,6 +1558,7 @@
 
     ws.onclose = function () {
       console.log("[pi-dsh-pet] WebSocket disconnected");
+      noteActivity(); // 掉线提示条要能显示出来（睡着的窗不更新形状，提示条会被裁掉）
       var banner = document.getElementById(DISCONNECT_BANNER_ID);
       if (banner) banner.classList.add("show");
       pushHitRegion(); // 提示条在屏幕右上角，得留在命中区里（它要能被点到/看到）
@@ -1394,6 +1604,49 @@
 
     // Start all pets
     pets.forEach(function (pet) { pet.init(); });
+
+    // ---- 睡 / 醒 的另外两个开关（见 4.7） ----
+    //
+    // ① 主进程：窗看不见的时候（最小化 / 屏保锁屏 / 挂起）喊我们冻住。
+    //    这时候没人看，可满速解码 WebM 纯粹是把别人的合成预算抢走。
+    if (window.__petElectron__ && window.__petElectron__.onPower) {
+      window.__petElectron__.onPower(function (sleep) {
+        if (sleep) goSleep();
+        else {
+          goWake();
+          armIdle();
+        }
+      });
+    }
+    // ② 页签本身被切走（浏览器里打开的宠物页同理）：一样别产生帧
+    document.addEventListener("visibilitychange", function () {
+      if (document.hidden) goSleep();
+      else {
+        goWake();
+        armIdle();
+      }
+    });
+// ③ 全局活动：指针真的落在宠物身上、或者按键/滚轮 → 有活动。
+    //    mousemove 在漫游/拖拽时能到每秒 60 次，所以自己限流（1s 一次就够续命了）。
+    //    ⚠️ 穿透窗会把**整个窗**的 mousemove 都转发过来（见 pointerOnPet），
+    //    不查「指针在不在宠物上」的话，用户动一下鼠标就永远不睡了。
+    document.addEventListener(
+      "mousemove",
+      function (e) {
+        var now = Date.now();
+        if (now - lastMoveActivity < 1000) return;
+        lastMoveActivity = now;
+        if (!pointerOnPet(e.clientX, e.clientY)) return;
+        noteActivity();
+      },
+      { passive: true }
+    );
+    ["keydown", "wheel"].forEach(function (ev) {
+      document.addEventListener(ev, noteActivity, { passive: true });
+    });
+
+    // 从这儿开始计时：开播前就空转计时器等于白算一次
+    armIdle();
 
     // Connect WebSocket
     connectWs();

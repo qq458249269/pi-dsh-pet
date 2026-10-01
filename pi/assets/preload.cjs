@@ -7,8 +7,9 @@
  *   openMenu        右键菜单（菜单项的动作走宿主控制面，主进程负责弹）
  *   say / onAskSay  手动输入气泡：主进程叫出输入框 → 渲染进程提交 → 主进程调宿主
  *   savePosition    拖拽落点记忆（→ 宿主 /control set-position → home/positions.json）
- *   sayInputEnd / onSayCancel  输入框的收工信号（关框后要把键盘焦点还给下面的窗口）
+*   sayInputEnd / onSayCancel  输入框的收工信号（关框后要把键盘焦点还给下面的窗口）
  *   closeWindow     宿主退出 / WS 断了 → 关窗
+ *   onPower         主进程说「这扇窗现在看不见了（最小化 / 锁屏 / 挂起）」→ 渲染进程别再产生新帧
  */
 const { contextBridge, ipcRenderer } = require("electron");
 
@@ -29,6 +30,9 @@ contextBridge.exposeInMainWorld("__petElectron__", {
   sayInputEnd: () => ipcRenderer.send("pet:say-input-end"),
   /** 主进程强制收起输入框（焦点被别的程序抢走、或弹了右键菜单） */
   onSayCancel: (cb) => ipcRenderer.on("pet:say-cancel", () => cb()),
-  /** 关闭 Electron 窗口（WS 断了、宿主说 shutdown 时调用） */
+/** 关闭 Electron 窗口（WS 断了、宿主说 shutdown 时调用） */
   closeWindow: () => ipcRenderer.send("pet:close"),
+  /** 主进程 → 渲染进程：睡(true) / 醒(false)。
+   *  全屏透明置顶窗每一帧都要 DWM 重算整块桌面，所以「看不见的时候别产生帧」。 */
+  onPower: (cb) => ipcRenderer.on("pet:power", (_e, sleep) => cb(sleep !== false)),
 });

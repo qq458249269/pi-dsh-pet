@@ -190,7 +190,47 @@ console.log("\n待机动画节奏（不切一半 / 待机别太短）…");
 	check("用户上手就收摊（点击/拖拽/状态帧都停 dwell）", (petJs.match(/stopDwell\(\)/g) || []).length >= 4);
 	// ⑤ 节奏参数可配，且两个默认值都写在 config.jsonc 里
 	check("timing 段带 minPlayMs / idleDwellMs", /"minPlayMs"\s*:\s*2600/.test(cfg) && /"idleDwellMs"\s*:\s*6000/.test(cfg));
-	check("timing 缺省/写错都有兜底", /function readTiming\(raw\)/.test(petJs) && /TIMING_DEFAULT = \{ minPlayMs: 2600, idleDwellMs: 6000 \}/.test(petJs));
+check("timing 缺省/写错都有兜底", /function readTiming\(raw\)/.test(petJs) && /TIMING_DEFAULT = \{ minPlayMs: 2600, idleDwellMs: 6000, idleSleepMs: \d+ \}/.test(petJs));
+	check("timing 段带 idleSleepMs（空闲多久冻住）", /"idleSleepMs"\s*:\s*\d+/.test(cfg) && /num\("idleSleepMs"/.test(petJs));
+}
+
+// ------------------------------------------------ 空闲别硬烧（别抢别的窗口的渲染预算）
+// 症状：桌宠一开，别的程序的后台窗口就不刷新 / 卡成幻灯片。
+// 病根是**全屏透明置顶窗**：它每产生一帧，DWM 就得把整块桌面重新合成一遍（连带下面
+// 所有窗口）；待机链又一直在抽动画 → 别的窗口永远抢不到合成预算。
+// 所以修法只能是：**没事的时候不产生帧**（冻在当前那一帧）＋别把重合成的高频调用打满。
+// 七条钉上：
+console.log("\n空闲别硬烧（不抢别的窗口的渲染预算）…");
+{
+	const petJs = readFileSync(join(ROOT, "pi", "assets", "pet.js"), "utf8");
+	const pre = readFileSync(join(ROOT, "pi", "assets", "preload.cjs"), "utf8");
+	const elec = readFileSync(join(ROOT, "pi", "assets", "pet-electron.cjs"), "utf8");
+	const proto = readFileSync(join(ROOT, "app", "protocol.cjs"), "utf8");
+	const pathsSrc = readFileSync(join(ROOT, "app", "paths.cjs"), "utf8");
+	const hostSrc = readFileSync(join(ROOT, "app", "host.cjs"), "utf8");
+	const busSrc = readFileSync(join(ROOT, "app", "bus.cjs"), "utf8");
+	// ① 协议：只加不改（新帧），老窗不认识也无害
+	check("协议有 power 帧（v1.3，只加不改）", /power: "power"/.test(proto) && /function powerFrame\(sleep\)/.test(proto));
+	// ② 睡：双 video 一起暂停，醒来接着放（pause/play 不改 currentTime）
+	check("睡 = 两个 video 一起暂停", /this\.sleep = function[\s\S]{0,600}videoA\.pause\(\);[\s\S]{0,60}videoB\.pause\(\)/.test(petJs));
+	check("醒来接着当前帧放（有排队就补演）", /this\.wake = function[\s\S]{0,500}self\.asleepNext[\s\S]{0,400}front\.play\(\)/.test(petJs));
+	check("睡着时不换 src（换 src = 一次解码 + 一次重绘）", /if \(self\.asleep\) \{[\s\S]{0,80}self\.asleepNext = \{ anim: next, once: nextOnce \};[\s\S]{0,40}return;/.test(petJs));
+	check("待机续播不会把睡着的视频叫醒", /this\.startDwell = function[\s\S]{0,600}front\.loop = true[\s\S]{0,200}if \(!self\.asleep\)/.test(petJs));
+	// ③ 唤醒口子齐：WS / 主进程（最小化、锁屏）/ 页签隐藏 / 鼠标
+	check("活动唤醒有定时器（noteActivity/armIdle）", /function noteActivity\(\)/.test(petJs) && /function armIdle\(\)/.test(petJs) && /setTimeout\(function \(\)[\s\S]{0,120}goSleep\(\)/.test(petJs));
+check("最小化/锁屏/挂起 → 睡（pet:power）", /onPower: \(cb\) => ipcRenderer\.on\("pet:power"/.test(pre) && /win\.on\("minimize", \(\) => sendPower\(true\)\)/.test(elec) && /\["lock-screen", true\]/.test(elec));
+	check("页签隐藏也睡", /document\.addEventListener\("visibilitychange"[\s\S]{0,200}goSleep\(\)/.test(petJs));
+	check("WS 有 power 帧处理", /obj\.type === "power"[\s\S]{0,200}applyPowerFrame/.test(petJs));
+	// ④ 手动省电：落盘 + 菜单 + 只加不改的协议帧
+	check("省电模式落盘（换窗/重启还在）", /powerSave: false/.test(pathsSrc) && /case "power-save"/.test(hostSrc) && /setPower\(on\)/.test(busSrc));
+	check("窗接上来时补发 power 帧", /conn\.send\(powerFrame\(power\(\) === true\)\)/.test(busSrc));
+	check("菜单里有「省电模式」", /label: "省电模式[^\"]*"/.test(elec));
+	// ⑤ 高频重活（SetWindowRgn / 全屏重合成）别打满：
+	//    主进程侧：同形状不重裁 + 60ms 节流 + 取最新的一份；窗侧：2px 量化后去重
+	check("setShape 有去重 + 节流（不动就别重裁全屏）", /SHAPE_GAP_MS = \d+/.test(elec) && /if \(key === shapeKey\) return;/.test(elec) && /shapePending = list;/.test(elec));
+	check("漫游写样式/命中区封顶 30fps", /var MOVE_FRAME_MS = 33/.test(petJs) && /now - lastWrite >= MOVE_FRAME_MS/.test(petJs) && /if \(last \|\| now - lastWrite/.test(petJs));
+	check("命中区量化到 2px 再去重（亚像素抖动不重裁）", /var HIT_QUANT = 2/.test(petJs) && /x: quant2\(box\.left\)/.test(petJs) && /if \(key === lastRegionKey\) return;/.test(petJs));
+	check("睡着/看不见时不上报命中区（force 仅删除宠物时用）", /function pushHitRegion\(force\)/.test(petJs) && /if \(asleep && !force\) return;/.test(petJs) && /pushHitRegion\(true\)/.test(petJs));
 }
 
 // ------------------------------------------------ 「说点什么…」的键盘与收尾

@@ -35,7 +35,9 @@ handlers.get("tool/call")({ tool: "bash", args: { command: "npm test" } });
 await sleep(200);
 handlers.get("agent/status")({ status: "idle" });
 await sleep(200);
-const anim = frames.filter((f) => !f.startsWith('{"type":"bubble"'));
+// 窗接上来时宿主会补发一次「省电模式当前值」（power 帧），它是开机状态而不是事件，
+// 所以从事件序列里滤掉 —— 否则下面按 anim[0]/[1] 的位置断言会把它算成第一个事件。
+const anim = frames.filter((f) => !f.startsWith('{"type":"bubble"') && !f.startsWith('{"type":"power"'));
 const bubbles = frames.filter((f) => f.startsWith('{"type":"bubble"')).map((f) => JSON.parse(f).text);
 const st = (await (await fetch(`http://127.0.0.1:${PORT}/state`, { headers: { authorization: `Bearer ${token}` } })).json());
 const ok = (name, cond, extra = "") => {
@@ -48,6 +50,8 @@ ok("宿主起来时写了 <home>/port（一行就是端口）", readFileSync(joi
 // 真实 dsh 插件不会知道端口是多少（47653 被占时宿主会退到随机口），只靠读这两个文件
 ok("没给 PI_PET_PORT/TOKEN 也连上了（读 port/token 文件）", logs.some((l) => l.includes(`已接入宠物宿主 :${PORT}`) && /端口来自.*[\\/]port/.test(l)), logs.join(" | "));
 ok("thinking → 思考中", anim[0] === "thinking", JSON.stringify(anim));
+// 省电帧：窗接上来就该收到一次（老窗不认识也无害），并且能靠 /control 切
+ok("窗接上来补发 power 帧（默认 false）", frames.some((f) => f === '{"type":"power","sleep":false}'), JSON.stringify(frames));
 ok("工具调用 → 执行中 + detail", anim[1] === '{"type":"tool_call","tool":"bash"}' && bubbles.includes("执行中：npm test"), JSON.stringify(bubbles));
 ok("done → 回空闲", anim[2] === "agent_idle", JSON.stringify(anim));
 ok("会话名存在 /state 里", st.bus.feedsBySource["dsh-fake"] === 1, JSON.stringify(st.bus));

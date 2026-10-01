@@ -76,6 +76,23 @@
 - 落盘在 `home/positions.json`，键是 config.jsonc 里的宠物 id
 - 老窗不认识这帧 → 直接忽略，同一宿主能带新旧两种窗
 
+### 3.2.2 下行 v1.3（省电帧，仍是只加不改）
+
+```json
+{"type":"power","sleep":true}
+```
+
+- `sleep:true` = 把动画**冻在当前那一帧**（`video.pause()`、停漫游 rAF、不再上报命中区）；
+  气泡文字照常更新。`false` = 接着放
+- 窗接上来时补发一次（同上）；开关落盘在 `home/ctrl.json` 的 `powerSave`，
+  换窗、重启都还保持着
+- 手动切：`POST /control {action:"power-save", on:true|false}`（等价于
+  `set-ctrl {powerSave}`），或右键菜单的「省电模式」
+- 为什么需要它：这扇窗是**全屏透明置顶**的，每一帧都要 DWM 重算整块桌面合成，
+  一直动就等于一直抢别的窗口的渲染预算（见 §9.17）
+- 窗**看不见**时（最小化 / 屏保锁屏 / 挂起）主进程另走 IPC `pet:power` 喊它睡，
+  不经过宿主也生效
+
 ### 3.3 上行 v1.1（生产者在 /feed 上行或 POST /event）
 
 ```jsonc
@@ -96,7 +113,7 @@
 | `POST /event` | 是 | 单条上行（curl / 脚本用） |
 | `WS /ws` | 否 | 窗下行通道（`pet.js` 发不了自定义头，所以免鉴权） |
 | `WS /feed` | 是（`?token=`） | 生产者上行通道；`?source=` 决定会话归属 |
-| `POST /control` | 是 | `shutdown / restart-window / add-pet / drop-pets / say / pause / resume / hide-window / show-window / set-ctrl / set-position / state / release-lock` |
+| `POST /control` | 是 | `shutdown / restart-window / add-pet / drop-pets / say / pause / resume / power-save / hide-window / show-window / set-ctrl / set-position / state / release-lock` |
 
 token 存在 `%APPDATA%/pi-dsh-pet/token`，**只绑 127.0.0.1**。不开 LAN。
 
@@ -176,9 +193,13 @@ resolveTarget():
 - 全屏透明置顶窗，默认整窗**鼠标穿透**；渲染进程在宠物命中框内 hover 时通过
   `preload.setPassthrough(false)` 临时关掉穿透，于是能点、能拖。
 - 右键菜单用 Electron 原生 `Menu`（透明穿透窗上 HTML 菜单会飘/穿），所有动作都走
-  `/control`：当前状态、事件来源、暂停响应、说点什么、换一只、添加一只、
+  `/control`：当前状态、事件来源、暂停响应、**省电模式**、说点什么、换一只、添加一只、
   隐藏宠物（服务留着）、在浏览器打开、复制服务地址、打开数据文件夹、关于、退出。
   （换尺寸只在 `/control set-ctrl` 里，菜单不提供：换窗代价大过收益。）
+- **省电 / 空闲别硬烧**（这扇窗是全屏透明置顶的，每一帧都要 DWM 重算整块桌面合成，
+  见 §9.17）：空闲 `timing.idleSleepMs`（默认 45s）就把动画冻在当前帧；窗最小化 / 锁屏 /
+  挂起时主进程用 `pet:power` 喊它睡；右键菜单「省电模式」是无条件省电（落盘 `ctrl.json`），
+  气泡文字照常更新。
 - 「说点什么」：菜单 → `pet:say-ask` → 渲染进程在气泡位置弹出输入框 → Enter 提交 →
 `preload.say` → 主进程带 token → `/control {action:"say"}`。
 - 「记住位置」：拖拽松手 → `preload.savePosition` → 主进程带 token →
@@ -247,6 +268,20 @@ pi-pet config           # 看/改 config.json
 16. **CI 断言不能拿别人规范化过的字符串当契约。** 断言过「产物名里必须有版本号」，
     结果挂在 electron-builder 把 `2026.09.30.0002` 规范化成 `2026.9.3-0.2` 上。
     断言只能钉在**我们自己定的契约**上（固定文件名、asar 存在且够大）。
+17. **全屏透明窗 = 一直在抢整块桌面的合成预算。** 这扇窗是屏幕大小的透明置顶窗，
+    它每产生一帧，DWM 就得把整块桌面重新合成一遍（连着下面所有窗口一起）。待机链本来
+    就在不停地抽动画，于是别的程序的后台窗口永远抢不到合成预算，症状是
+    「桌宠一开，浏览器/IDE 就不刷新了」。**唯一的治法是不产生帧**：空闲
+    `timing.idleSleepMs`（默认 45s）就 `video.pause()` 冻在当前帧、停漫游 rAF、不再上报
+    命中区；唤醒口子有 WS 事件 / 鼠标碰到宠物 / 右键菜单 / 输入框 / resize / 页签可见性，
+    以及主进程的最小化 / 锁屏 / 挂起（`pet:power`）。别再为了“手感平滑”把 sleep 关掉。
+18. **别拿全屏窗的“每次改形状/样式”当小事。** `setShape()`（SetWindowRgn）、
+    漫游时 60fps 的 `style.left` 都落在同一条重合成路径上，而且主进程那次还是跨进程调用。
+    所以两头都掐：主进程侧 2px 量化后去重 + `SHAPE_GAP_MS`（60ms）节流（被节流的那份要
+    **攒最新的**，落点不能丢），窗侧命中区 2px 量化 + 漫游写样式封顶 30fps。
+    顺带：`applyShape` 里“窗不可见就跳过”必须留一条“一次都没裁过就不许跳过”的例外 ——
+    跳过等于没形状（整窗点不动），而上面已经记下 `shapeKey`，同一份形状会被去重掉，
+    永远补不回来。
 
 ## 10. 版本号与发布
 

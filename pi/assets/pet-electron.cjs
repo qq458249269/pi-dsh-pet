@@ -19,7 +19,7 @@
  *        （打包版里不需要这么起：`pi-dsh-pet.exe --pi-pet-window <port>` 会 require 本文件）
  */
 
-const { app, BrowserWindow, Menu, dialog, shell, clipboard, screen, ipcMain } = require("electron");
+const { app, BrowserWindow, Menu, dialog, shell, clipboard, screen, ipcMain, powerMonitor } = require("electron");
 const http = require("node:http");
 const fs = require("node:fs");
 const os = require("node:os");
@@ -186,6 +186,36 @@ app.whenReady().then(() => {
   const SHAPE_OK = typeof win.setShape === "function" && process.env.PI_PET_NO_SHAPE !== "1";
   let shapeBroken = false;
   let gotRegion = false;
+  /** SetWindowRgn 是重活：这扇窗是**全屏**的，改一次形状就要让 DWM 把整块桌面
+   *  重新合成一遍（也就是又一次跟别的窗口抢合成预算）。所以两头都掐着：
+   *    ① 量化到 2px —— 亚像素抖动不重画（不动的宠物不该一直重画）；
+   *    ② 两次之间至少隔 SHAPE_GAP_MS —— 漫游时渲染进程 20fps 的上报不能变成
+   *       20 次 SetWindowRgn；被节流的那次**攒最新的一份**（落点不能丢）。 */
+  const SHAPE_EPS = 2;
+  const SHAPE_GAP_MS = 60;
+  let shapeKey = "";
+  let shapeAt = 0;
+  let shapeTimer = null;
+  let shapePending = null;
+  let shapeApplied = false;
+
+  /** 真的裁形状。失败（老内核 / 非法形状）就永久退回开关式穿透，别反复抛。 */
+  function applyShape(list) {
+    if (!SHAPE_OK || shapeBroken || win.isDestroyed()) return;
+    // 窗都看不见了，裁形状没意义（后面有上报时自然会补上）。
+    // ⚠️ 但「一次都没裁过」的时候不能跳：跳过就等于没有形状 = 整窗点不动，
+    //   而上面已经记下 shapeKey，同一份形状会被去重掉，永远补不回来。
+    if (shapeApplied && !win.isVisible()) return;
+    try {
+      win.setShape(list);
+      shapeAt = Date.now();
+      shapeApplied = true;
+    } catch (err) {
+      shapeBroken = true;
+      console.error("[pi-dsh-pet] setShape 失败，退回开关式穿透：", err && err.message);
+      win.setIgnoreMouseEvents(true, { forward: true });
+    }
+  }
 
   if (SHAPE_OK) {
     // 窗口一直收事件；「谁能点到」交给 setShape。开始先给一个 1×1 的点，
@@ -207,25 +237,45 @@ app.whenReady().then(() => {
       console.error(`[pi-dsh-pet] hit-region 收到 ${JSON.stringify(rects)}（shape=${SHAPE_OK} broken=${shapeBroken}）`);
     }
     if (!SHAPE_OK || shapeBroken || win.isDestroyed()) return;
-    // 宠物漫游/拖拽时每 50ms 一帧，别拿非法形状去砸 SetWindowRgn
+    // 量化到 SHAPE_EPS 的网格：1px 的抖动不值得让 DWM 重算一次全屏
     const list = (Array.isArray(rects) ? rects : [])
       .map((r) => ({
-        x: Math.max(0, Math.floor(Number(r && r.x) || 0)),
-        y: Math.max(0, Math.floor(Number(r && r.y) || 0)),
+        x: Math.max(0, Math.round(Number(r && r.x) || 0)),
+        y: Math.max(0, Math.round(Number(r && r.y) || 0)),
         width: Math.ceil(Number(r && r.width) || 0),
         height: Math.ceil(Number(r && r.height) || 0),
+      }))
+      .map((r) => ({
+        x: Math.round(r.x / SHAPE_EPS) * SHAPE_EPS,
+        y: Math.round(r.y / SHAPE_EPS) * SHAPE_EPS,
+        width: Math.max(SHAPE_EPS, Math.round(r.width / SHAPE_EPS) * SHAPE_EPS),
+        height: Math.max(SHAPE_EPS, Math.round(r.height / SHAPE_EPS) * SHAPE_EPS),
       }))
       .filter((r) => r.width > 0 && r.height > 0);
     if (!list.length) return; // 没算出来就保持上一次，别把窗弄没了
     gotRegion = true;
-    try {
-      win.setShape(list);
-    } catch (err) {
-      // 不支持 / 形状非法：永久退回开关式穿透，别反复抛
-      shapeBroken = true;
-      console.error("[pi-dsh-pet] setShape 失败，退回开关式穿透：", err && err.message);
-      win.setIgnoreMouseEvents(true, { forward: true });
+    const key = list.map((r) => `${r.x},${r.y},${r.width},${r.height}`).join("|");
+    if (key === shapeKey) return; // 与上一次量化后一样：省掉一次跨进程 + 一次 SetWindowRgn
+    shapeKey = key;
+    const wait = SHAPE_GAP_MS - (Date.now() - shapeAt);
+    if (wait <= 0) {
+      if (shapeTimer) {
+        clearTimeout(shapeTimer);
+        shapeTimer = null;
+      }
+      shapePending = null;
+      applyShape(list);
+      return;
     }
+    // 空档没到：攒着（取**最新**的一份，漫游的落点不能被旧的盖掉），到点再裁
+    shapePending = list;
+    if (shapeTimer) return;
+    shapeTimer = setTimeout(() => {
+      shapeTimer = null;
+      const next = shapePending;
+      shapePending = null;
+      applyShape(next);
+    }, wait);
   });
 
   // 兜底：没有 setShape（或它坏了）时，渲染进程仍用老协议开关穿透
@@ -249,9 +299,39 @@ app.whenReady().then(() => {
   });
 
   // 给渲染进程回话的快捷方式（“说点什么…”）
-  webContentsSend = (channel) => {
-    if (!win.isDestroyed()) win.webContents.send(channel);
+  webContentsSend = (channel, ...args) => {
+    if (!win.isDestroyed()) win.webContents.send(channel, ...args);
   };
+
+  // ---- 睡 / 醒：这扇窗看不见的时候，别再产生新帧 ----
+  //
+  // 为什么这么要紧：它是**全屏透明置顶**的，每产生一帧，DWM 就得把整块桌面重新
+  // 合成一遍（连着下面所有窗口一起）。于是「一直在动」= 一直在跟别的程序抢合成
+  // 预算 —— 症状就是「桌宠一开，浏览器/IDE 的后台窗口就不刷新了」。
+  // 看不见的时候（最小化 / 屏保锁屏 / 挂起）画面没人看，就该彻底停下来。
+  function sendPower(sleep) {
+    if (win.isDestroyed()) return;
+    if (webContentsSend) webContentsSend("pet:power", sleep === true);
+  }
+  win.on("hide", () => sendPower(true));
+  win.on("show", () => sendPower(false));
+  win.on("minimize", () => sendPower(true));
+  win.on("restore", () => sendPower(false));
+  // 锁屏/挂起是最容易忘的一档：屏幕都黑了你还在满速解码 WebM。
+  // powerMonitor 的事件**按平台不一样**（lock/unlock 只有 Windows/macOS），
+  // 拿不到 / 不支持就当没这回事（窗口事件已经盖住大部分场景）。
+  [
+    ["suspend", true],
+    ["lock-screen", true],
+    ["resume", false],
+    ["unlock-screen", false],
+  ].forEach(([ev, sleep]) => {
+    try {
+      powerMonitor.on(ev, () => sendPower(sleep));
+    } catch {
+      /* 这个平台/这个 Electron 版本没有这事件 */
+    }
+  });
 
   // PI_PET_DEBUG=1：把渲染进程的 console 转到主进程 stderr。
   // 平时窗是 detached + stdio:"ignore" 的，渲染进程报什么都没人看得见，
@@ -322,6 +402,7 @@ app.whenReady().then(() => {
     const busStats = (st && st.bus) || {};
     const maxPets = Number(ctrl.maxPets) || 1;
     const paused = ctrl.paused === true;
+    const powerSave = ctrl.powerSave === true;
     const currentSize = ctrl.size || "normal";
     const run = async (action, body) => {
       const res = await callHost(action, body, token);
@@ -335,20 +416,29 @@ app.whenReady().then(() => {
       }
     };
 
-const stateLabel = info.state || "待机（随机动画）";
+    const stateLabel = info.state || "待机（随机动画）";
     const menu = Menu.buildFromTemplate([
       { label: `当前：${stateLabel}`, enabled: false },
       {
         label: busStats.feeds ? `事件来源：${busStats.feeds} 个会话` : "事件来源：暂无（pi/dsh 未接入）",
         enabled: false,
       },
-      { type: "separator" },
+{ type: "separator" },
       {
         label: "暂停响应",
         type: "checkbox",
         checked: paused,
         // 暂停 = 宠物继续自己玩，但不再跟着 agent 状态变。服务与端口照旧。
         click: () => run(paused ? "resume" : "pause"),
+      },
+      {
+        label: "省电模式（冻住动画，不占 CPU）",
+        type: "checkbox",
+        checked: powerSave,
+        // 省电 ≠ 暂停：暂停是「不理 agent 状态」，省电是「一帧都不产生」。
+        // 全屏透明窗每一帧都要重算整块桌面合成，冻住就不会抢别的窗口的渲染预算；
+        // 气泡文字照常更新（照旧能「说点什么」）。落盘 ctrl.json，重启后还是省电。
+        click: () => run("power-save", { on: !powerSave }),
       },
       {
         label: "说点什么…",
@@ -457,7 +547,9 @@ const stateLabel = info.state || "待机（随机动画）";
 
   win.loadURL(url);
 
-  win.on("ready-to-show", () => win.setAlwaysOnTop(true, "screen-saver"));
+  // ⚠️ 级别用 floating（默认置顶）而不是 screen-saver：screen-saver 级会强行压到
+  //    全屏/其他置顶程序之上，系统对它的处理也更重。桌面宠物只需要“压着普通窗口”。
+  win.on("ready-to-show", () => win.setAlwaysOnTop(true, "floating"));
 
   app.on("window-all-closed", () => app.quit());
 });
