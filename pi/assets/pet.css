@@ -66,24 +66,30 @@
      不夹的话会有一半跑到屏幕外，看着就像「被切了一半」。 */
   transform: translate(-50%, 6px);
   margin-bottom: 10px;
-  /* ⚠️ 不能再用「自适应宽度」：left:50% 时可用宽度 = 宠物宽度的一半（231px），
+/* ⚠️ 不能再用「自适应宽度」：left:50% 时可用宽度 = 宠物宽度的一半（231px），
      写在 max-width 上的 320/420 永远够不着，长文案就在 231px 处被切了。
-     要宽度就得显式 width:max-content（先撑到 max-width，再由它封顶）。 */
+     要宽度就得显式 width:max-content（先撑到 max-width，再由它封顶）。
+     上限 560（实测 542 宽的窗里 = 100vw-32，行长从 30 字涨到 37 字，见 §9.21）：
+     宽窗就该用宽，宽窗本来就是「为气泡留出来的」。窄窗仍按 100vw-32 夹住。 */
   width: max-content;
-  max-width: min(420px, calc(100vw - 32px));
+  max-width: min(560px, calc(100vw - 32px));
+  /* 高度不给死：clampBubble() 按「头顶真实空间」写 max-height（§9.21），
+     这里只兜底一个下限，别让它在没有空间时把窗顶顶出去。 */
+  max-height: 60vh;
   padding: 7px 12px;
   border-radius: 12px;
   background: rgba(28, 30, 38, 0.92);
   color: #f2f4f8;
   font: 13px/1.45 system-ui, "Microsoft YaHei", sans-serif;
-  /* 以前是 nowrap + max-width:320px：长文案只剩一个省略号，看着像「只显示一半」。
-     改成自动换行、最多三行，三行以后才截断。 */
+/* 三行太窄：agent 的一句话经常 60~90 字，三行只留得下 100 来字，
+     剩下的被裁掉（看着就像「话没说完」）。放到 6 行，真正的封顶交给
+     clampBubble() 按头顶空间算 —— 空间不够时它会按行数往下收（§9.21）。 */
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   word-break: break-word;
   display: -webkit-box;
   -webkit-box-orient: vertical;
-  -webkit-line-clamp: 3;
+  -webkit-line-clamp: 6;
   overflow: hidden;
   opacity: 0;
   pointer-events: none;

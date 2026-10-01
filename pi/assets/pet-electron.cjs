@@ -261,9 +261,17 @@ app.whenReady().then(() => {
       return { x: stagePos.x, y: stagePos.y };
     }
   }
-  // 窗被别人搬了/改了大小（用户拖、多屏变化、系统贴靠）也同步过来
+// 窗被别人搬了/改了大小（用户拖、多屏变化、系统贴靠）也同步过来
   win.on("move", (_e, b) => rememberPos(b));
-  win.on("resize", (_e, b) => rememberPos(b));
+  // ⚠️ resize 除了记落点，还得把形状**重新裁一遍**（§9.21）：形状是 Win32 的窗口区域，
+  //   窗一变（启动时按配置长大、往上长、显示器/DPI 变化）Chromium 可能按旧尺寸重建它，
+  //   甚至丢掉 —— 形状一丢 = 整窗点得动，下面软件的点击全被透明区吃掉，
+  //   而这正是「窗一变大就点不到别的软件」的那种症状。一次 resize 一次 SetWindowRgn，
+  //   稀罕事件，不心疼（漫游那才叫频，那边有 60ms 节流）。
+  win.on("resize", (_e, b) => {
+    rememberPos(b);
+    resyncShape();
+  });
 
   // ---- 命中区：把整窗的鼠标命中裁到宠物身上 ----
   const SHAPE_OK = typeof win.setShape === "function" && process.env.PI_PET_NO_SHAPE !== "1";
@@ -276,23 +284,42 @@ app.whenReady().then(() => {
    *       20 次 SetWindowRgn；被节流的那次**攒最新的一份**（落点不能丢）。 */
   const SHAPE_EPS = 2;
   const SHAPE_GAP_MS = 60;
-  let shapeKey = "";
+let shapeKey = "";
+  let lastShape = null;
+  /**
+   * 窗变过之后把上一次的形状原样重裁一遍（窗变尺寸时形状本身不用改，
+   *   但 Win32 那边的窗口区域得重新盖到新窗上）。
+   * 同时清掉 shapeKey：这样渲染进程下一次哪怕报一模一样的矩形，也真的会重裁
+   * （不然会被去重吃掉，“重放”就白做了）。
+   */
+  function resyncShape() {
+    if (!SHAPE_OK || shapeBroken || win.isDestroyed()) return;
+    if (!lastShape || !lastShape.length) return;
+    shapeKey = "";
+    shapePending = null;
+    if (shapeTimer) {
+      clearTimeout(shapeTimer);
+      shapeTimer = null;
+    }
+    applyShape(lastShape);
+  }
   let shapeAt = 0;
   let shapeTimer = null;
   let shapePending = null;
   let shapeApplied = false;
 
   /** 真的裁形状。失败（老内核 / 非法形状）就永久退回开关式穿透，别反复抛。 */
-  function applyShape(list) {
+function applyShape(list) {
     if (!SHAPE_OK || shapeBroken || win.isDestroyed()) return;
     // 窗都看不见了，裁形状没意义（后面有上报时自然会补上）。
     // ⚠️ 但「一次都没裁过」的时候不能跳：跳过就等于没有形状 = 整窗点不动，
     //   而上面已经记下 shapeKey，同一份形状会被去重掉，永远补不回来。
     if (shapeApplied && !win.isVisible()) return;
-    try {
+try {
       win.setShape(list);
       shapeAt = Date.now();
       shapeApplied = true;
+      lastShape = list; // 窗变尺寸后要重放的就是它（见 resyncShape）
     } catch (err) {
       shapeBroken = true;
       console.error("[pi-dsh-pet] setShape 失败，退回开关式穿透：", err && err.message);
@@ -319,15 +346,27 @@ app.whenReady().then(() => {
     if (process.env.PI_PET_DEBUG === "1") {
       console.error(`[pi-dsh-pet] hit-region 收到 ${JSON.stringify(rects)}（shape=${SHAPE_OK} broken=${shapeBroken}）`);
     }
-    if (!SHAPE_OK || shapeBroken || win.isDestroyed()) return;
+if (!SHAPE_OK || shapeBroken || win.isDestroyed()) return;
+    // ⚠️ 夹进窗内（§9.21）：不能只 Math.max(0, x) —— 那样只是把左上角推回 0 而宽高不变，
+    //   整块形状会「平移」到窗角上（宠物贴边/漫游出界时报的就是这种），透明区就点不动了。
+    let winW = 0;
+    let winH = 0;
+    try {
+      const cb = win.getContentBounds();
+      winW = Number(cb && cb.width) || 0;
+      winH = Number(cb && cb.height) || 0;
+    } catch {
+      /* 窗还没映射：量不到就不夹 */
+    }
     // 量化到 SHAPE_EPS 的网格：1px 的抖动不值得让 DWM 重算一次全屏
     const list = (Array.isArray(rects) ? rects : [])
-      .map((r) => ({
-        x: Math.max(0, Math.round(Number(r && r.x) || 0)),
-        y: Math.max(0, Math.round(Number(r && r.y) || 0)),
-        width: Math.ceil(Number(r && r.width) || 0),
-        height: Math.ceil(Number(r && r.height) || 0),
-      }))
+      .map((r) => {
+        const x0 = Math.max(0, Math.round(Number(r && r.x) || 0));
+        const y0 = Math.max(0, Math.round(Number(r && r.y) || 0));
+        const x1 = Math.min(winW || Infinity, x0 + Math.ceil(Number(r && r.width) || 0));
+        const y1 = Math.min(winH || Infinity, y0 + Math.ceil(Number(r && r.height) || 0));
+        return { x: x0, y: y0, width: x1 - x0, height: y1 - y0 };
+      })
       .map((r) => ({
         x: Math.round(r.x / SHAPE_EPS) * SHAPE_EPS,
         y: Math.round(r.y / SHAPE_EPS) * SHAPE_EPS,
@@ -375,6 +414,22 @@ app.whenReady().then(() => {
   // 这样单帧填充率小一个数量级，DWM 的合成压力也跟着小一个数量级。
   const num = (v, d) => (Number.isFinite(Number(v)) ? Number(v) : d);
 
+  /** 窗当前的内容尺寸 {w,h}（拿不到就 0）。
+   *  ⚠️ getContentBounds() 在现代 Electron 返回**对象** {x,y,width,height}，老版本返回
+   *     数组 [x,y,w,h] —— 两种都认。写死 cb[2]/cb[3] 的话现代版上永远是 undefined，
+   *     于是「已经是这个大小了」那类判断全部失效（见 §9.21）。 */
+  function contentSize() {
+    try {
+      const cb = win.getContentBounds();
+      return {
+        w: Number(cb && (cb.width !== undefined ? cb.width : cb[2])) || 0,
+        h: Number(cb && (cb.height !== undefined ? cb.height : cb[3])) || 0,
+      };
+    } catch {
+      return { w: 0, h: 0 };
+    }
+  }
+
   /** 把窗夹在某块屏的工作区里（至少露出 minVis）。pos 是期望的左上角。
    *  ⚠️ NaN 一律当「不知道」处理：Math.min/max 遇到 NaN 会把整条式子变成 NaN，
    *     而 NaN 坐标喂给 setBounds 就是上面那个 32x39 残骸窗。 */
@@ -398,21 +453,28 @@ app.whenReady().then(() => {
   /**
    * 真的把窗摆到某个位置/尺寸，并在**当场**核对一次。
    *
+   * ⚠️ 只改**尺寸**，左上角不动：宠物在窗里的偏移是常量（贴边角就是这么摆的），
+   *   窗左上不动 → 宠物在屏幕上不跳一像素，透明区也还是原来那几块（形状跟着重裁）。
+   *   早先试过「按宠物贴住的角挪窗」（§9.21）：高度差里只有一部分来自头顶偏移，
+   *   按高度差挪会把宠物挪走 40px、窗还挂到屏幕外头 —— 量过就废了。
+   *
    * 为什么要核对：上面那个坑的可怕之处是 setBounds **不报错** —— NaN 坐标被静默接受，
    * 窗塌成 32x39，宿主/WS/菜单全都正常，只有屏幕上没有宠物。所以摆完必须量一下：
    * 量出来不是我们要的（差了 1px 以上，或者压根量不到有限数），就再摆一次并打日志。
    * 只重试一次，绝不循环。
    */
-  function applyBounds(width, height) {
-    const pos = clampToDisplay(currentPos(), { w: width, h: height });
-    const bounds = { x: pos.x, y: pos.y, width, height };
+function applyBounds(width, height) {
+    // 只改尺寸，**左上角不动**：宠物在窗里的偏移是常量（贴边角），窗左上不动，
+    // 它在屏幕上的位置就一像素也不动。锚哪条边去挪窗反而会把宠物挪走（§9.21 实测）。
+    const at = clampToDisplay(currentPos(), { w: width, h: height });
+    const bounds = { x: at.x, y: at.y, width, height };
     if (!Number.isFinite(bounds.x) || !Number.isFinite(bounds.y)) {
       console.error(`[pi-dsh-pet] 落点算不出来（${bounds.x},${bounds.y}），放弃改窗`);
       return false;
     }
     try {
       win.setBounds(bounds);
-      rememberPos(pos);
+      rememberPos(at);
     } catch (err) {
       console.error("[pi-dsh-pet] setBounds 失败：", err && err.message);
       return false;
@@ -421,7 +483,7 @@ app.whenReady().then(() => {
     const ok =
       Number.isFinite(got && got.width) && Math.abs(got.width - width) <= 1 && Math.abs(got.height - height) <= 1;
     if (ok) {
-      if (process.env.PI_PET_DEBUG === "1") console.error(`[pi-dsh-pet] 舞台窗 → ${width}x${height} @ ${pos.x},${pos.y}`);
+      console.error(`[pi-dsh-pet] 舞台窗 → ${width}x${height} @ ${bounds.x},${bounds.y}`);
       return true;
     }
     // 摆完不是我们要的样子（多半被什么东西改回去了：贴靠、多屏变化、或上面那种静默塌陷）
@@ -429,7 +491,7 @@ app.whenReady().then(() => {
       `[pi-dsh-pet] 窗没摆成（要 ${width}x${height}，实际 ${got && got.width}x${got && got.height} @ ${got && got.x},${got && got.y}）→ 重摆一次`,
     );
     try {
-      win.setBounds({ x: pos.x, y: pos.y, width, height });
+      win.setBounds({ x: bounds.x, y: bounds.y, width, height });
     } catch {
       /* 重试也失败就算了，别把主进程搞崩 */
     }
@@ -446,9 +508,8 @@ app.whenReady().then(() => {
     if (win.isDestroyed()) return;
     const w = Math.round(Math.min(Math.max(num(m.w, STAGE.w), MIN_STAGE_W), 6000));
     const h = Math.round(Math.min(Math.max(num(m.h, STAGE.h), 200), 6000));
-    const cb = win.getContentBounds();
-    if (Number.isFinite(cb && cb[2]) && w === cb[2] && h === cb[3]) return;
-    // 只改右/下边界（左上不动）：宠物在窗里的偏移不变 → 它在屏幕上的位置也不变
+    const cur = contentSize();
+    if (w === cur.w && h === cur.h) return; // 已经是这个大小了
     applyBounds(w, h);
   });
 

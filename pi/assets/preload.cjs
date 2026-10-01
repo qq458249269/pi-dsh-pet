@@ -21,7 +21,10 @@ contextBridge.exposeInMainWorld("__petElectron__", {
   setPassthrough: (on) => ipcRenderer.send("pet:passthrough", on),
   /** 命中区：[{x,y,width,height}]（窗口坐标）。空数组会被忽略，别用来「关窗」。 */
   setHitRegion: (rects) => ipcRenderer.send("pet:hit-region", Array.isArray(rects) ? rects : []),
-  /** 舞台窗要多大（设备无关像素）。主进程只改右/下边界，宠物在屏幕上的位置不变。 */
+/**
+   * 舞台窗要多大（设备无关像素）。anchor = 往哪边长："top" = 往头顶长（气泡那边），
+   * "bottom" = 往下长（老行为）。宠物在屏幕上的位置两种都不变。
+   */
   setWindowSize: (w, h) => ipcRenderer.send("pet:window-size", { w: Number(w) || 0, h: Number(h) || 0 }),
   /** 搬窗：dx/dy 是**屏幕坐标**里「从本次按下那下」算起的位移（设备无关像素，
    *  与 getPosition/setPosition 同一套单位）；inset 是宠物在窗里的位置（left/top/width/height），

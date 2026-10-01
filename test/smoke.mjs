@@ -606,6 +606,7 @@ const hostSrc = readFileSync(join(ROOT, "app", "host.cjs"), "utf8");
 const serverSrc = readFileSync(join(ROOT, "app", "server.cjs"), "utf8");
 const elecSrc = readFileSync(join(ROOT, "pi", "assets", "pet-electron.cjs"), "utf8");
 const petSrc = readFileSync(join(ROOT, "pi", "assets", "pet.js"), "utf8");
+const petCss = readFileSync(join(ROOT, "pi", "assets", "pet.css"), "utf8");
 const preloadSrc = readFileSync(join(ROOT, "pi", "assets", "preload.cjs"), "utf8");
 
 const chk = (await post(PORT, "/control", { action: "check-update" }, token)).body;
@@ -648,7 +649,47 @@ check("搬窗时把宠物夹在屏幕工作区内", /w\.x \+ w\.width - ir - 6/.
 check("搬完记住落点", /pet:window-drag-end/.test(elecSrc) && /endWinDrag\(\)/.test(petSrc));
 check("渲染进程报舞台尺寸（宠物 + 气泡）", /reportWindowSize\(\)/.test(petSrc) && /pet:window-size/.test(elecSrc));
 check("preload 三个新口都齐", /setWindowSize/.test(preloadSrc) && /moveWindow/.test(preloadSrc) && /endWindowDrag/.test(preloadSrc));
+check("舞台窗 = 宠物 + 四边留白（不是把动画放大）", /var STAGE_PAD_X = 80/.test(petSrc) && /var STAGE_PAD_TOP = 150/.test(petSrc) && /var STAGE_PAD_BOTTOM = 60/.test(petSrc) && /Math\.max\(MIN_STAGE_W, maxW \+ sidePad \* 2\)/.test(petSrc) && /Math\.max\(MIN_PET_SIZE, topOff \+ petH \+ botPad\)/.test(petSrc));
+// ⚠️ marginX/marginY 现在是**下限**（§9.21）：比留白小的抬到留白。头顶那截是气泡的舞台，
+//   不抬的话贴上边的宠物头顶只有 marginY（实测 100）= 三行字，窗底那截空白一点用没有。
+check("配置里的 marginX/marginY 当留白的下限（不够就抬上去）", /function topOffsetOf\(cfg\)[\s\S]{0,200}Math\.max\(m, STAGE_PAD_TOP\)/.test(petSrc) && /Math\.max\(mX, STAGE_PAD_X\)/.test(petSrc) && /Math\.max\(mY, STAGE_PAD_BOTTOM\)/.test(petSrc));
+// ⚠️ 窗只报**尺寸**、不动位置：宠物在窗里的偏移是常量，窗左上不动它就不跳。
+//   「按宠物贴住的角挪窗」实测是反的（高度差里只有一部分来自头顶偏移，会挪走宠物、窗挂到屏外）。
+check("改窗只改尺寸，左上角不动（宠物在屏幕上不跳）", /function applyBounds\(width, height\)/.test(elecSrc) && /applyBounds\(w, h\);/.test(elecSrc) && !/applyBounds\([\w, ]+, m\.anchor/.test(elecSrc) && !/cur\.h - height/.test(elecSrc));
+check("getContentBounds 两种形状都认（现代版返回对象，老版返回数组）", /function contentSize\(\)[\s\S]{0,320}cb\.width !== undefined \? cb\.width : cb\[2\]/.test(elecSrc) && !/w === cb\[2\]/.test(elecSrc));
+check("主进程也扣一道 380 的底", /const MIN_STAGE_W = 380/.test(elecSrc) && /num\(m\.w, STAGE\.w\), MIN_STAGE_W\)/.test(elecSrc));
+
 check("漫游/气泡仍按窗口尺寸算（舞台=窗口，逻辑没变）", /window\.innerWidth/.test(petSrc) && /function clampPos\(/.test(petSrc));
+
+// ------------------------------------------------ 气泡放得下（§9.21）
+// 症状：窗放不下自带气泡 —— 长文案只留三行（看着像「话没说完」），
+// 贴上边的宠物（corner: top-*）头顶只有 marginY，气泡顶出窗被切或被挤到宠物身上。
+// 病根两个：① 窗高是「宠物 + 260」的死公式，留白全落在窗底（贴上边的宠物头顶没多出一点）；
+// ② 气泡高度写死在 CSS 的「最多三行」，不量头顶真实空间。
+// 修法：窗 = 宠物 + 四边留白（配置里的 margin 当下限），气泡按头顶实测空间算行数与 max-height。
+console.log("\n气泡放得下（留白 + 按空间夹）…");
+check("气泡最宽 560、最多 6 行（原来 420/3 行，长文案被抽掉一半）", /max-width: min\(560px, calc\(100vw - 32px\)\)/.test(petCss) && /-webkit-line-clamp: 6/.test(petCss) && !/max-width: min\(420px/.test(petCss));
+check("气泡高度由 clampBubble 按头顶空间写（不再写死三行）", /var room = Math\.max\(24, Math\.round\(cr\.top - BUBBLE_CHROME_H\)\)/.test(petSrc) && /bubble\.style\.maxHeight = room \+ "px"/.test(petSrc) && /bubble\.style\.webkitLineClamp = String\(lines\)/.test(petSrc));
+check("行数按空间收（空间不够就少几行，而不是把话抽掉）", /Math\.min\(6, Math\.floor\(\(room - 14\) \/ BUBBLE_LINE_H\)\)/.test(petSrc) && /var BUBBLE_LINE_H = 18\.85/.test(petSrc));
+// 「说点什么」输入框在气泡**底部**（bubbleText 之后 append），封整个气泡会把框裁掉 → 只封文字
+check("输入态只封文字、给输入框留出 44px（不然框被裁掉没法打字）", /bubble\.classList\.contains\("with-input"\)[\s\S]{0,700}bubbleText\.style\.maxHeight = Math\.max\(20, room - BUBBLE_INPUT_H\)/.test(petSrc) && /var BUBBLE_INPUT_H = 44/.test(petSrc));
+// 气泡刚 show 出来那下量到的是旧布局：下一帧要再夹一次，否则右缘探出窗边被切（实测 38px）
+check("气泡下一帧再夹一次（刚 show 时量的是上一段文案的布局）", /requestAnimationFrame\(function \(\) \{ self\.clampBubble\(\); \}\)/.test(petSrc));
+check("窗一变就重新夹气泡（高度/宽度都变了）", /window\.addEventListener\("resize"[\s\S]{0,600}clampBubbles\(\)/.test(petSrc));
+
+// ------------------------------------------------ 留白必须点得穿（§9.21）
+// 症状：窗一大（大出来的那圈留白），下面别的软件就点不到了。
+// 实测：留白区点得穿（真光标 2/3，两点在留白穿到下面的窗、一点在宠物身上被形状吃掉）。
+// 但那是**现在**没坏；这里钉的是「会让它坏的那几条路」：
+//   ① 形状按「宠物 + 气泡」的包围盒裁，越界的矩形会被主进程 Math.max(0,·) 平移到窗角；
+//   ② 窗一变（启动时按配置长大、DPI/显示器变化）形状没跟着重裁；
+//   ③ 冻住的宠物不重报形状，布局变了形状还留在老地方。
+console.log("\n留白点得穿（形状 = 宠物 + 气泡，不含留白）…");
+check("上报前把矩形夹进窗内（否则主进程 Math.max(0,·) 会把它平移到窗角）", /box\.left = Math\.max\(0, box\.left\)/.test(petSrc) && /box\.right = Math\.min\(vw, box\.right\)/.test(petSrc) && /if \(!\(box\.right > box\.left\)[\s\S]{0,60}continue/.test(petSrc));
+check("主进程也按窗裁一遍（拿不到窗有多大就别瞎推）", /winW = Number\(cb && cb\.width\) \|\| 0/.test(elecSrc) && /Math\.min\(winW \|\| Infinity, x0 \+ Math\.ceil/.test(elecSrc) && /Math\.min\(winH \|\| Infinity, y0 \+ Math\.ceil/.test(elecSrc) && !/x: Math\.max\(0, Math\.round\(Number\(r && r\.x\)/.test(elecSrc));
+check("resize 必重报命中区（force：布局变了形状不能留在老地方）", /window\.addEventListener\("resize"[\s\S]{0,700}pushHitRegion\(true\)/.test(petSrc) && /if \(asleep && !force\) return/.test(petSrc));
+check("主进程窗一变就把形状重裁一遍（记着上一次的形状）", /win\.on\("resize",[\s\S]{0,120}resyncShape\(\)/.test(elecSrc) && /function resyncShape\(\)/.test(elecSrc) && /lastShape = list/.test(elecSrc));
+check("重裁不会被去重吃掉（shapeKey 清掉，下一次照裁）", /function resyncShape\(\)[\s\S]{0,300}shapeKey = ""/.test(elecSrc));
 
 // ------------------------------------------------ 拖不许抖、不许有阻力
 // 症状：拖宠物时「像被拽着走」（明显阻力）+ 抖。
@@ -675,7 +716,7 @@ check("落点自己记一份，不全信 getPosition()", /let stagePos = \{ x: M
 check("搬窗/记落点都不再直接用 getPosition()", !/win\.getPosition\(\)\[0\]/.test(elecSrc) && /windowDrag = currentPos\(\)/.test(elecSrc) && /writeStagePos\(home, currentPos\(\)\)/.test(elecSrc));
 check("喂给 setBounds 的坐标都过有限性检查", /function clampToDisplay[\s\S]{0,400}Number\.isFinite/.test(elecSrc) && /function applyBounds[\s\S]{0,700}Number\.isFinite\(bounds\.x\)/.test(elecSrc));
 check("摆完当场核对，没摆成就打日志", /窗没摆成（要 \$\{width\}x\$\{height\}/.test(elecSrc));
-check("move / resize 事件同步落点", /win\.on\("move", \(_e, b\) => rememberPos\(b\)\)/.test(elecSrc) && /win\.on\("resize", \(_e, b\) => rememberPos\(b\)\)/.test(elecSrc));
+check("move / resize 事件同步落点（resize 还要把形状重裁一遍）", /win\.on\("move", \(_e, b\) => rememberPos\(b\)\)/.test(elecSrc) && /win\.on\("resize", \(_e, b\) => \{[\s\S]{0,80}rememberPos\(b\);[\s\S]{0,80}resyncShape\(\);/.test(elecSrc));
 
 // ------------------------------------------------ 尺寸下限 380（再窄动画展示不全）
 // 用户口径：宽度低于 380，16:9 舞台上的角色两侧（手脚 / 拖拽反馈 / 两行气泡）就被切掉。
@@ -684,8 +725,6 @@ console.log("\n尺寸下限 380（动画别被切一半）…");
 check("pet.js 有 380 硬下限常量", /var MIN_PET_SIZE = 380/.test(petSrc) && /var MIN_STAGE_W = MIN_PET_SIZE \+ 80/.test(petSrc));
 check("配置里写小了抬到下限（不报错、不照用）", /if \(size < MIN_PET_SIZE\)[\s\S]{0,400}size = MIN_PET_SIZE/.test(petSrc));
 check("换尺寸档位也过下限", /var size = Math\.max\(MIN_PET_SIZE, SIZE_MAP\[sizeArg\]/.test(petSrc));
-check("舞台窗宽度下限 = 380 + 边距", /Math\.max\(MIN_STAGE_W, maxW \+ 80\)/.test(petSrc) && /maxW < MIN_PET_SIZE\) maxW = MIN_PET_SIZE/.test(petSrc));
-check("主进程也扣一道 380 的底", /const MIN_STAGE_W = 380/.test(elecSrc) && /num\(m\.w, STAGE\.w\), MIN_STAGE_W\)/.test(elecSrc));
 check("config.jsonc 里的宠物宽度不小于下限", (() => { const m = /"id": "main"[\s\S]{0,80}?"size":\s*(\d+)/.exec(readFileSync(join(ROOT, "assets", "config.jsonc"), "utf8")); return m && Number(m[1]) >= 380; })());
 
 // ---------------------------------------------------------------- 图库 = 素材目录
