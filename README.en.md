@@ -5,8 +5,8 @@
 <p align="center">
   <a href="https://www.npmjs.com/package/pi-dsh-pet"><img alt="npm version" src="https://img.shields.io/npm/v/pi-dsh-pet?label=npm&color=blue"></a>
   <a href="https://www.npmjs.com/package/pi-dsh-pet"><img alt="npm monthly downloads" src="https://img.shields.io/npm/dm/pi-dsh-pet?label=downloads&color=brightgreen"></a>
-  <a href="https://github.com/SOMWHY/pi-dsh-pet"><img alt="stars" src="https://img.shields.io/github/stars/SOMWHY/pi-dsh-pet?style=social"></a>
-  <a href="https://github.com/SOMWHY/pi-dsh-pet/blob/master/LICENSE"><img alt="license" src="https://img.shields.io/github/license/SOMWHY/pi-dsh-pet?color=orange"></a>
+  <a href="https://github.com/qq458249269/pi-dsh-pet"><img alt="stars" src="https://img.shields.io/github/stars/qq458249269/pi-dsh-pet?style=social"></a>
+  <a href="https://github.com/qq458249269/pi-dsh-pet/blob/main/LICENSE"><img alt="license" src="https://img.shields.io/github/license/qq458249269/pi-dsh-pet?color=orange"></a>
   <img alt="platform" src="https://img.shields.io/badge/platform-pi%20coding%20agent-8A2BE2">
   <img alt="assets" src="https://img.shields.io/badge/assets-91%20animations-ff69b4">
 </p>
