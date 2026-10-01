@@ -233,6 +233,38 @@ app.whenReady().then(() => {
     },
   });
 
+  // ---- 窗的落点：自己记一份，别信 win.getPosition() ----
+  //
+  // ⚠️ 踩过的坑（症状：宿主说「窗已连上」，屏幕上却什么都没有）：
+  //   渲染进程加载完立刻报 `pet:window-size`，而这一刻窗**还没真正映射**（loadURL 之后、
+  //   ready-to-show 之前），`win.getPosition()` 返回的是 **[NaN, NaN]**。把它塞进
+  //   setBounds，Chromium 就把整扇窗塌成 (0,0) 处一个 **32x39** 的残骸：
+  //     [pi-dsh-pet] 舞台窗 → 620x560 @ NaN,NaN
+  //     [pi-dsh-pet] hit-region 收到 [{"x":-296,"y":-176,…}]   ← 视口只剩 32x39，宠物跑到框外
+  //   窗还活着、WS 还连着、服务一切正常，只是**画不出来**（32x39 的视口装不下 400px 的宠物）。
+  // 所以：落点以「我们自己记的这份」为准，getPosition() 只在它是有限数的时候才采信；
+  // 所有喂给 setBounds/setPosition 的数都过一遍有限性检查。
+  let stagePos = { x: Math.round(start.x), y: Math.round(start.y) };
+  /** 记住落点（move/resize 事件带来的 bounds 是真整数，比 getPosition() 可靠）。 */
+  function rememberPos(pos) {
+    const x = Math.round(Number(pos && pos.x !== undefined ? pos.x : pos && pos[0]));
+    const y = Math.round(Number(pos && pos.y !== undefined ? pos.y : pos && pos[1]));
+    if (Number.isFinite(x) && Number.isFinite(y)) stagePos = { x, y };
+    return stagePos;
+  }
+  /** 读窗当前落点：getPosition() 读不到（NaN）就退回自己记的那份。 */
+  function currentPos() {
+    try {
+      const p = win.getPosition();
+      return rememberPos({ x: p && p[0], y: p && p[1] });
+    } catch {
+      return { x: stagePos.x, y: stagePos.y };
+    }
+  }
+  // 窗被别人搬了/改了大小（用户拖、多屏变化、系统贴靠）也同步过来
+  win.on("move", (_e, b) => rememberPos(b));
+  win.on("resize", (_e, b) => rememberPos(b));
+
   // ---- 命中区：把整窗的鼠标命中裁到宠物身上 ----
   const SHAPE_OK = typeof win.setShape === "function" && process.env.PI_PET_NO_SHAPE !== "1";
   let shapeBroken = false;
@@ -343,26 +375,81 @@ app.whenReady().then(() => {
   // 这样单帧填充率小一个数量级，DWM 的合成压力也跟着小一个数量级。
   const num = (v, d) => (Number.isFinite(Number(v)) ? Number(v) : d);
 
-  /** 把窗夹在某块屏的工作区里（至少露出 minVis）。pos 是期望的左上角。 */
+  /** 把窗夹在某块屏的工作区里（至少露出 minVis）。pos 是期望的左上角。
+   *  ⚠️ NaN 一律当「不知道」处理：Math.min/max 遇到 NaN 会把整条式子变成 NaN，
+   *     而 NaN 坐标喂给 setBounds 就是上面那个 32x39 残骸窗。 */
   function clampToDisplay(pos, minVis) {
-    const d = screen.getDisplayNearestPoint({ x: pos.x + 40, y: pos.y + 40 });
+    const p = {
+      x: Number.isFinite(Number(pos && pos.x)) ? Number(pos.x) : stagePos.x,
+      y: Number.isFinite(Number(pos && pos.y)) ? Number(pos.y) : stagePos.y,
+    };
+    const vis = {
+      w: Math.max(1, Math.min(Number(minVis && minVis.w) || STAGE.w, 6000)),
+      h: Math.max(1, Math.min(Number(minVis && minVis.h) || STAGE.h, 6000)),
+    };
+    const d = screen.getDisplayNearestPoint({ x: p.x + 40, y: p.y + 40 });
     const w = d.workArea;
     return {
-      x: Math.round(Math.min(Math.max(pos.x, w.x - minVis.w + 60), w.x + w.width - minVis.w)),
-      y: Math.round(Math.min(Math.max(pos.y, w.y - minVis.h + 60), w.y + w.height - minVis.h)),
+      x: Math.round(Math.min(Math.max(p.x, w.x - vis.w + 60), w.x + w.width - vis.w)),
+      y: Math.round(Math.min(Math.max(p.y, w.y - vis.h + 60), w.y + w.height - vis.h)),
     };
   }
 
+  /**
+   * 真的把窗摆到某个位置/尺寸，并在**当场**核对一次。
+   *
+   * 为什么要核对：上面那个坑的可怕之处是 setBounds **不报错** —— NaN 坐标被静默接受，
+   * 窗塌成 32x39，宿主/WS/菜单全都正常，只有屏幕上没有宠物。所以摆完必须量一下：
+   * 量出来不是我们要的（差了 1px 以上，或者压根量不到有限数），就再摆一次并打日志。
+   * 只重试一次，绝不循环。
+   */
+  function applyBounds(width, height) {
+    const pos = clampToDisplay(currentPos(), { w: width, h: height });
+    const bounds = { x: pos.x, y: pos.y, width, height };
+    if (!Number.isFinite(bounds.x) || !Number.isFinite(bounds.y)) {
+      console.error(`[pi-dsh-pet] 落点算不出来（${bounds.x},${bounds.y}），放弃改窗`);
+      return false;
+    }
+    try {
+      win.setBounds(bounds);
+      rememberPos(pos);
+    } catch (err) {
+      console.error("[pi-dsh-pet] setBounds 失败：", err && err.message);
+      return false;
+    }
+    const got = win.getBounds();
+    const ok =
+      Number.isFinite(got && got.width) && Math.abs(got.width - width) <= 1 && Math.abs(got.height - height) <= 1;
+    if (ok) {
+      if (process.env.PI_PET_DEBUG === "1") console.error(`[pi-dsh-pet] 舞台窗 → ${width}x${height} @ ${pos.x},${pos.y}`);
+      return true;
+    }
+    // 摆完不是我们要的样子（多半被什么东西改回去了：贴靠、多屏变化、或上面那种静默塌陷）
+    console.error(
+      `[pi-dsh-pet] 窗没摆成（要 ${width}x${height}，实际 ${got && got.width}x${got && got.height} @ ${got && got.x},${got && got.y}）→ 重摆一次`,
+    );
+    try {
+      win.setBounds({ x: pos.x, y: pos.y, width, height });
+    } catch {
+      /* 重试也失败就算了，别把主进程搞崩 */
+    }
+    return false;
+  }
+
   // 渲染进程报上来的舞台尺寸（它知道配置里最大的宠物 + 气泡要多少地方）
+  //
+  // 宽度下限 380：小于它动画就展示不全（见 pet.js 的 MIN_PET_SIZE）。
+  // 渲染进程那边已经把这个下限算进去了（MIN_STAGE_W），这里再扣一道底，
+  // 免得哪次配置写小了、或者别的客户端直接报一个 100x100 上来，把窗抽成一条缝。
+  const MIN_STAGE_W = 380;
   ipcMain.on("pet:window-size", (_event, m = {}) => {
     if (win.isDestroyed()) return;
-    const w = Math.round(Math.min(Math.max(num(m.w, STAGE.w), 200), 6000));
+    const w = Math.round(Math.min(Math.max(num(m.w, STAGE.w), MIN_STAGE_W), 6000));
     const h = Math.round(Math.min(Math.max(num(m.h, STAGE.h), 200), 6000));
-    if (w === win.getContentBounds()[2] && h === win.getContentBounds()[3]) return;
+    const cb = win.getContentBounds();
+    if (Number.isFinite(cb && cb[2]) && w === cb[2] && h === cb[3]) return;
     // 只改右/下边界（左上不动）：宠物在窗里的偏移不变 → 它在屏幕上的位置也不变
-    const pos = clampToDisplay(win.getPosition(), { w, h });
-    win.setBounds({ x: pos.x, y: pos.y, width: w, height: h });
-    if (process.env.PI_PET_DEBUG === "1") console.error(`[pi-dsh-pet] 舞台窗 → ${w}x${h} @ ${pos.x},${pos.y}`);
+    applyBounds(w, h);
   });
 
   // 拖宠物 = 搬窗。dx/dy 是**从本次按下那下算起**的位移（不是每帧增量）：
@@ -374,8 +461,8 @@ app.whenReady().then(() => {
     const dy = num(m.dy, 0);
     if (!dx && !dy) return;
     if (!windowDrag) {
-      const p = win.getPosition();
-      windowDrag = { x: p[0], y: p[1] };
+      // getPosition() 在窗没映射时会给 [NaN, NaN]（见上面 stagePos 的注释）→ 用自己记的
+      windowDrag = currentPos();
     }
     // 宠物在窗里的位置（渲染进程量好的）：把它夹在屏幕工作区里，别拖到屏幕外找不着
     const il = num(m.left, 0);
@@ -389,7 +476,12 @@ app.whenReady().then(() => {
       x: Math.round(Math.min(Math.max(want.x, w.x - il + 6), w.x + w.width - ir - 6)),
       y: Math.round(Math.min(Math.max(want.y, w.y - it + 6), w.y + w.height - ib - 6)),
     };
+    // 已经被夹在屏幕边上时 want 还在变、pos 却不动：这种「搬不动」的 move 全部丢掉。
+    // 不丢也不会错，但是白白的 SetWindowPos + DWM 重合成，而且在边上会跟系统的
+    // 窗口动画抢位置 —— 看上去就是拖着宠物在屏幕边上「哆嗦」。
+    if (pos.x === stagePos.x && pos.y === stagePos.y) return;
     win.setPosition(pos.x, pos.y);
+    rememberPos(pos);
   });
 
   // 松手：记下窗的落点，下次启动还在这儿
@@ -399,7 +491,7 @@ app.whenReady().then(() => {
       return;
     }
     windowDrag = null;
-    writeStagePos(home, { x: win.getPosition()[0], y: win.getPosition()[1] });
+    writeStagePos(home, currentPos());
   });
 
   // 加载完 5s 还没拿到包围盒 = 渲染进程没起来（配置拉失败、pet.js 报错…）。

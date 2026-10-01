@@ -189,8 +189,10 @@ console.log("\n待机动画节奏（不切一半 / 待机别太短）…");
 	check("停留期间循环续播当前片（不换 src）", /this\.startDwell = function[\s\S]{0,600}front\.loop = true/.test(petJs));
 	check("用户上手就收摊（点击/拖拽/状态帧都停 dwell）", (petJs.match(/stopDwell\(\)/g) || []).length >= 4);
 	// ⑤ 节奏参数可配，且两个默认值都写在 config.jsonc 里
-	check("timing 段带 minPlayMs / idleDwellMs", /"minPlayMs"\s*:\s*2600/.test(cfg) && /"idleDwellMs"\s*:\s*6000/.test(cfg));
-check("timing 缺省/写错都有兜底", /function readTiming\(raw\)/.test(petJs) && /TIMING_DEFAULT = \{ minPlayMs: 2600, idleDwellMs: 6000, idleSleepMs: \d+ \}/.test(petJs));
+	//    ⚠️ 默认值 = 用户口径的「每段动画播放时间延长 5 秒」：2.6s+5s / 6s+5s / 45s+5s。
+	//    这里把三个数都钉住：改小回去就等于「动画又被切一半」，那就是回归。
+	check("timing 段带 minPlayMs / idleDwellMs（+5s 后的值）", /"minPlayMs"\s*:\s*7600/.test(cfg) && /"idleDwellMs"\s*:\s*11000/.test(cfg));
+	check("timing 缺省/写错都有兜底", /function readTiming\(raw\)/.test(petJs) && /TIMING_DEFAULT = \{ minPlayMs: 7600, idleDwellMs: 11000, idleSleepMs: \d+ \}/.test(petJs));
 	check("timing 段带 idleSleepMs（空闲多久冻住）", /"idleSleepMs"\s*:\s*\d+/.test(cfg) && /num\("idleSleepMs"/.test(petJs));
 }
 
@@ -616,12 +618,50 @@ check("do-update 不会用空串盖掉刚查到的版本/提交", /if \(!s\[k\]\
 console.log("\n舞台窗（只包住宠物，不是全屏）…");
 check("主进程不再按屏幕大小开窗", !/workAreaSize/.test(elecSrc));
 check("窗落点落在工作区里（默认右下角 + 记住上次）", /workArea/.test(elecSrc) && /stage\.json/.test(elecSrc));
-check("拖宠物 = 搬窗（位移从按下那下算起）", /moveWin\(e\.clientX - dragState\.sx/.test(petSrc) && /windowDrag\.x \+ dx/.test(elecSrc));
+check("拖宠物 = 搬窗（位移从按下那下算起）", /queueWinMove\(e\.clientX - dragState\.sx/.test(petSrc) && /windowDrag\.x \+ dx/.test(elecSrc));
 check("搬窗时把宠物夹在屏幕工作区内", /w\.x \+ w\.width - ir - 6/.test(elecSrc));
 check("搬完记住落点", /pet:window-drag-end/.test(elecSrc) && /endWinDrag\(\)/.test(petSrc));
 check("渲染进程报舞台尺寸（宠物 + 气泡）", /reportWindowSize\(\)/.test(petSrc) && /pet:window-size/.test(elecSrc));
 check("preload 三个新口都齐", /setWindowSize/.test(preloadSrc) && /moveWindow/.test(preloadSrc) && /endWindowDrag/.test(preloadSrc));
 check("漫游/气泡仍按窗口尺寸算（舞台=窗口，逻辑没变）", /window\.innerWidth/.test(petSrc) && /function clampPos\(/.test(petSrc));
+
+// ------------------------------------------------ 拖不许抖、不许有阻力
+// 症状：拖宠物时「像被拽着走」（明显阻力）+ 抖。
+// 病根：pointermove 的频率是**鼠标轮询率**（125~1000Hz），每一次都 ipc → setPosition
+// → 一次 SetWindowPos + 一次 DWM 重合成。窗追不上光标就是阻力，补帧参差就是抖。
+// 修法：渲染进程用 rAF **一帧最多搬一次**（只留最新位置），松手时把最后一帧落地；
+// 主进程把「已经被屏幕边夹住、其实没动」的 move 丢掉。
+console.log("\n拖拽不许抖 / 不许有阻力…");
+check("搬窗走 rAF 合帧（不是每个 pointermove 都搬）", /function queueWinMove[\s\S]{0,320}requestAnimationFrame\(flushWinMove\)/.test(petSrc));
+check("合帧只留最新位置（旧的丢掉，不会排队追）", /movePending = \{ dx: dx, dy: dy, inset: inset \}[\s\S]{0,200}if \(!moveRaf\) moveRaf/.test(petSrc));
+check("位移仍然从按下那下算起（合帧不累积误差）", /queueWinMove\(e\.clientX - dragState\.sx, e\.clientY - dragState\.sy/.test(petSrc));
+check("松手时把最后一帧落地", /settleWinMove\(\)[\s\S]{0,120}endWinDrag\(\)/.test(petSrc));
+check("主进程丢掉「其实没动」的搬窗", /pos\.x === stagePos\.x && pos\.y === stagePos\.y\) return/.test(elecSrc));
+
+// ------------------------------------------------ 窗不许塌成一条缝（32x39 残骸窗）
+// 症状：宿主/WS/菜单一切正常，屏幕上就是没有宠物。
+// 病根：win.getPosition() 在窗还没真正映射时（loadURL 之后、ready-to-show 之前）
+// 返回 [NaN, NaN]；把它塞进 setBounds，Chromium 就把整扇窗塌成 (0,0) 处 32x39 的残骸
+// ——窗还活着，只是 32x39 的视口装不下 400px 的宠物。
+// 修法：落点自己记一份（stagePos），getPosition() 只在是有限数的时候才采信；
+// 摆完当场量一次，没摆成要看得见。
+console.log("\n窗不许塌成残骸（NaN 落点 / 静默 setBounds）…");
+check("落点自己记一份，不全信 getPosition()", /let stagePos = \{ x: Math\.round\(start\.x\), y: Math\.round\(start\.y\) \}/.test(elecSrc) && /function currentPos\(\)[\s\S]{0,400}return \{ x: stagePos\.x, y: stagePos\.y \}/.test(elecSrc) && /function rememberPos\(pos\)[\s\S]{0,300}Number\.isFinite\(x\)/.test(elecSrc));
+check("搬窗/记落点都不再直接用 getPosition()", !/win\.getPosition\(\)\[0\]/.test(elecSrc) && /windowDrag = currentPos\(\)/.test(elecSrc) && /writeStagePos\(home, currentPos\(\)\)/.test(elecSrc));
+check("喂给 setBounds 的坐标都过有限性检查", /function clampToDisplay[\s\S]{0,400}Number\.isFinite/.test(elecSrc) && /function applyBounds[\s\S]{0,700}Number\.isFinite\(bounds\.x\)/.test(elecSrc));
+check("摆完当场核对，没摆成就打日志", /窗没摆成（要 \$\{width\}x\$\{height\}/.test(elecSrc));
+check("move / resize 事件同步落点", /win\.on\("move", \(_e, b\) => rememberPos\(b\)\)/.test(elecSrc) && /win\.on\("resize", \(_e, b\) => rememberPos\(b\)\)/.test(elecSrc));
+
+// ------------------------------------------------ 尺寸下限 380（再窄动画展示不全）
+// 用户口径：宽度低于 380，16:9 舞台上的角色两侧（手脚 / 拖拽反馈 / 两行气泡）就被切掉。
+// 所以 380 是硬下限，配置、档位、舞台窗、主进程兜底四处都得有。
+console.log("\n尺寸下限 380（动画别被切一半）…");
+check("pet.js 有 380 硬下限常量", /var MIN_PET_SIZE = 380/.test(petSrc) && /var MIN_STAGE_W = MIN_PET_SIZE \+ 80/.test(petSrc));
+check("配置里写小了抬到下限（不报错、不照用）", /if \(size < MIN_PET_SIZE\)[\s\S]{0,400}size = MIN_PET_SIZE/.test(petSrc));
+check("换尺寸档位也过下限", /var size = Math\.max\(MIN_PET_SIZE, SIZE_MAP\[sizeArg\]/.test(petSrc));
+check("舞台窗宽度下限 = 380 + 边距", /Math\.max\(MIN_STAGE_W, maxW \+ 80\)/.test(petSrc) && /maxW < MIN_PET_SIZE\) maxW = MIN_PET_SIZE/.test(petSrc));
+check("主进程也扣一道 380 的底", /const MIN_STAGE_W = 380/.test(elecSrc) && /num\(m\.w, STAGE\.w\), MIN_STAGE_W\)/.test(elecSrc));
+check("config.jsonc 里的宠物宽度不小于下限", (() => { const m = /"id": "main"[\s\S]{0,80}?"size":\s*(\d+)/.exec(readFileSync(join(ROOT, "assets", "config.jsonc"), "utf8")); return m && Number(m[1]) >= 380; })());
 
 // ---------------------------------------------------------------- 图库 = 素材目录
 // README 开头写着「全部 91 个动画」，那就让它真的一一对得上：漏一张是静默的

@@ -18,6 +18,20 @@
   var HIT_BOX = { x0: 200, y0: 50, x1: 440, y1: 335 };
   var DRAG_THRESHOLD = 5;
 
+  /**
+   * 宠物（动画）的**最小宽度**，px。
+   *
+   * 用户口径：宽度低于 380 就「动画展示不全」——16:9 的舞台上角色只占中间一小块，
+   * 窗/舞台一窄，角色两侧（手脚、拖拽反馈、两行气泡）就被切掉。
+   * 所以这个数是**硬下限**，三处都得用它：
+   *   ① 配置校验（老配置 / 手改 JSON 写小了 → 抬到下限，不报错）
+   *   ② SIZE_MAP / add_pet（换尺寸档位）
+   *   ③ reportWindowSize（舞台窗宽度下限，= 380 + 边距）
+   */
+  var MIN_PET_SIZE = 380;
+  /** 舞台窗的最小宽度：下限 380 + 左右各 40 的余量（气泡最宽 420，得放得下）。 */
+  var MIN_STAGE_W = MIN_PET_SIZE + 80;
+
   // ========================================================================
   // 2. Config helpers (from config.ts)
   // ========================================================================
@@ -41,8 +55,12 @@
    * 这三个数是同一件事的三头：minPlayMs 治「动画没演完就被切一半」，
    * idleDwellMs 治「待机太短，一口气连着演、看着一直忙个不停」，
    * idleSleepMs 治「一直在动，把别的窗口的渲染预算都抢走了」（见 4.7）。
+   *
+   * ⚠️ 用户要求：**每段动画的播放时间统一延长 5 秒**，免得看着总在「切来切去」不停歇。
+   *   于是三个默认数都在原基础上 +5000ms（2.6s→7.6s / 6s→11s / 45s→50s）。
+   *   写进 config.jsonc 的 timing 优先（配置里没写才用这几个默认值）。
    */
-  var TIMING_DEFAULT = { minPlayMs: 2600, idleDwellMs: 6000, idleSleepMs: 45000 };
+  var TIMING_DEFAULT = { minPlayMs: 7600, idleDwellMs: 11000, idleSleepMs: 50000 };
 
   function readTiming(raw) {
     var t = raw && typeof raw === "object" ? raw : {};
@@ -85,6 +103,15 @@
       if (!id || seen[id]) throw new Error("pet id invalid or duplicate: " + id);
       var size = Number(p.size);
       if (!isFinite(size) || size <= 0) throw new Error("pet " + id + " size invalid");
+      // 小于下限的（老配置、手改 JSON）**抬到下限**而不是照用：宽度不够就展示不全。
+      if (size < MIN_PET_SIZE) {
+        try {
+          console.warn("[pi-dsh-pet] pet " + id + " 的 size " + size + " 小于下限 " + MIN_PET_SIZE + "，按 " + MIN_PET_SIZE + " 算");
+        } catch (e) {
+          /* 浏览器里没 console 就算了 */
+        }
+        size = MIN_PET_SIZE;
+      }
       var corner = (p.position && p.position.corner) || "";
       if (!CORNER_SET[corner]) throw new Error("pet " + id + " corner invalid");
       var marginX = Number(p.position && p.position.marginX);
@@ -1165,6 +1192,38 @@
       }
     };
 
+    // ---- 拖拽搬窗：一帧最多搬一次 ----
+    //
+    // 为什么必须合帧：`pointermove` 的频率是**鼠标轮询率**（125Hz 常见，500/1000Hz 的
+    // 鼠标更常见），不是显示器刷新率。每来一次就 ipc → 主进程 `setPosition` → Windows
+    // 一次 SetWindowPos → DWM 为这扇透明置顶窗重合成一次。1000Hz 时就是每秒 1000 次搬窗：
+    //   ① 窗追不上光标 = 用户说的「**有明显阻力**」（宠物像被拽着走）；
+    //   ② 补上来的帧参差不齐 = 「**抖**」。
+    // 修法：只留**最新**的那一个位置，用 rAF 一帧发一次（显示器刷新率 = 最高上限，
+    // 60Hz 屏就是 60 次/s，而且每次都跟 VSync 对齐，天然不抖）。
+    // ⚠️ 位移仍然是「从按下那下算起」的（不是每帧增量），所以合帧不会累积误差。
+    var moveRaf = 0;
+    var movePending = null;
+    function flushWinMove() {
+      moveRaf = 0;
+      var m = movePending;
+      movePending = null;
+      if (m && moveWin) moveWin(m.dx, m.dy, m.inset);
+    }
+    function queueWinMove(dx, dy, inset) {
+      movePending = { dx: dx, dy: dy, inset: inset };
+      if (!moveRaf) moveRaf = requestAnimationFrame(flushWinMove);
+    }
+    /** 松手/取消时：把最后一帧必须落地（否则窗会停在上一位置，看着像「拽不动」）。 */
+    function settleWinMove() {
+      if (moveRaf) {
+        cancelAnimationFrame(moveRaf);
+        moveRaf = 0;
+      }
+      flushWinMove();
+      movePending = null;
+    }
+
     // ---- Pointer events (click vs drag) ----
     hit.addEventListener("pointerdown", function (e) {
       e.currentTarget.classList.add("dragging");
@@ -1207,7 +1266,7 @@
       // ⚠️ 必须传「从按下那下算起的位移」而不是每帧增量：窗被夹在屏幕边时，
       //    增量会让宠物越拖越落后于光标，松手才啪地弹回去。
       if (moveWin) {
-        moveWin(e.clientX - dragState.sx, e.clientY - dragState.sy, dragState.inset);
+        queueWinMove(e.clientX - dragState.sx, e.clientY - dragState.sy, dragState.inset);
         // 命中区不用重报：形状是窗口坐标，窗一搬它跟着走，矩形没变。
         return;
       }
@@ -1225,6 +1284,7 @@
       var wasDragging = dragState.dragging;
       dragState.active = false;
       dragState.dragging = false;
+      settleWinMove(); // 最后一帧落地，再让主进程记落点
       if (endWinDrag) endWinDrag(); // 搬完窗：让主进程记住这扇窗落在哪儿
       e.currentTarget.classList.remove("dragging");
       // Restore passthrough if mouse has already left the hitbox
@@ -1446,8 +1506,10 @@
       if (Number(cfg.size) > maxW) maxW = Number(cfg.size);
     });
     if (!maxW) maxW = 400;
+    if (maxW < MIN_PET_SIZE) maxW = MIN_PET_SIZE;
     try {
-      api.setWindowSize(Math.max(620, maxW + 80), Math.max(560, Math.round((maxW * 9) / 16) + 260));
+      // 宽度下限 = MIN_STAGE_W（380 + 边距）：宁可窗大一点，也不能把动画切掉半只
+      api.setWindowSize(Math.max(MIN_STAGE_W, maxW + 80), Math.max(560, Math.round((maxW * 9) / 16) + 260));
     } catch (e) {
       /* 主进程还没 ready：那就用它的默认尺寸，窗也不会因此坏掉 */
     }
@@ -1456,7 +1518,7 @@
 /** Maps size arg to px width.
       ⚠️ 最小档别再往小了：气泡是 16:9 舞台头顶的 max-content 块（最宽 420px），舞台太窄时
       气泡和动画一起被挤到屏幕边上，看着像「被裁了一半」。380 起。 */
-  var SIZE_MAP = { small: 380, normal: 400, large: 540 };
+var SIZE_MAP = { small: 380, normal: 400, large: 540 };
 
   /** Create a new pet at a random corner (called on /pet when window already running) */
   function addPet(sizeArg) {
@@ -1465,7 +1527,7 @@
     addPetSeq++;
     var corners = ["top-left", "top-right", "bottom-left", "bottom-right"];
     var corner = corners[Math.floor(Math.random() * corners.length)];
-    var size = SIZE_MAP[sizeArg] || SIZE_MAP.normal;
+    var size = Math.max(MIN_PET_SIZE, SIZE_MAP[sizeArg] || SIZE_MAP.normal);
     var cfg = {
       id: "auto-" + addPetSeq,
       size: size,
