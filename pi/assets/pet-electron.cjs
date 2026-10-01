@@ -273,12 +273,7 @@ app.whenReady().then(() => {
   ipcMain.on("pet:close", () => app.quit());
 
   // 渲染进程：“说点什么…” → 把输入框叫到宠物头上（输入框长在气泡里）
-  ipcMain.on("pet:say-ask", () => {
-    // ⚠️ 顺序要紧：先让窗可聚焦，再叫渲染进程 focus()。反过来 focus 就落在一扇
-    // focusable:false 的窗上，DOM 焦点会被系统丢掉（打不进字、Esc 也关不掉）。
-    setInputMode(true);
-    if (webContentsSend) webContentsSend("pet:say-ask");
-  });
+  ipcMain.on("pet:say-ask", () => askSay());
 
   // 渲染进程：输入框收工（Enter / Esc / 点别处 / 失焦）→ 把键盘焦点还给下面的窗口
   ipcMain.on("pet:say-input-end", () => setInputMode(false));
@@ -326,13 +321,7 @@ app.whenReady().then(() => {
       }
     };
 
-    const SIZES = [
-      { id: "small", label: "小号 260px" },
-      { id: "normal", label: "正常 400px" },
-      { id: "large", label: "大号 540px" },
-    ];
-
-    const stateLabel = info.state || "待机（随机动画）";
+const stateLabel = info.state || "待机（随机动画）";
     const menu = Menu.buildFromTemplate([
       { label: `当前：${stateLabel}`, enabled: false },
       {
@@ -349,20 +338,16 @@ app.whenReady().then(() => {
       },
       {
         label: "说点什么…",
-        click: () => {
-          if (webContentsSend) webContentsSend("pet:say-ask");
-        },
+        // ⚠️ 必须走 askSay（开输入模式 + 激活窗），不能自己 send：窗平时 focusable:false，
+        //    只 send 的话渲染进程那句 input.focus() 会被系统丢掉 —— 框出来了却打不进字，
+        //    而关框只有 Enter / Esc 两条路（都走键盘），于是框还永远关不掉。
+        click: () => askSay(),
       },
-      { label: "换一只（重启窗）", click: () => run("restart-window") },
-      {
-        label: "尺寸（换窗后生效）",
-        submenu: SIZES.map((s) => ({
-          label: s.label,
-          type: "radio",
-          checked: currentSize === s.id,
-          click: () => run("set-ctrl", { size: s.id, restartNonce: (Number(ctrl.restartNonce) || 0) + 1 }),
-        })),
-      },
+{ label: "换一只（重启窗）", click: () => run("restart-window") },
+      // ⚠️ 这里原来还有一档「尺寸（换窗后生效）」子菜单（小/中/大），已按用户意见拿掉：
+      //    换尺寸要重启整扇窗，代价远大于收益，而且最小档还得为了气泡不被裁而顶着下限。
+      //    想换尺寸仍然可以走 API：/control {action:"set-ctrl", size, restartNonce}
+      //    （或 pi 里的 `/pet small|large`）。
       { label: "添加一只（maxPets>1 时可用）", enabled: maxPets > 1, click: () => run("add-pet", { size: currentSize }) },
       { type: "separator" },
       { label: "隐藏宠物（服务保留）", enabled: ctrl.window !== false, click: () => run("hide-window") },
@@ -403,6 +388,13 @@ app.whenReady().then(() => {
   let inputMode = false;
   let inputModeAt = 0;
 
+  /** 真的把这扇窗激活（可聚焦 ≠ 已激活，DOM 焦点要后者才留得住）。 */
+  function focusWindow() {
+    if (!inputMode || win.isDestroyed()) return;
+    try { win.focus(); } catch { /* ignore */ }
+    try { win.webContents.focus(); } catch { /* ignore */ }
+  }
+
   function setInputMode(on) {
     if (inputMode === on || win.isDestroyed()) return;
     inputMode = on;
@@ -416,10 +408,24 @@ app.whenReady().then(() => {
     if (!on) {
       // 先 blur 再撤可聚焦：不可聚焦的窗交不出焦点，下面那个窗口才拿得回去
       try { win.blur(); } catch { /* ignore */ }
-    } else {
-      // 光「可聚焦」还不够，得真的把它激活，DOM 焦点才留得住
-      try { win.focus(); } catch { /* ignore */ }
+      return;
     }
+    // 从原生菜单里叫出来时，菜单刚收起、系统还没把激活交回来，第一下 focus() 常被吞掉。
+    // 补几遍（inputMode 一关，focusWindow 自己就停了）。
+    focusWindow();
+    [50, 160, 320].forEach((ms) => setTimeout(focusWindow, ms));
+  }
+
+  /**
+   * 叫出「说点什么…」输入框 —— **所有入口都只能走这里**（右键菜单项、渲染进程请求）。
+   *
+   * 漏一步就复现「框出来了却打不进字」：窗平时 focusable:false（点宠物不抢你正在打字的
+   * 窗口），不先开输入模式，渲染进程那句 input.focus() 会被系统直接丢掉。
+   */
+  function askSay() {
+    setInputMode(true);
+    focusWindow();
+    if (webContentsSend) webContentsSend("pet:say-ask");
   }
 
   // 兜底：输入框开着的时候焦点跑掉了（用户点了别的程序）→ 叫渲染进程把框收掉。

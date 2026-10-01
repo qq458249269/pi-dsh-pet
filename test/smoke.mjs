@@ -133,8 +133,12 @@ const { launchCwd } = await import(pathToFileURL(join(ROOT, "app", "window.cjs")
 // 所以把三条容易改回去的地方钉在这儿（都是实测踩过的坑，不是洁癖）：
 console.log("\n头顶气泡（截断 / 不跟随）…");
 {
-	const petJs = readFileSync(join(ROOT, "pi", "assets", "pet.js"), "utf8");
+const petJs = readFileSync(join(ROOT, "pi", "assets", "pet.js"), "utf8");
 	const petCss = readFileSync(join(ROOT, "pi", "assets", "pet.css"), "utf8");
+	const extTs = readFileSync(join(ROOT, "pi", "extensions", "index.ts"), "utf8");
+/** 从两处源码里抠出 {small,normal,large} 的数字（逗号连起来的字符串，便于直接比） */
+	const sizeOf = (src, re) => (src.match(re) || []).slice(1).join(",");
+	const MIN_SIZE = Number(sizeOf(petJs, /SIZE_MAP = \{ small: (\d+)/));
 	// ① 收缩盒 + left:50% 时可用宽度只有宠物宽度的一半（231px），写在 max-width 上的
 	//    320/420 根本够不着，长文案就在半路被省略号切掉 —— 必须显式 width: max-content
 	check("气泡显式 width:max-content（否则 max-width 够不着）", /width:\s*max-content/.test(petCss));
@@ -148,8 +152,12 @@ console.log("\n头顶气泡（截断 / 不跟随）…");
 	check("算命中区前先夹气泡", /clampBubbles\(\);[\s\S]{0,200}collectHitRects\(\)/.test(petJs));
 	// ④ 宠物本身也不能拖到屏幕外（半只在屏外时头顶气泡必然被裁）
 	check("拖拽位置有夹取", /clampPos\(e\.clientX - dragState\.offX/.test(petJs));
-	// ⑤ showBubble 写文案不能碰 bubble.textContent：会把输入框节点删掉（「说点什么…」出不来）
+// ⑤ showBubble 写文案不能碰 bubble.textContent：会把输入框节点删掉（「说点什么…」出不来）
 	check("文案走独立节点，不动 bubble.textContent", !/^\s*bubble\.textContent\s*=/m.test(petJs) && /bubbleText\.textContent = t/.test(petJs));
+	// ⑥ 最小档宽度：舞台太窄时头顶气泡（最宽 420px）会被挤到屏幕边上，看着像被裁了一半。
+	//    而且 SIZE_MAP 有**两份**（pet.js 与 pi 扩展的补全用），改一处不改另一处就前后不一。
+check("最小档 ≥ 380px（气泡不被挤到屏外）", MIN_SIZE >= 380, `实际 ${MIN_SIZE}px`);
+check("两处 SIZE_MAP 一致（pet.js ↔ pi 扩展补全）", sizeOf(petJs, /SIZE_MAP = \{ small: (\d+), normal: (\d+), large: (\d+)/) === sizeOf(extTs, /SIZE_MAP: Record<string, number> = \{ small: (\d+), normal: (\d+), large: (\d+)/));
 }
 
 // ------------------------------------------------ 待机动画的节奏（别切一半 / 别太短）
@@ -193,14 +201,20 @@ console.log("\n「说点什么…」输入框（焦点 / 关闭 / 鉴权）…")
 	const preloadJs = readFileSync(join(ROOT, "pi", "assets", "preload.cjs"), "utf8");
 	const windowCjs = readFileSync(join(ROOT, "app", "window.cjs"), "utf8");
 	// ① 叫输入框时先把窗切成可聚焦（顺序反了 focus 会被系统丢掉）
-	check("叫输入框前先开输入模式（可聚焦）", /ipcMain\.on\("pet:say-ask",[\s\S]{0,200}setInputMode\(true\)/.test(mainJs));
+	//    ⚠️ 两条入口都得算上：右键菜单项（唯一的真实入口）和渲染进程请求。
+	//    以前只钉了 ipc 那条，菜单那条绕过 setInputMode 直接 send → 框出来却打不进字。
+	check("叫输入框统一走 askSay（先开输入模式再叫渲染进程）", /function askSay\(\)[\s\S]{0,300}setInputMode\(true\)[\s\S]{0,300}webContentsSend\("pet:say-ask"\)/.test(mainJs));
+	check("右键菜单的「说点什么…」也走 askSay", /label: "说点什么…"[\s\S]{0,600}click: \(\) => askSay\(\)/.test(mainJs));
+	check("渲染进程请求也走 askSay", /ipcMain\.on\("pet:say-ask", \(\) => askSay\(\)\)/.test(mainJs));
 	check("输入模式用 setFocusable 切（不是构造时的 focusable:false）", /win\.setFocusable\(on\)/.test(mainJs));
+	check("开输入模式后要补几遍 focus（菜单收起时第一下常被吞）", /focusWindow\(\);[\s\S]{0,80}\[\s*50,\s*160,\s*320\s*\]\.forEach/.test(mainJs));
 	// ② 关框后要把焦点还给下面的窗口，否则宠物一直顶着别人的输入焦点
 	check("收工信号把输入模式关掉", /ipcMain\.on\("pet:say-input-end", \(\) => setInputMode\(false\)\)/.test(mainJs));
 	check("关输入模式时先 blur", /if \(!on\) \{[\s\S]{0,120}win\.blur\(\)/.test(mainJs));
 	// ③ 关框的所有路径都要走同一个 closeInput（Enter / Esc / 点宠物 / 失焦 / 主进程强收）
 	check("关框只有一个入口 closeInput", /function closeInput\(\)/.test(petJs) && /self\.closeInput = closeInput/.test(petJs));
 	check("Esc 走 closeInput（不是就地清一下）", /e\.key === "Escape"\) closeInput\(\)/.test(petJs));
+	check("拿不到焦点就收框（不留打不了字又关不掉的框）", /FOCUS_LADDER[\s\S]{0,400}document\.activeElement !== input\) closeInput\(\)/.test(petJs));
 	check("点宠物身上也收框", /pointerdown[\s\S]{0,220}self\.closeInput\(\)/.test(petJs));
 	check("失焦时主进程叫渲染进程收框", /win\.on\("blur"[\s\S]{0,400}pet:say-cancel/.test(mainJs));
 	check("收框信号两头都接上了", /sayInputEnd: \(\) => ipcRenderer\.send\("pet:say-input-end"\)/.test(preloadJs) && /onSayCancel: \(cb\) => ipcRenderer\.on\("pet:say-cancel"/.test(preloadJs));
@@ -208,7 +222,21 @@ console.log("\n「说点什么…」输入框（焦点 / 关闭 / 鉴权）…")
 	//    （那个文件没了 / 临时 home 盖了 → 空串 → 「unauthorized」，而用户完全看不出所以然）
 	check("拉窗时把 token 交给窗（PI_PET_TOKEN）", /env\.PI_PET_TOKEN = String\(ctx\.token\)/.test(windowCjs));
 	check("窗优先认 PI_PET_TOKEN，文件只当兜底", /process\.env\.PI_PET_TOKEN/.test(mainJs) && /兜底读/.test(mainJs));
-	check("401 的报错要指向 token，而不是干巴巴一个 unauthorized", /failureDetail/.test(mainJs) && /鉴权 token 没读到/.test(mainJs));
+check("401 的报错要指向 token，而不是干巴巴一个 unauthorized", /failureDetail/.test(mainJs) && /鉴权 token 没读到/.test(mainJs));
+}
+
+// ------------------------------------------------ 右键菜单：不再有「尺寸」
+// 换尺寸要重启整扇窗，代价远大于收益（小号还得为气泡不被裁而顶着 380px 下限），
+// 所以菜单里那档子菜单拿掉了 —— 钉一条，免得哪天顺手又长回来。API（set-ctrl / /pet small）仍在。
+console.log("\n右键菜单（不提供换尺寸）…");
+{
+	const mainJs = readFileSync(join(ROOT, "pi", "assets", "pet-electron.cjs"), "utf8");
+const menuRaw = /Menu\.buildFromTemplate\(\[([\s\S]*?)\]\);/.exec(mainJs)?.[1] || "";
+	// 注释里会提到「尺寸」这两个字，判菜单项之前先把 // 注释抹掉
+	const menuBlock = menuRaw.replace(/\/\/[^\n]*/g, "");
+	check("菜单里没有尺寸子菜单", !/尺寸/.test(menuBlock) && !/submenu:/.test(menuBlock));
+	check("换一只 / 添加一只 / 退出 还在", /换一只（重启窗）/.test(menuBlock) && /添加一只/.test(menuBlock) && /退出桌宠/.test(menuBlock));
+	check("换尺寸仍可走 API（文档里留了路）", /set-ctrl/.test(mainJs));
 }
 
 // ---------------------------------------------------------------- 互斥：外部宿主

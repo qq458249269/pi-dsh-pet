@@ -27,7 +27,7 @@ In pi:
 
 ```
 /pet             →  normal size (400px)
-/pet small       →  small size (260px)
+/pet small       →  small size (380px)
 /pet large       →  large size (540px)
 /pet-stop        →  close all pet windows
 ```
@@ -72,7 +72,7 @@ All 91 animations — see the [main README](./README.md) for the full gallery.
 The size map is in `pi/assets/pet.js` line 589:
 
 ```js
-var SIZE_MAP = { small: 260, normal: 400, large: 540 };
+var SIZE_MAP = { small: 380, normal: 400, large: 540 };
 ```
 
 - **Change values** — edit the px widths (height = width × 9/16)

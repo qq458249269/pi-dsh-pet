@@ -36,7 +36,9 @@ const __filename = fileURLToPath(import.meta.url);
 const PACKAGE_ROOT = dirname(dirname(dirname(__filename))); // repo root (…/pi/extensions/index.ts)
 const LOCAL_CLI = join(PACKAGE_ROOT, 'bin', 'pi-pet.cjs');
 
-const SIZE_MAP: Record<string, number> = { small: 260, normal: 400, large: 540 };
+/** 与 pi/assets/pet.js 的 SIZE_MAP 对齐（改一处就得改另一处）。
+ *  ⚠️ 最小档别低于 380：舞台太窄时头顶气泡会被挤到屏幕边上，看着像被裁了一半。 */
+const SIZE_MAP: Record<string, number> = { small: 380, normal: 400, large: 540 };
 const SOURCE = 'pi';
 
 /* ============================== CLI plumbing ============================== */

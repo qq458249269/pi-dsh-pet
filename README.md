@@ -31,7 +31,7 @@ pi-pet start          # 起桌宠（自带服务 + 窗）
 
 ```
 /pet             →  显示桌宠（正常大小 400px）
-/pet small       →  小号（260px）
+/pet small       →  小号（380px）
 /pet large       →  大号（540px）
 /pet-stop        →  隐藏桌宠（服务留着，pi/dsh 还能用）
 /pet-say 摸鱼中  →  让它说句话
@@ -106,8 +106,9 @@ CI（推 main / 手动触发 `release` workflow）走同一条链，只是多两
 | 空闲 | 恢复随机动画链 | 待命中… |
 
 > 💡 思考/写代码状态中点击宠物 → 播放「点击回应-傲娇生气」→ 完整播完后自动回到当前状态动画。
-> 💡 **右键桌宠** = 原生菜单：当前状态、事件来源、暂停响应、说点什么、换一只、尺寸、
+> 💡 **右键桌宠** = 原生菜单：当前状态、事件来源、暂停响应、说点什么、换一只、
 > 添加一只、隐藏宠物、在浏览器打开、复制服务地址、打开数据文件夹、关于、退出。
+> （换尺寸已从菜单拿掉，要换走 API：`/control {action:"set-ctrl", size, restartNonce}`）
 
 ---
 
@@ -268,17 +269,21 @@ pi-dsh-pet/
 
 ## 自定义大小
 
+> 菜单里已经**不提供**换尺寸的入口（小/中/大）。下面的映射仍在用：默认尺寸走
+> `assets/config.jsonc` 的 `pets[].size`，`/control {action:"set-ctrl", size, restartNonce}`
+> 与 pi 的 `/pet small|large` 也能换。
+
 大小映射定义在 `pi/assets/pet.js`（`SIZE_MAP`）与 `app/protocol.cjs`（`SIZES`）里，**两边必须一致**：
 
 ```js
-var SIZE_MAP = { small: 260, normal: 400, large: 540 };
+var SIZE_MAP = { small: 380, normal: 400, large: 540 };
 ```
 
-- **改数字** — 修改小/中/大的 px 宽度（高度自动 = 宽 × 9/16）
+- **改数字** — 修改小/中/大的 px 宽度（高度自动 = 宽 × 9/16）。⚠️ 最小档别低于 380：舞台太窄时头顶气泡会被挤到屏幕边上，看着像被裁了一半
 - **加档位** — 添加 `tiny`、`xlarge` 等新条目，例如 `{ tiny: 180, ..., xlarge: 720 }`（记得两处都改）
 
 修改后 `/pet` 生效，新增命令（如 `/pet tiny`、`/pet xlarge`）自动可用。已开着的窗需要
-`/pet` 或右键菜单换尺寸（换窗生效）。
+`/pet` 或 `set-ctrl + restartNonce` 才换（都要换窗才生效）。
 
 ## 待机节奏（动画被切一半 / 待机太短）
 

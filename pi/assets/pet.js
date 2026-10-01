@@ -614,13 +614,22 @@
       if (window.__petElectron__ && window.__petElectron__.sayInputEnd) window.__petElectron__.sayInputEnd();
     }
 
-    /** 焦点要等主进程把窗切成可聚焦才留得住，所以补两下（第一下常常被系统吐掉）。 */
+    /** 焦点要等主进程把窗切成可聚焦才留得住，所以补几遍（第一下常常被系统吐掉）。
+        补到最后一遍还没拿到焦点 = 这扇窗根本激活不了（少见，但以前就是这么变成
+        「框挂在屏幕上打不进字也关不掉」的）→ 干脆收框，把键盘还给用户。 */
+    var FOCUS_LADDER = [0, 40, 120, 300, 600, 1200];
     function focusInput() {
       if (!inputOpen) return;
-      input.focus();
-      input.select();
-      requestAnimationFrame(function () { if (inputOpen) input.focus(); });
-      setTimeout(function () { if (inputOpen) input.focus(); }, 60);
+      FOCUS_LADDER.forEach(function (ms, idx) {
+        setTimeout(function () {
+          if (!inputOpen) return;
+          try { input.focus(); } catch { /* ignore */ }
+          var last = idx === FOCUS_LADDER.length - 1;
+          if (last && document.activeElement !== input) closeInput();
+        }, ms);
+      });
+      // 立刻也要一下：主进程已经把窗激活时，同帧 focus() 就够（input.select 只补选中态）
+      try { input.select(); } catch { /* ignore */ }
     }
 
     function submitInput() {
@@ -1167,8 +1176,10 @@
   var addPetSeq = 0; // counter for auto-generated pet ids
   var bubbleTarget = null; // 最近一次被右键的宠物：手动输入与气泡优先出现在它头上
 
-  /** Maps size arg to px width */
-  var SIZE_MAP = { small: 260, normal: 400, large: 540 };
+/** Maps size arg to px width.
+      ⚠️ 最小档别再往小了：气泡是 16:9 舞台头顶的 max-content 块（最宽 420px），舞台太窄时
+      气泡和动画一起被挤到屏幕边上，看着像「被裁了一半」。380 起。 */
+  var SIZE_MAP = { small: 380, normal: 400, large: 540 };
 
   /** Create a new pet at a random corner (called on /pet when window already running) */
   function addPet(sizeArg) {
