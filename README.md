@@ -87,16 +87,24 @@ CI（推 main / 手动触发 `release` workflow）走同一条链，只是多两
 把它规范化成 `2026.9.3-0.2` 这种鬼样子），版本认 tag / release 说明。
 发布链的约束（token 权限、跨 job 依赖）见 [DESIGN.md §10](./DESIGN.md)。
 
-改 `.github/workflows/release.yml` 前先知道两件事（它踩过两次，报错都指不到病根）：
+改 `.github/workflows/release.yml` 前先知道这三件事（前两件报错都指不到病根，第三件**根本不报错）：
 
 | 坑 | 症状 | 后果 |
 |----|------|------|
 | 事件键顶格：`workflow_dispatch:` 写在第 0 列 | 编辑器报 `Unexpected value 'workflow_dispatch'` | 它变成**根级**键，`on:` 里只剩 `push` —— **手动触发入口静默消失**，推 tag/main 才跑 |
 | 半截 step：`- name: xxx` 后面既没 `run:` 也没 `uses:` | 编辑器报 `There's not enough info to determine what you meant. Add one of these properties: cancel, run, shell, uses…` | 那一步是空转（重排步骤时留下的残渣），不是「忘了写 run」 |
+| `concurrency.group` 里写 `${{ github.ref }}` | **没有任何报错**，两个 run 都是绿的 | 本 workflow 自己会 push tag：tag 事件和 main 事件是两个不同的 ref → 两个组 → **一次发布并行跑两个 run**，同时打 exe、同时建同一个 tag 的 release，抢出 `422 already_exists` |
 
-两行都是**合法 YAML**，所以 `npm test` 一度是绿的。`npm run test:workflow`（已挂在
-`npm test` 第一步）专门钉这两件事，外加「每个 job 都要有 `runs-on`/`steps`」和
-「`on:` 里必须真的有 `workflow_dispatch`」；零依赖、离线跑。
+前两行都是**合法 YAML**，所以 `npm test` 一度是绿的；第三行连 YAML 都不是问题所在，
+GitHub 一句提示都不会给。`npm run test:workflow`（已挂在 `npm test` 第一步）钉这三件事，
+外加「每个 job 都要有 `runs-on`/`steps`」、「`on:` 里必须真的有 `workflow_dispatch`」，
+以及「concurrency 必须是**全局一把锁**（group 是字面量 + `cancel-in-progress: true`）」；
+零依赖、离线跑。
+
+**所以发布期间的规矩：全局只会有一个发布在跑，新来的会取消还在跑的。**
+想连着发两个版本，就等前一个跑完再推——推第二个会把第一个的 exe 构建中途掐掉
+（GitHub 上点那个被取消的 run 能看到）。推 tag 触发的那个 run 会把发布做完（它认
+tag 上的版本号，不重算、不重建 tag）。零依赖、离线跑。
 
 宠物会出现在屏幕右下角，开始动画链。当你在 pi 里写代码或提问时，宠物会自动响应：
 
@@ -172,6 +180,7 @@ pi-dsh-pet/
   <img src="https://raw.githubusercontent.com/qq458249269/pi-dsh-pet/main/assets/preview/qingkuai-jilu.gif" width="160" alt="轻快记录">
   <img src="https://raw.githubusercontent.com/qq458249269/pi-dsh-pet/main/assets/preview/xie-daima.gif" width="160" alt="写代码">
   <img src="https://raw.githubusercontent.com/qq458249269/pi-dsh-pet/main/assets/preview/yaoshan-naliang.gif" width="160" alt="摇扇纳凉">
+  <img src="https://raw.githubusercontent.com/qq458249269/pi-dsh-pet/main/assets/preview/chenjian-shuaya.gif" width="160" alt="晨间刷牙">
 </p>
 
 **玩耍**

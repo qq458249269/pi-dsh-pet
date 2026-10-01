@@ -350,7 +350,22 @@ pi-pet config           # 看/改 config.json
    推失败（权限/网络）就会以 `couldn't find remote ref v…` 把整个发布拖红。
    源码包和 exe 因此完全解耦；推 tag 那步 `continue-on-error`：
    推不动就在摘要里留证据，绝不连累 exe。
-4. **产物名里不放版本号。** `YYYY.MM.DD.NNNN` 是四段、还带前导零，**不是合法
+4. **`concurrency` 必须是全局一把锁，group 里不许出现 `${{ github.ref }}`。** 这个错
+   **GitHub 一句提示都不会给**（YAML 合法、两个 run 都是绿的），但本 workflow 自己会
+   push tag —— tag 事件和 main 事件是两个不同的 ref，按 ref 分组就等于**一次发布并行跑
+   两个 run**：同时打两次 exe、同时 `gh release create` 同一个 tag，抢出
+   `422 already_exists`，白烧一台 Windows runner。所以 `group` 写**字面量**
+   （`pi-dsh-pet-release`）+ `cancel-in-progress: true`（新来的取消还在跑的；排队在这里
+   等于不设防，排到队尾时它要发的东西早过时了）。
+   为什么取消不会把发布搞坏：
+   - 取消**只可能由成功的 tag push 引起**（tag 推失败就没有 tag 事件，也就没有新 run
+     来取消谁）—— 被取消的前提，恰恰是已经有人接手了。
+   - 被取消的 run 没发完没关系：tag 触发的 run 走 `ref_type == 'tag'` 分支直接认 tag
+     上的版本号，不重算、不重建 tag，照常 exe → release，把发布做完。
+   - 万一取消正好卡在 `gh release create` 中间（留下一个没资产的空 release），下一次跑到的
+     release job 会先 `gh release view` 认出来，然后 `upload --clobber` + `edit` ——
+     那段本来就是幂等的（为「重跑同一个 run」写的），能自愈。
+5. **产物名里不放版本号。** `YYYY.MM.DD.NNNN` 是四段、还带前导零，**不是合法
    semver**，electron-builder 读 package.json 时会自己规范化它，实测
    `2026.09.30.0002` → `${version}` 变成 `2026.9.3-0.2`。
    后果有两个：名字难看且不稳定（规范化规则随版本变），以及**不能拿版本号做 CI 断言**

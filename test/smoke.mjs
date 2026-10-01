@@ -9,7 +9,7 @@
  */
 
 import { spawn } from "node:child_process";
-import { mkdtempSync, rmSync, readFileSync, existsSync, statSync } from "node:fs";
+import { mkdtempSync, rmSync, readFileSync, readdirSync, existsSync, statSync } from "node:fs";
 import net from "node:net";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
@@ -622,6 +622,39 @@ check("搬完记住落点", /pet:window-drag-end/.test(elecSrc) && /endWinDrag\(
 check("渲染进程报舞台尺寸（宠物 + 气泡）", /reportWindowSize\(\)/.test(petSrc) && /pet:window-size/.test(elecSrc));
 check("preload 三个新口都齐", /setWindowSize/.test(preloadSrc) && /moveWindow/.test(preloadSrc) && /endWindowDrag/.test(preloadSrc));
 check("漫游/气泡仍按窗口尺寸算（舞台=窗口，逻辑没变）", /window\.innerWidth/.test(petSrc) && /function clampPos\(/.test(petSrc));
+
+// ---------------------------------------------------------------- 图库 = 素材目录
+// README 开头写着「全部 91 个动画」，那就让它真的一一对得上：漏一张是静默的
+//（图片只是少一张，谁都不会发现），多一张则是链接直接 404。
+// ⚠️ 比对靠文件名一一对应（preview 用拼音 gif、thumb 用中文 webm，两边名字对不上，
+//    所以只能拿 preview 目录互比 —— 别试图跨目录比，那必然误报）。
+console.log("\nREADME 图库…");
+{
+	const readme = readFileSync(join(ROOT, "README.md"), "utf8");
+	const referenced = new Set(
+		[...readme.matchAll(/assets\/preview\/([^"'\s>]+\.gif)/g)].map((m) => m[1]),
+	);
+	const onDisk = readdirSync(join(ROOT, "assets", "preview"))
+		.filter((f) => f.endsWith(".gif"))
+		.map((f) => f);
+	const missing = [...referenced].filter((f) => !onDisk.includes(f)).sort();
+	const orphans = onDisk.filter((f) => !referenced.has(f)).sort();
+	check(
+		`README 图库里的每个文件都存在（${referenced.size} 个链接）`,
+		missing.length === 0,
+		missing.length ? `指向不存在的：${missing.join(", ")}` : "",
+	);
+	check(
+		`assets/preview 里每个动画都在图库里（${onDisk.length} 个文件）`,
+		orphans.length === 0,
+		orphans.length ? `有文件没进图库：${orphans.join(", ")}` : "",
+	);
+	check(
+		"README 宣称的动画总数与实际一致",
+		new RegExp(`全部 ${onDisk.length} 个动画`).test(readme),
+		`README 里找「全部 ${onDisk.length} 个动画」没找到（目录里有 ${onDisk.length} 个）`,
+	);
+}
 
 // ---------------------------------------------------------------- 收尾
 console.log("\n收尾…");

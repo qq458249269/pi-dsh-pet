@@ -14,7 +14,13 @@
  *      合法 YAML（解析成 `{name: xxx}`），但 schema 上它哪个分支都不属于，报错是
  *        There's not enough info to determine what you meant. Add one of these
  *        properties: cancel, run, shell, uses, wait, wait-all, with, working-directory
- *      看着像「忘了写 run」，实际是**多了一个 step 头**（重排步骤时留下的残渣）。
+*      看着像「忘了写 run」，实际是**多了一个 step 头**（重排步骤时留下的残渣）。
+ *   ③ concurrency 带 ${{ github.ref }}（发布同时跑两个）
+ *      这个错**不会报任何错**：YAML 合法，GitHub 也认，UI 上两个 run 都绿。
+ *      但一次发布会被拆成两个并行 run（main 推送 vs 它自己 push 出来的 tag
+ *      属于不同的组）→ 同时打两次 exe、同时 gh release create 同一个 tag，
+ *      抢 release 抢出 422 already_exists，白烧一台 Windows runner。GitHub 那边
+ *      一句提示都不会有 —— 所以只能在这儿钉死。
  *
  * 为什么不用 yaml/js-yaml + JSON Schema（那才是编辑器/VS Code 用的那套）：
  *   ① 仓库是**零依赖**的，测试不该为了查一个文件去装包；
@@ -93,8 +99,49 @@ if (!sawOn) problems.push("没有 `on:`：这个工作流永远不会触发");
 if (sawOn && !onBodyKeys.some((k) => k.key === "workflow_dispatch")) {
 	problems.push(
 		`on: 里没有 workflow_dispatch（只有 ${onBodyKeys.map((k) => k.key).join(" / ") || "什么都没有"}）` +
-			`—— 手动触发入口没了，只能靠推 tag/main`,
+`—— 手动触发入口没了，只能靠推 tag/main`,
 	);
+}
+
+// ---- ③ concurrency 必须是**全局一把锁** ----
+// group 里任何 ${{ }} 都会让它变成「按 ref/事件分组」：本 workflow 自己会 push tag，
+// tag 事件和 main 事件天然是两个 ref → 两个组 → 一次发布并行跑两个 run，
+// 同时打 exe 同时建同一个 tag 的 release。这个错不会报任何错，只能在这儿钉死。
+let conc = null;
+for (let i = 0; i < lines.length; i++) {
+	if (!/^concurrency:\s*$/.test(lines[i])) continue;
+	conc = { line: i, body: {} };
+	for (let j = i + 1; j < lines.length; j++) {
+		if (!lines[j].trim() || lines[j].trimStart().startsWith("#")) continue;
+		if (indentOf(lines[j]) === 0) break; // 下一个顶层键 → concurrency 块到头了
+		const km = /^\s{2}([A-Za-z_][\w-]*):\s*(.*)$/.exec(lines[j]);
+		if (km) conc.body[km[1]] = { value: km[2].trim(), line: j };
+	}
+	break;
+}
+if (!conc) {
+	problems.push("没有 `concurrency:` —— 一次发布会并行跑两个 run（见文件头 ③）");
+} else {
+	const group = conc.body.group;
+	if (!group) {
+		problems.push(`${at(conc.line)}：concurrency 里没有 group:（没有互斥，发布会并行跑两个 run）`);
+	} else if (/\${{/.test(group.value)) {
+		problems.push(
+`${at(group.line)}：concurrency.group 里带了 \$\{{ }}（当前：${group.value}）——` +
+				`它会按 ref/事件分组，而本 workflow 自己会 push tag：tag 事件和 main 事件是两个不同的 ref，` +
+				`于是「一次发布」并行跑两个 run，同时打 exe 同时建同一个 tag 的 release（抢出 422 already_exists）。` +
+				`要全局一把锁就写个字面量：group: pi-dsh-pet-release`,
+		);
+	}
+	const cip = conc.body["cancel-in-progress"];
+	if (!cip) {
+		problems.push(`${at(conc.line)}：concurrency 里没有 cancel-in-progress:（只能排队不能取消）`);
+	} else if (cip.value !== "true") {
+		problems.push(
+			`${at(cip.line)}：cancel-in-progress 是 ${cip.value || "空"} —— 必须 true。` +
+				`排队在这里等于不设防：排到队尾的可能排几十分钟，而它要发的东西早过时了。`,
+		);
+	}
 }
 
 // ---- ② 半截 step：只有 name 头、没有 run:/uses: 正文 ----
@@ -156,6 +203,8 @@ if (problems.length) {
 }
 console.log(
 	`✓ ${path.relative(process.cwd(), FILE)} 结构对：` +
-		`on = [${onBodyKeys.map((x) => x.key).join(", ")}]，${jobStarts.length} 个 job，` +
+`on = [${onBodyKeys.map((x) => x.key).join(", ")}]，${jobStarts.length} 个 job，` +
+		`concurrency = ${conc && conc.body.group ? conc.body.group.value : "（无）"}` +
+		`/cancel-in-progress=${conc && conc.body["cancel-in-progress"] ? conc.body["cancel-in-progress"].value : "（无）"}，` +
 		`没有半截 step`,
 );
