@@ -230,10 +230,12 @@ function readPositions() {
 	}
 }
 
-/** 合并写（只改给的那一只）：多只/多客户端同时拖不互相清空。 */
-function rememberPosition(id, rx, ry) {
+/** 合并写（只改给的那一只）：多只/多客户端同时拖不互相清空。
+ *  w/h 是「存的时候窗多大」：舞台窗尺寸会变（配置改了 / 版本改了 / DPI 变了），
+ *  窗内比例的含义跟着变，不把它一起存下来，下次启动宠物就会被比例拽得平移一截（§9.23）。 */
+function rememberPosition(id, rx, ry, w, h) {
 	const key = String(id || "").trim();
-	const next = sanitizePositions({ ...readPositions(), [key]: { rx, ry } });
+	const next = sanitizePositions({ ...readPositions(), [key]: { rx, ry, w, h } });
 	if (!Object.prototype.hasOwnProperty.call(next, key)) return {};
 	ensureHome();
 	fs.writeFileSync(PATHS.positions, `${JSON.stringify(next, null, 2)}\n`, "utf8");

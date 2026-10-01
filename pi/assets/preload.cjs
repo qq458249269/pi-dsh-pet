@@ -47,7 +47,7 @@ contextBridge.exposeInMainWorld("__petElectron__", {
   /** 手动说话：交给主进程 → 宿主 /control say → 全窗都看得到 */
   say: (text) => ipcRenderer.send("pet:say-submit", String(text == null ? "" : text)),
   /** 记住拖拽落点（比例 0~1）。主进程代写：渲染进程手里没有 token，写不了 /control */
-  savePosition: (id, rx, ry) => ipcRenderer.send("pet:save-position", { id: String(id == null ? "" : id), rx: Number(rx), ry: Number(ry) }),
+savePosition: (id, rx, ry, w, h) => ipcRenderer.send("pet:save-position", { id: String(id == null ? "" : id), rx: Number(rx), ry: Number(ry), w: Number(w), h: Number(h) }),
   /** 主进程叫输入框（右键菜单的「说点什么…」） */
   onAskSay: (cb) => ipcRenderer.on("pet:say-ask", () => cb()),
   /** 输入框收工：告诉主进程把窗切回不可聚焦（别一直抢着键盘焦点） */

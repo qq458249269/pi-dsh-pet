@@ -462,7 +462,14 @@ check("新窗接上就收到位置帧", maps.length === 1 && maps[0]["pet-1"] &&
 	// 洗白：窗与文件都不可信
 	const { sanitizePositions } = await import(pathToFileURL(join(ROOT, "app", "protocol.cjs")).href);
 	const dirty = sanitizePositions({ "": { rx: 1, ry: 1 }, a: { rx: "x", ry: 0.5 }, b: { rx: 2, ry: -1 }, c: { rx: 0.5, ry: 0.5 } });
-	check("非法 id/坐标被丢掉、越界夹回 0~1", JSON.stringify(dirty) === JSON.stringify({ b: { rx: 1, ry: 0 }, c: { rx: 0.5, ry: 0.5 } }), JSON.stringify(dirty));
+check("洗白：非法 id/坐标被丢掉、越界夹回 0~1", JSON.stringify(dirty) === JSON.stringify({ b: { rx: 1, ry: 0 }, c: { rx: 0.5, ry: 0.5 } }), JSON.stringify(dirty));
+
+	// 落点还带一个可选的 w/h（存的时候窗多大）—— 窗变了才能换算回同一个屏幕位置（§9.23）。
+	const withWH = sanitizePositions({ d: { rx: 0.3, ry: 0.4, w: 622, h: 470 }, e: { rx: 0.3, ry: 0.4, w: "x" }, f: { rx: 0.3, ry: 0.4, w: -5, h: 470 } });
+	check("位置帧带 w/h（数字才认，非数/非正丢掉）", withWH.d && withWH.d.w === 622 && withWH.d.h === 470 && withWH.e && withWH.e.w === undefined && withWH.f && withWH.f.w === undefined, JSON.stringify(withWH));
+	await post(PORT, "/control", { action: "set-position", id: "pet-3", rx: 0.25, ry: 0.75, w: 862, h: 470 }, token);
+	const withWHRound = JSON.parse(readFileSync(posFile, "utf8"));
+	check("set-position 的 w/h 落盘（窗下次启动才换算得回去）", withWHRound["pet-3"].w === 862 && withWHRound["pet-3"].h === 470, JSON.stringify(withWHRound["pet-3"]));
 
 	// 窗侧接线（渲染进程 / preload / 主进程）
 	const petJs = readFileSync(join(ROOT, "pi", "assets", "pet.js"), "utf8");
@@ -471,10 +478,10 @@ check("新窗接上就收到位置帧", maps.length === 1 && maps[0]["pet-1"] &&
 	check("pet.js 认 positions 帧并套用", /obj\.type === "positions"[\s\S]{0,300}applySavedPositions\(\)/.test(petJs));
 	check("拖拽松手就上报落点", /movedLocally = true[\s\S]{0,120}savePosition\(self\)/.test(petJs));
 	check("用户已经拖过的宠物不被补发帧拽回去", /if \(!p \|\| p\.movedLocally \|\| p\.destroyed\) continue/.test(petJs));
-	check("套用位置后要重报命中区（宠物挪走了）", /p\.customPos = \{ rx: Number\(pos\.rx\)[\s\S]{0,300}pushHitRegion\(\)/.test(petJs));
-	check("preload 有 savePosition 桥（渲染进程没 token）", /savePosition: \(id, rx, ry\) => ipcRenderer\.send\("pet:save-position"/.test(preloadJs));
-	check("主进程代写 /control set-position", /ipcMain\.on\("pet:save-position"[\s\S]{0,400}callHost\("set-position"/.test(mainJs));
-	check("位置存的是比例不是像素", /customPos = \{ rx: .*innerWidth, ry: .*innerHeight \}/.test(petJs));
+check("套用位置后要重报命中区（宠物挪走了）", /p\.customPos = \{ rx: rescalePos\([\s\S]{0,400}pushHitRegion\(\)/.test(petJs));
+check("preload 有 savePosition 桥（渲染进程没 token）", /savePosition: \(id, rx, ry, w, h\) => ipcRenderer\.send\("pet:save-position"/.test(preloadJs));
+check("主进程代写 /control set-position", /ipcMain\.on\("pet:save-position"[\s\S]{0,400}callHost\("set-position"/.test(mainJs));
+check("位置存的是比例不是像素", /customPos = \{ rx: [^}]*innerWidth, ry: [^}]*innerHeight/.test(petJs));
 }
 
 // ---------------------------------------------------------------- 暂停
@@ -608,6 +615,8 @@ const elecSrc = readFileSync(join(ROOT, "pi", "assets", "pet-electron.cjs"), "ut
 const petSrc = readFileSync(join(ROOT, "pi", "assets", "pet.js"), "utf8");
 const petCss = readFileSync(join(ROOT, "pi", "assets", "pet.css"), "utf8");
 const preloadSrc = readFileSync(join(ROOT, "pi", "assets", "preload.cjs"), "utf8");
+const protoSrc = readFileSync(join(ROOT, "app", "protocol.cjs"), "utf8");
+const pathsSrc = readFileSync(join(ROOT, "app", "paths.cjs"), "utf8");
 
 const chk = (await post(PORT, "/control", { action: "check-update" }, token)).body;
 check("check-update 有回包", !!chk);
@@ -645,14 +654,27 @@ check("搬窗位移用屏幕坐标（不是窗内 clientX —— 那样只跟一
 check("按下时记下屏幕坐标基准点（psx/psy）", /psx: ps\.x[\s\S]{0,40}psy: ps\.y/.test(petSrc) && /function screenPoint\(e\)/.test(petSrc));
 check("screenX/Y 拿不到时退回 client（别把拖拽弄死）", /Number\.isFinite\(sx\) && Number\.isFinite\(sy\)/.test(petSrc) && /return \{ x: Number\(e\.clientX\) \|\| 0, y: Number\(e\.clientY\) \|\| 0 \}/.test(petSrc));
 check("主进程/preload 都写明 dx/dy 是屏幕位移", /屏幕坐标/.test(elecSrc) && /屏幕坐标/.test(preloadSrc) && /屏幕坐标/.test(petSrc));
-check("搬窗时把宠物夹在屏幕工作区内", /w\.x \+ w\.width - ir - 6/.test(elecSrc));
+// ⚠️ 夹的是**整扇窗**进屏，不是「宠物别出屏」（§9.23）：早先夹的是后者（窗挂到屏外
+//   il-6，宠物能贴屏幕边），而气泡只按**窗**夹 ⇒ 窗挂出去多少就有多少气泡在屏外看不见。
+check("搬窗时把**整扇窗**夹在屏幕工作区内（窗挂出去多少就有多少气泡看不见）", /const loX = w\.x;[\s\S]{0,200}const hiX = w\.x \+ w\.width - cs\.w/.test(elecSrc) && !/w\.x - il \+ 6/.test(elecSrc) && !/w\.y - it \+ 6/.test(elecSrc));
+check("搬窗的窗尺寸按拖拽开始时缓存一次（别每帧问 getContentBounds）", /windowDrag = Object\.assign\(\{\}, currentPos\(\), \{ w: cs0\.w, h: cs0\.h \}\)/.test(elecSrc));
 check("搬完记住落点", /pet:window-drag-end/.test(elecSrc) && /endWinDrag\(\)/.test(petSrc));
 check("渲染进程报舞台尺寸（宠物 + 气泡）", /reportWindowSize\(\)/.test(petSrc) && /pet:window-size/.test(elecSrc));
 check("preload 三个新口都齐", /setWindowSize/.test(preloadSrc) && /moveWindow/.test(preloadSrc) && /endWindowDrag/.test(preloadSrc));
-check("舞台窗 = 宠物 + 四边留白（不是把动画放大）", /var STAGE_PAD_X = 200/.test(petSrc) && /var STAGE_PAD_TOP = 150/.test(petSrc) && /var STAGE_PAD_BOTTOM = 60/.test(petSrc) && /Math\.max\(MIN_STAGE_W, maxW \+ sidePad \* 2\)/.test(petSrc) && /Math\.max\(MIN_PET_SIZE, topOff \+ petH \+ botPad\)/.test(petSrc));
+// 症状2（用户口径）：「移除 padding 和强制尺寸吧，对显示没有任何改善，较宽的动画还是显示不全」。
+//   实测：左右留白抬到 200（§9.22）后窗 622→862，动画一点没变大 —— size=900 时窗 1300 宽，
+//   贴右上角后动画右边离窗边只剩 marginX=24px、左边空 376px，看着就是被窗边切了一角。
+//   修法：左右留白只当「离窗边的余量」（24），窗宽改成**按内容自适应**（动画宽 / 气泡基准宽取大），
+//   真正给足的是**高度**（头顶 150 装气泡），气泡封顶独立走 BUBBLE_W_MAX。
+check("舞台窗 = 高度定死 + 宽度自适应内容（不再有强制窗宽和 200 留白）", /var STAGE_PAD_X = 32/.test(petSrc) && /var BUBBLE_W_MAX = 820/.test(petSrc) && /var w = maxW \+ sidePad \* 2/.test(petSrc) && !/MIN_STAGE_W/.test(petSrc) && !/BUBBLE_BASE_W/.test(petSrc));
+// 窗不许为气泡撑宽：窗一比「动画 + 余量」宽，气泡（封顶 = 窗宽-16）就比动画宽很多，
+//   居中时必被 clampBubble 推到贴一边（实测 592 宽居中于 462 动画：左探 196 / 右探 16）。
+check("气泡宁窄勿歪（封顶 = 窗宽-16，窗宽只跟动画走）", /Math\.min\(Math\.max\(240, Math\.round\(winW\) - 16\), BUBBLE_W_MAX\)/.test(petSrc));
+check("设置高度、自适应宽度：height 优先，width 由 16:9 推（只加不改，老配置走 size）", /function petSizeOf\(cfg\)[\s\S]{0,400}return Math\.round\(\(h \* 16\) \/ 9\)/.test(petSrc) && /if \(isFinite\(height\) && height > 0\)[\s\S]{0,600}size = Math\.round\(\(height \* 16\) \/ 9\)/.test(petSrc) && /var MIN_PET_H = 214/.test(petSrc) && /var s = petSizeOf\(cfg\)/.test(petSrc) && /this\.size = petSizeOf\(cfg\)/.test(petSrc));
+check("高度小于下限也抬（和宽度一个口径：抬，不报错）", /if \(h < MIN_PET_H\) h = MIN_PET_H/.test(petSrc) && /if \(height < MIN_PET_H\)/.test(petSrc));
 // ⚠️ marginX/marginY 现在是**下限**（§9.21）：比留白小的抬到留白。头顶那截是气泡的舞台，
 //   不抬的话贴上边的宠物头顶只有 marginY（实测 100）= 三行字，窗底那截空白一点用没有。
-check("配置里的 marginX/marginY 当留白的下限（不够就抬上去）", /function topOffsetOf\(cfg\)[\s\S]{0,200}Math\.max\(m, STAGE_PAD_TOP\)/.test(petSrc) && /Math\.max\(mX, STAGE_PAD_X\)/.test(petSrc) && /Math\.max\(mY, STAGE_PAD_BOTTOM\)/.test(petSrc));
+check("配置里的 marginX/marginY 当留白的下限（不够就抬上去）", /function topOffsetOf\(cfg\)[\s\S]{0,200}Math\.max\(m, STAGE_PAD_TOP\)/.test(petSrc) && /Math\.max\(mX, STAGE_PAD_X\)/.test(petSrc) && /Math\.max\(m, STAGE_PAD_BOTTOM\)/.test(petSrc) && /botPad = Math\.max\(botPad, bottomPadOf\(cfg\)\)/.test(petSrc));
 // ⚠️ 窗只报**尺寸**、不动位置：宠物在窗里的偏移是常量，窗左上不动它就不跳。
 //   「按宠物贴住的角挪窗」实测是反的（高度差里只有一部分来自头顶偏移，会挪走宠物、窗挂到屏外）。
 check("改窗只改尺寸，左上角不动（宠物在屏幕上不跳）", /function applyBounds\(width, height\)/.test(elecSrc) && /applyBounds\(w, h\);/.test(elecSrc) && !/applyBounds\([\w, ]+, m\.anchor/.test(elecSrc) && !/cur\.h - height/.test(elecSrc));
@@ -683,6 +705,28 @@ check("输入态只封文字、给输入框留出 44px（不然框被裁掉没�
 // 气泡刚 show 出来那下量到的是旧布局：下一帧要再夹一次，否则右缘探出窗边被切（实测 38px）
 check("气泡下一帧再夹一次（刚 show 时量的是上一段文案的布局）", /requestAnimationFrame\(function \(\) \{ self\.clampBubble\(\); \}\)/.test(petSrc));
 check("窗一变就重新夹气泡（高度/宽度都变了）", /window\.addEventListener\("resize"[\s\S]{0,600}clampBubbles\(\)/.test(petSrc));
+
+// ------------------------------------------------ 留白是宠物的禁区（§9.23）
+// 症状：「上下高度不够 气泡无法完全显示」。量出来的根：位置记忆里 ry=0.2764627…
+//   套上去正好把宠物钉在窗顶（top=0）—— 头顶 0 留白，气泡被压成 846x24 的一条、字全裁没了。
+// 修法：站位记忆套回来时，宠物在**窗里**也必须给气泡留出舞台（左右 24、顶 150、底 60）。
+//   漫游/拖动不夹（clampPos 仍按 0 起夹）：漫游只改 left 不改 top，横向窗里还有几十 px 可夹。
+check("站位记忆也要给气泡留舞台（宠物不许贴到窗顶/窗边）", /function stageKeepIn\(/.test(petSrc) && /stageKeepIn\(cp\.rx \* window\.innerWidth - halfW, cp\.ry \* window\.innerHeight - halfH, self\.size, cfg\)/.test(petSrc) && /var loY = topOffsetOf\(cfg\)/.test(petSrc) && /var hiY = H - petH - bottomPadOf\(cfg\)/.test(petSrc) && /var loX = STAGE_PAD_X/.test(petSrc) && !/Math\.max\(cp\.ry \* window\.innerHeight - halfH, 0\)/.test(petSrc));
+// 窗比「宠物 + 两侧留白」还窄时区间会翻过来（多开时窗按最大的那只算）：
+//   这时取中间值，不然照样贴边、同样没头顶。
+check("窗太窄时留白区间取中间（不翻车成贴边）", /if \(hiX < loX\) loX = hiX = Math\.max\(0, \(W - size\) \/ 2\)/.test(petSrc) && /if \(hiY < loY\) loY = hiY = Math\.max\(0, \(H - petH\) \/ 2\)/.test(petSrc));
+// 夹完把内存里的落点也改回实际值：不改的话漫游起点（读 customPos）会先跳一下再走
+check("夹取后回写 customPos（漫游起点和 DOM 一致）", /self\.customPos\.rx = \(keep\.left \+ halfW\) \/ window\.innerWidth/.test(petSrc));
+// 窗高公式和站位区间共用同一份 corner 算法（又一份算法就又一处对不上，§9.22 的教训）
+check("窗底留白 corner 算法只有一份（stageSize 与 stageKeepIn 共用）", /function bottomPadOf\(/.test(petSrc) && /botPad = Math\.max\(botPad, bottomPadOf\(cfg\)\)/.test(petSrc) && !/botPad = Math\.max\(botPad, Math\.max\(mY, STAGE_PAD_BOTTOM\)\)/.test(petSrc));
+
+// 位置记忆换算：窗内比例是**相对窗**的，而舞台窗会变（这一版左右留白 80→200，宽 622→862）：
+//   老落点 rx=0.5797 直接套上去，宠物水平平移 (862-622)*0.58 = 139px（「启动后宠物自己跑了一边」）。
+//   修法：存的时候把当时窗宽一起存（可选字段），套的时候换算回同一个窗内绝对位置。
+check("位置记忆带窗宽窗高（窗变了才换得算回去）", /function rescalePos\(/.test(petSrc) && /rescalePos\(Number\(pos\.rx\), Number\(pos\.w\), window\.innerWidth\)/.test(petSrc) && /return \(r \* wo\) \/ wn/.test(petSrc) && /api\.savePosition\(pet\.id, pet\.customPos\.rx, pet\.customPos\.ry, window\.innerWidth, window\.innerHeight\)/.test(petSrc));
+check("窗宽一路带到落盘（preload / 主进程 / 宿主 / 协议 / 读回都认 w,h）", /savePosition: \(id, rx, ry, w, h\)/.test(preloadSrc) && /set-position", \{ id, rx, ry, w: Number\(payload\.w\), h: Number\(payload\.h\) \}/.test(elecSrc) && /rememberPosition\(id, arg\.rx, arg\.ry, arg\.w, arg\.h\)/.test(hostSrc) && /function rememberPosition\(id, rx, ry, w, h\)/.test(pathsSrc) && /out\[key\]\.w = Math\.min\(Math\.round\(w\), 20000\)/.test(protoSrc));
+// 老记录没有 w/h：不能因此把宠物送到 0 之外（没存 = 不知道，按原比例套）
+check("老位置记录（没有 w/h）照旧按原比例套，不报错", /if \(!isFinite\(wo\) \|\| !\(wo > 0\) \|\| !\(wn > 0\)\) return r/.test(petSrc));
 
 // ------------------------------------------------ 留白必须点得穿（§9.21）
 // 症状：窗一大（大出来的那圈留白），下面别的软件就点不到了。
@@ -720,7 +764,7 @@ check("主进程丢掉「其实没动」的搬窗", /pos\.x === stagePos\.x && p
 // 摆完当场量一次，没摆成要看得见。
 console.log("\n窗不许塌成残骸（NaN 落点 / 静默 setBounds）…");
 check("落点自己记一份，不全信 getPosition()", /let stagePos = \{ x: Math\.round\(start\.x\), y: Math\.round\(start\.y\) \}/.test(elecSrc) && /function currentPos\(\)[\s\S]{0,400}return \{ x: stagePos\.x, y: stagePos\.y \}/.test(elecSrc) && /function rememberPos\(pos\)[\s\S]{0,300}Number\.isFinite\(x\)/.test(elecSrc));
-check("搬窗/记落点都不再直接用 getPosition()", !/win\.getPosition\(\)\[0\]/.test(elecSrc) && /windowDrag = currentPos\(\)/.test(elecSrc) && /writeStagePos\(home, currentPos\(\)\)/.test(elecSrc));
+check("搬窗/记落点都不再直接用 getPosition()", !/win\.getPosition\(\)\[0\]/.test(elecSrc) && /windowDrag = Object\.assign\(\{\}, currentPos\(\)/.test(elecSrc) && /writeStagePos\(home, currentPos\(\)\)/.test(elecSrc));
 check("喂给 setBounds 的坐标都过有限性检查", /function clampToDisplay[\s\S]{0,400}Number\.isFinite/.test(elecSrc) && /function applyBounds[\s\S]{0,700}Number\.isFinite\(bounds\.x\)/.test(elecSrc));
 check("摆完当场核对，没摆成就打日志", /窗没摆成（要 \$\{width\}x\$\{height\}/.test(elecSrc));
 check("move / resize 事件同步落点（resize 还要把形状重裁一遍）", /win\.on\("move", \(_e, b\) => rememberPos\(b\)\)/.test(elecSrc) && /win\.on\("resize", \(_e, b\) => \{[\s\S]{0,80}rememberPos\(b\);[\s\S]{0,80}resyncShape\(\);/.test(elecSrc));
@@ -729,7 +773,7 @@ check("move / resize 事件同步落点（resize 还要把形状重裁一遍）"
 // 用户口径：宽度低于 380，16:9 舞台上的角色两侧（手脚 / 拖拽反馈 / 两行气泡）就被切掉。
 // 所以 380 是硬下限，配置、档位、舞台窗、主进程兜底四处都得有。
 console.log("\n尺寸下限 380（动画别被切一半）…");
-check("pet.js 有 380 硬下限常量", /var MIN_PET_SIZE = 380/.test(petSrc) && /var MIN_STAGE_W = MIN_PET_SIZE \+ 80/.test(petSrc));
+check("pet.js 有 380 硬下限常量", /var MIN_PET_SIZE = 380/.test(petSrc) && /Math\.max\(MIN_PET_SIZE, Math\.round\(w\)\)/.test(petSrc));
 check("配置里写小了抬到下限（不报错、不照用）", /if \(size < MIN_PET_SIZE\)[\s\S]{0,400}size = MIN_PET_SIZE/.test(petSrc));
 check("换尺寸档位也过下限", /var size = Math\.max\(MIN_PET_SIZE, SIZE_MAP\[sizeArg\]/.test(petSrc));
 check("config.jsonc 里的宠物宽度不小于下限", (() => { const m = /"id": "main"[\s\S]{0,80}?"size":\s*(\d+)/.exec(readFileSync(join(ROOT, "assets", "config.jsonc"), "utf8")); return m && Number(m[1]) >= 380; })());

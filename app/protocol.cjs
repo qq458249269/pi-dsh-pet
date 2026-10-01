@@ -255,8 +255,10 @@ function positionsFrame(map) {
 }
 
 /**
- * 把位置表洗成 `{ "<id>": {rx, ry} }`（比例夹在 0~1，最多留8 只）。
+ * 把位置表洗成 `{ "<id>": {rx, ry, w?, h?} }`（比例夹在 0~1，最多留8 只）。
  * 窗与文件都不可信（宠物 id 是字符串、比例可能写成 NaN/字符串），在这儿统一夹一次。
+ * w/h 是「落点存下去时舞台窗的尺寸」：窗尺寸变了窗内比例就不是那个意思了，
+ * 渲染进程靠它把比例换算回同一个屏幕位置（可选字段，老记录没有就当没变过）。
  */
 function sanitizePositions(map) {
 	const out = {};
@@ -267,7 +269,13 @@ function sanitizePositions(map) {
 		const rx = Number(pos.rx);
 		const ry = Number(pos.ry);
 		if (!Number.isFinite(rx) || !Number.isFinite(ry)) continue;
-		out[key] = { rx: Math.min(Math.max(rx, 0), 1), ry: Math.min(Math.max(ry, 0), 1) };
+out[key] = { rx: Math.min(Math.max(rx, 0), 1), ry: Math.min(Math.max(ry, 0), 1) };
+		const w = Number(pos.w);
+		const h = Number(pos.h);
+		if (Number.isFinite(w) && w > 0 && Number.isFinite(h) && h > 0) {
+			out[key].w = Math.min(Math.round(w), 20000);
+			out[key].h = Math.min(Math.round(h), 20000);
+		}
 		if (Object.keys(out).length >= MAX_PETS_CEILING) break;
 	}
 	return out;

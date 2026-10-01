@@ -29,8 +29,29 @@
    *   ③ reportWindowSize（舞台窗宽度下限，= 380 + 边距）
    */
   var MIN_PET_SIZE = 380;
-/** 舞台窗的最小宽度：下限 380 + 左右各 40 的余量（气泡最宽 420，得放得下）。 */
-  var MIN_STAGE_W = MIN_PET_SIZE + 80;
+  /** 宠物（动画）的**最小高度**，px —— 「按高度配置」（height）时的下限。
+   *  380 宽 × 9/16 ≈ 214：比它再矮，16:9 的画布就窄过 380 宽那条线（同一个下限）。 */
+  var MIN_PET_H = 214;
+
+  /**
+   * 一只宠物的显示**宽度**，px（纯计算，配置 → 像素只有一个出处）。
+   *
+   * 两种写法（只加不改，老配置照旧）：
+   *   • size: 462   —— 旧口径：给宽度，高度按 16:9 推（默认行为，一字未变）
+   *   • height: 260 —— 新口径（§9.24）：给高度，**宽度自适应** = height × 16/9
+   * 「按高度设置」才是屏幕上的真实口径：桌面上占多高才 deciding 了显不显得下，
+   * 宽高比是动画自己的事（16:9），不该让人手算宽度。
+   */
+  function petSizeOf(cfg) {
+    var h = Number(cfg && cfg.height);
+    if (isFinite(h) && h > 0) {
+      if (h < MIN_PET_H) h = MIN_PET_H;
+      return Math.round((h * 16) / 9);
+    }
+    var w = Number(cfg && cfg.size);
+    if (!isFinite(w) || w <= 0) w = 400;
+    return Math.max(MIN_PET_SIZE, Math.round(w));
+  }
 
   /**
    * 换动画时，等「新的一段首帧真的贴上屏幕」最多等多久（ms）。
@@ -110,15 +131,29 @@
       var id = String(p.id || "");
       if (!id || seen[id]) throw new Error("pet id invalid or duplicate: " + id);
       var size = Number(p.size);
-      if (!isFinite(size) || size <= 0) throw new Error("pet " + id + " size invalid");
-      // 小于下限的（老配置、手改 JSON）**抬到下限**而不是照用：宽度不够就展示不全。
-      if (size < MIN_PET_SIZE) {
-        try {
-          console.warn("[pi-dsh-pet] pet " + id + " 的 size " + size + " 小于下限 " + MIN_PET_SIZE + "，按 " + MIN_PET_SIZE + " 算");
-        } catch (e) {
-          /* 浏览器里没 console 就算了 */
+      var height = Number(p.height);
+      // 「设置高度、自适应宽度」（§9.24）：写了 height 就以它为准，size 变成推导值。
+      if (isFinite(height) && height > 0) {
+        if (height < MIN_PET_H) {
+          try {
+            console.warn("[pi-dsh-pet] pet " + id + " 的 height " + height + " 小于下限 " + MIN_PET_H + "，按 " + MIN_PET_H + " 算");
+          } catch (e) {
+            /* 浏览器里没 console 就算了 */
+          }
+          height = MIN_PET_H;
         }
-        size = MIN_PET_SIZE;
+        size = Math.round((height * 16) / 9);
+      } else {
+        if (!isFinite(size) || size <= 0) throw new Error("pet " + id + " size invalid");
+        // 小于下限的（老配置、手改 JSON）**抬到下限**而不是照用：宽度不够就展示不全。
+        if (size < MIN_PET_SIZE) {
+          try {
+            console.warn("[pi-dsh-pet] pet " + id + " 的 size " + size + " 小于下限 " + MIN_PET_SIZE + "，按 " + MIN_PET_SIZE + " 算");
+          } catch (e) {
+            /* 浏览器里没 console 就算了 */
+          }
+          size = MIN_PET_SIZE;
+        }
       }
       var corner = (p.position && p.position.corner) || "";
       if (!CORNER_SET[corner]) throw new Error("pet " + id + " corner invalid");
@@ -126,7 +161,10 @@
       var marginY = Number(p.position && p.position.marginY);
       if (!isFinite(marginX) || !isFinite(marginY)) throw new Error("pet " + id + " margin invalid");
       seen[id] = true;
-      pets.push({ id: id, size: size, position: { corner: corner, marginX: marginX, marginY: marginY } });
+      var out = { id: id, size: size, position: { corner: corner, marginX: marginX, marginY: marginY } };
+      // 高度原样带下去：reportWindowSize/stageSize 会重算一次，两边用同一个 petSizeOf
+      if (isFinite(height) && height > 0) out.height = height;
+      pets.push(out);
     }
 
     // animations
@@ -239,32 +277,76 @@ var HIT_PAD_X = 10;
         早先按 36 算，白白少给一行 —— 见 §9.21 的实测） */
   var BUBBLE_CHROME_H = 18;
   /**
-   * 舞台窗的留白（§9.21）：窗 = 宠物 + 四边 padding。
+   * 舞台窗的留白（§9.24）：窗 = 宠物 + 四边 padding。
    *
    * 配置里的 marginX/marginY 当**下限**用：比 padding 小的抬到 padding。理由：
    *   ① 头顶那截不是装饰，是气泡的舞台（150 = 6 行字 113 + 贴边 18，实测）；
-   *   ② 左右那截是**宽气泡**探出来的：气泡要能探到宠物两侧各 200px（§9.22）。
-   *      窗 = 宠物 462 + 400 = 862，气泡封顶 = 窗宽 - 32 = 830（≈63 字/行，
-   *      原来 560 只有 42 字/行 —— 一句话要占的行数多一倍，长文案先被行数封顶吃掉，
-   *      看着就是「气泡放不下」）。
+   *   ② 左右那截只当「动画离窗边的余量」（24px）—— 宽气泡**不再**靠它，
+   *      窗宽改成**跟着动画走**（下面 stageSize），气泡封顶 = min(窗宽-16, BUBBLE_W_MAX)。
    *   ③ 但这截窗里除了宠物和气泡全是透明的 —— 它不能挡住别的软件，
    *      所以窗可以大、形状必须小（见 pet-electron.cjs 的 setShape）。
-   * ⚠️ 别拿「窗小一点」当省事：窗一小，气泡就被夹着抽字，句尾凭空消失。
-   * ⚠️ 气泡的宽度上限**不许**在 pet.css 里另写一个数：那边写死、这边按窗宽算，
-   *   两份数一定会走偏（多出来的留白就白留了）。一律走 --bubble-max-w（见 applyBubbleMaxWidth）。
+   *
+   * ⚠️ 左右留白曾经被抬到 200（§9.22/§9.23），量完撤了：窗从 622 涨到 862，
+   *   动画并没有因此变大一点 —— 动画只占 size 宽（实测量：size=900 时窗 1300 宽，
+   *   贴右上角后动画右边离窗边只剩 marginX=24px，左边却空着 376px，
+   *   看着就是「动画被窗边切了一角 / 显示不全」）。真正该给的是**高度**
+   *   （头顶 150 装气泡），宽度按内容自适应，见 stageSize()。
    */
-  var STAGE_PAD_X = 200;
+  var STAGE_PAD_X = 32;
   var STAGE_PAD_TOP = 150;
   var STAGE_PAD_BOTTOM = 60;
+  /** 气泡封顶：再宽也不超过这个数（超宽气泡会横跨半个屏，看着不像「宠物说话」） */
+  var BUBBLE_W_MAX = 820;
   /**
    * 贴上边的宠物在窗里离窗顶多远：至少 STAGE_PAD_TOP。
    * applyPosition（摆位）与 reportWindowSize（报窗大小）必须用**同一个**算法，
    * 否则报的高度和实际偏移差一截，窗顶/窗底就空出一截死区（白占合成预算）。
    */
-  function topOffsetOf(cfg) {
+function topOffsetOf(cfg) {
     var m = Number(cfg && cfg.position ? cfg.position.marginY : 0);
     if (!isFinite(m)) m = 0;
     return Math.max(m, STAGE_PAD_TOP);
+  }
+  /**
+   * 贴下边的宠物在窗里离窗底多远。贴上边时底下只留拖拽/漫游的余量，用定值；
+   * 贴下边时才认配置里的 marginY（不然窗底会空出一截死区，见 §9.21）。
+   * ⚠️ stageSize() 算窗高、stageKeepIn() 算站位区间都必须走这里 —— 又一份算法
+   *   就会又一处对不上（§9.22 就是窗和气泡两份数对不上）。
+   */
+  function bottomPadOf(cfg) {
+    var corner = String((cfg && cfg.position && cfg.position.corner) || "bottom-right");
+    if (corner.indexOf("top") === 0) return STAGE_PAD_BOTTOM;
+    var m = Number(cfg && cfg.position ? cfg.position.marginY : 0);
+    if (!isFinite(m)) m = 0;
+    return Math.max(m, STAGE_PAD_BOTTOM);
+  }
+  /**
+   * 站位记忆（customPos）套回来时，宠物在**窗里**能站的范围。
+   *
+   * ⚠️ 为什么只管站位，不管漫游/拖动（clampPos 仍是 0 起夹）：
+   *   留白是**气泡的舞台**。站位是「上次停哪儿」，会被 resize 反复重新套用；
+   *   实测那条把宠物钉在窗顶的记录（ry 算出来正好 0）套上后头顶 0 留白，
+   *   气泡被压成 846x24 的一条、字全裁没了（§9.23）。
+   *   漫游只改 left 不改 top（纵向由站位打底），横向窗里还有 400px 可夹 —— 所以
+   *   卡住站位这一头就够了，漫游行程不受影响。
+   *
+   * ⚠️ 窗比「宠物 + 两侧留白」还窄时（多开时窗按最大的那只算，小的那只就在区间外）
+   *   区间会翻过来，这时取中间值而不是硬贴左边 —— 否则照样贴到窗边、同样没头顶。
+   */
+  function stageKeepIn(left, top, size, cfg) {
+    var petH = (size * 9) / 16;
+    var W = window.innerWidth;
+    var H = window.innerHeight;
+    var loX = STAGE_PAD_X;
+    var hiX = W - size - STAGE_PAD_X;
+    if (hiX < loX) loX = hiX = Math.max(0, (W - size) / 2);
+    var loY = topOffsetOf(cfg);
+    var hiY = H - petH - bottomPadOf(cfg);
+    if (hiY < loY) loY = hiY = Math.max(0, (H - petH) / 2);
+    return {
+      left: Math.min(Math.max(left, loX), hiX),
+      top: Math.min(Math.max(top, loY), hiY),
+    };
   }
   /** 漫游/拖拽时每帧都在动，而主进程每次都要 SetWindowRgn：50ms 一次（20fps）跟手又不至于卡 */
   var HIT_THROTTLE_MS = 50;
@@ -433,6 +515,24 @@ var box = {
 
   var savedPositions = {}; // id → {rx, ry}
 
+/**
+   * 位置记忆换算：r 是「窗内比例」，wOld 是存下去那会儿的窗宽，wNow 是现在的。
+   *
+   * ⚠️ 存比例是为了换分辨率/换显示器还能落在同一个「地方」（见 paths.cjs），
+   *   但比例是**相对窗**的，而舞台窗的尺寸会变：这一版就把左右留白从 80 提到 200
+   *   （622 → 862），老落点 rx=0.5797 套上去宠物就水平平移 (862-622)*0.58 = **139px**
+   *   （用户看得见「启动后宠物自己跑了一边」）。
+   *   修法：存的时候把当时窗宽一起存下来（可选字段，老记录没存就当没变过），
+   *   套的时候换算回同一个**窗内绝对位置**：
+   *     left = rx*W - halfW  要不变 ⇒  rx' = rx * W_old / W_new（halfW 两边抵消）。
+   */
+  function rescalePos(r, wOld, wNow) {
+    var wo = Number(wOld);
+    var wn = Number(wNow);
+    if (!isFinite(wo) || !(wo > 0) || !(wn > 0)) return r;
+    return (r * wo) / wn;
+  }
+
   /** 把宿主给的位置套到宠物身上（按 id；单只且只有一条记录时允许借用，见下）。 */
   function applySavedPositions() {
     var keys = Object.keys(savedPositions || {});
@@ -445,7 +545,7 @@ var box = {
       // 多条记录时猜（拿 keys[0]）会把宠物放到别的只记住的地方去，那更糟。
       if (!pos && pets.length === 1 && keys.length === 1) pos = savedPositions[keys[0]];
       if (!pos) continue;
-      p.customPos = { rx: Number(pos.rx), ry: Number(pos.ry) };
+p.customPos = { rx: rescalePos(Number(pos.rx), Number(pos.w), window.innerWidth), ry: rescalePos(Number(pos.ry), Number(pos.h), window.innerHeight), w: window.innerWidth, h: window.innerHeight };
       if (typeof p.applyPosition === "function") p.applyPosition();
     }
     pushHitRegion(); // 位置变了 = 命中区变了（宠物挪走了，得跟着走）
@@ -453,10 +553,11 @@ var box = {
 
   /** 记住一只的落点（拖拽松手时调）。没有桥（浏览器里直接看）就静默跳过。 */
   function savePosition(pet) {
-    var api = window.__petElectron__;
+var api = window.__petElectron__;
     if (!api || !api.savePosition || !pet || !pet.customPos) return;
     try {
-      api.savePosition(pet.id, pet.customPos.rx, pet.customPos.ry);
+      // 窗宽/窗高一起存（见 rescalePos）：下次窗变大/变小，宠物才不会被比例拽走。
+      api.savePosition(pet.id, pet.customPos.rx, pet.customPos.ry, window.innerWidth, window.innerHeight);
     } catch (e) {
       /* 主进程还没 ready —— 下次拖就存上了 */
     }
@@ -568,7 +669,8 @@ var box = {
   function PetCard(cfg, rootEl) {
     var self = this;
     this.cfg = cfg;
-    this.size = cfg.size;
+    // 尺寸只认 petSizeOf（height 优先 / size 兜底）：别处再读一次 cfg.size 就又一份算法
+    this.size = petSizeOf(cfg);
     this.facing = "left";
     this.facingRef = "left";
 
@@ -675,14 +777,18 @@ var box = {
     });
 
     function applyPosition() {
-      if (self.customPos) {
+if (self.customPos) {
         var cp = self.customPos;
-        var left = Math.min(Math.max(cp.rx * window.innerWidth - halfW, 0), window.innerWidth - self.size);
-        var top = Math.min(Math.max(cp.ry * window.innerHeight - halfH, 0), window.innerHeight - (self.size * 9) / 16);
-        container.style.left = left + "px";
-        container.style.top = top + "px";
+        // 站位也要给气泡留舞台（§9.23）
+        var keep = stageKeepIn(cp.rx * window.innerWidth - halfW, cp.ry * window.innerHeight - halfH, self.size, cfg);
+        container.style.left = keep.left + "px";
+        container.style.top = keep.top + "px";
         container.style.right = "auto";
         container.style.bottom = "auto";
+        // 夹完把内存里的落点也改回实际值：不改的话漫游起点（currentCenterX/Y 读的是
+        // customPos）会从「夹之前」那个点算，宠物在窗里先跳一下再走。
+        self.customPos.rx = (keep.left + halfW) / window.innerWidth;
+        self.customPos.ry = (keep.top + halfH) / window.innerHeight;
         return;
       }
       container.style.removeProperty("top");
@@ -1294,7 +1400,7 @@ self.clampBubble = function () {
           // 存**实际落点**而不是计划点：贴边时 clampPos 会把宠物夹回屏内，
           // 存计划点的话下次 resize 一下宠物就又飞到屏外去了
           var done = container.getBoundingClientRect();
-          self.customPos = { rx: (done.left + halfW) / W, ry: (done.top + halfH) / H };
+self.customPos = { rx: (done.left + halfW) / W, ry: (done.top + halfH) / H, w: W, h: H };
         }
       };
       self.moveRef = requestAnimationFrame(step);
@@ -1470,7 +1576,7 @@ if (config.animations.drag.length) {
         self.justDragged = true;
         setTimeout(function () { self.justDragged = false; }, 100);
         self.dragging = false;
-        self.customPos = { rx: (e.clientX - dragState.offX) / window.innerWidth, ry: (e.clientY - dragState.offY) / window.innerHeight };
+self.customPos = { rx: (e.clientX - dragState.offX) / window.innerWidth, ry: (e.clientY - dragState.offY) / window.innerHeight, w: window.innerWidth, h: window.innerHeight };
         self.movedLocally = true;
         savePosition(self); // 记住落点：下次启动还在这儿（宿主落盘，比例坐标）
         stage.style.transform = "translateY(" + bottomPad + "px)";
@@ -1686,7 +1792,8 @@ if (config.animations.drag.length) {
     var api = window.__petElectron__;
     if (!api || !api.setWindowSize || !config) return;
     try {
-      // 宽度下限 = MIN_STAGE_W（380 + 边距）：宁可窗大一点，也不能把动画切掉半只
+      // 宽度按内容自适应（§9.24）：stageSize 算的宽是 max(动画宽, 气泡基准宽) + 余量，
+      // 这里不再自己加 padding —— 加两遍就是白留（§9.22 就是这么白留的）。
       api.setWindowSize(s.w, s.h);
     } catch (e) {
       /* 主进程还没 ready：那就用它的默认尺寸，窗也不会因此坏掉 */
@@ -1704,7 +1811,7 @@ if (config.animations.drag.length) {
     var botPad = 0;
     var sidePad = 0;
     (config && config.pets ? config.pets : []).forEach(function (cfg) {
-      var s = Number(cfg.size);
+      var s = petSizeOf(cfg);
       if (!(s > maxW)) return;
       maxW = s;
       var pos = (cfg && cfg.position) || {};
@@ -1713,34 +1820,41 @@ if (config.animations.drag.length) {
       if (!isFinite(mX)) mX = 0;
       var mY = Number(pos.marginY);
       if (!isFinite(mY)) mY = 0;
-      if (corner.indexOf("top") === 0) {
-        topOff = Math.max(topOff, topOffsetOf(cfg));
-        botPad = Math.max(botPad, STAGE_PAD_BOTTOM);
-      } else {
-        topOff = Math.max(topOff, STAGE_PAD_TOP);
-        botPad = Math.max(botPad, Math.max(mY, STAGE_PAD_BOTTOM));
-      }
+      if (corner.indexOf("top") === 0) topOff = Math.max(topOff, topOffsetOf(cfg));
+      else topOff = Math.max(topOff, STAGE_PAD_TOP);
+      botPad = Math.max(botPad, bottomPadOf(cfg));
       sidePad = Math.max(sidePad, Math.max(mX, STAGE_PAD_X));
     });
     if (!maxW) maxW = 400;
     if (maxW < MIN_PET_SIZE) maxW = MIN_PET_SIZE;
     var petH = Math.round((maxW * 9) / 16);
+    // 宽度**自适应内容**（§9.24）：窗跟着动画走（动画多大就留多宽），两侧只留余量。
+    //   没有「强制窗宽」了 —— 以前是 max(380+80, 动画宽+400)：小动画白背一截空窗，
+    //   大动画又被 padding 顶到窗边（实测 size=900：窗 1300 宽，动画右边只剩 24px）。
+    // ⚠️ 窗宽**不许**再为气泡撑（曾试过 max(动画宽, 气泡基准 560)+余量）：
+    //   窗一比「动画 + 余量」宽，气泡（封顶 = 窗宽-16）就比动画宽很多，居中时必被
+    //   clampBubble 推到贴一边 —— 实测 592 宽的气泡居中于 462 的动画，左探 196px、右探 16px。
+    //   宁可气泡窄一点（字多几行），也不要歪。
+    var w = maxW + sidePad * 2;
     return {
       petW: maxW,
-      w: Math.max(MIN_STAGE_W, maxW + sidePad * 2),
-      h: Math.max(MIN_PET_SIZE, topOff + petH + botPad),
+      w: w,
+      h: Math.max(Math.round((MIN_PET_H * 16) / 9), topOff + petH + botPad),
     };
   }
 
   /**
-   * 气泡能有多宽 = 窗宽 - 16（左右各留 8 给 clampBubble 的贴边夹取），写进 CSS 变量。
-   * pet.css 那侧读 var(--bubble-max-w, 544px)：默认值只是「拿不到配置时也别太宽」的兜底。
+   * 气泡能有多宽（写进 CSS 变量 --bubble-max-w，pet.css 那侧只读它）。
+   *
+   * = min(窗宽 - 16, BUBBLE_W_MAX)：窗宽 - 16 是 clampBubble 夹得住的上限
+   * （左右各留 8）；BUBBLE_W_MAX 封顶，免得小屏上横跨半个屏。
    * ⚠️ 这个数是**外框**宽（.pet-bubble 是 border-box）：按内容盒算的话会差
    *   24px padding + 2px border，气泡就比窗宽，夹取永远夹不住（§9.22）。
    */
   function applyBubbleMaxWidth(winW) {
     try {
-      document.documentElement.style.setProperty("--bubble-max-w", Math.max(240, Math.round(winW) - 16) + "px");
+      var w = Math.min(Math.max(240, Math.round(winW) - 16), BUBBLE_W_MAX);
+      document.documentElement.style.setProperty("--bubble-max-w", w + "px");
     } catch (e) {
       /* 老浏览器不支持自定义属性：CSS 里那个兜底值还在 */
     }

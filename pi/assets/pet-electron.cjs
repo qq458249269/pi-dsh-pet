@@ -501,7 +501,7 @@ function applyBounds(width, height) {
   // 渲染进程报上来的舞台尺寸（它知道配置里最大的宠物 + 气泡要多少地方）
   //
   // 宽度下限 380：小于它动画就展示不全（见 pet.js 的 MIN_PET_SIZE）。
-  // 渲染进程那边已经把这个下限算进去了（MIN_STAGE_W），这里再扣一道底，
+  // 渲染进程那边已经算好了窗宽（§9.24：max(动画宽, 气泡基准宽) + 余量），这里只扣一道底，
   // 免得哪次配置写小了、或者别的客户端直接报一个 100x100 上来，把窗抽成一条缝。
   const MIN_STAGE_W = 380;
   ipcMain.on("pet:window-size", (_event, m = {}) => {
@@ -526,21 +526,35 @@ function applyBounds(width, height) {
     const dx = num(m.dx, 0);
     const dy = num(m.dy, 0);
     if (!dx && !dy) return;
-    if (!windowDrag) {
-      // getPosition() 在窗没映射时会给 [NaN, NaN]（见上面 stagePos 的注释）→ 用自己记的
-      windowDrag = currentPos();
+if (!windowDrag) {
+// getPosition() 在窗没映射时会给 [NaN, NaN]（见上面 stagePos 的注释）→ 用自己记的。
+      // ⚠️ currentPos() 返回的是 stagePos **本身**，要挂 w/h 就得先拷一份，别把
+      //   两个用途（窗落点 / 本次拖拽的尺寸缓存）搅在同一个对象上。
+      const cs0 = contentSize();
+      windowDrag = Object.assign({}, currentPos(), { w: cs0.w, h: cs0.h });
     }
-    // 宠物在窗里的位置（渲染进程量好的）：把它夹在屏幕工作区里，别拖到屏幕外找不着
+// 宠物在窗里的位置（渲染进程量好的）：用它选显示器（宠物跟着窗走，得按宠物落哪块屏算）
     const il = num(m.left, 0);
     const it = num(m.top, 0);
-    const ir = il + num(m.width, 0);
-    const ib = it + num(m.height, 0);
     const want = { x: windowDrag.x + dx, y: windowDrag.y + dy };
     const d = screen.getDisplayNearestPoint({ x: want.x + il + 20, y: want.y + it + 20 });
     const w = d.workArea;
+    // ⚠️ 夹的是**整扇窗**进这块屏的工作区，不是「宠物别出屏」（早先夹的是后者：窗可以
+    //   挂到屏外 il-6，宠物就能贴屏幕边，代价是窗有一截在屏外 —— 而气泡是按**窗**夹的
+    //   （clampBubble 不知道屏幕），于是窗挂出去多少、气泡就在屏外看不见多少：
+    //   实测窗顶挂出 120px 时，110px 的气泡有 90px 在屏外（§9.22）。
+    //   代价要知道：宠物离屏边至少「它在窗里贴着的那条边」那么多（左右 200、顶上 150），
+    //   拖到边上就顶住了 —— 这是「留白是宠物的禁区」这个选择的必然结果（§9.23）。
+const cs = { w: num(windowDrag.w, 0), h: num(windowDrag.h, 0) };
+    if (!cs.w || !cs.h) return; // 窗的尺寸都量不到就别搬：算出来的落点不可信
+    const loX = w.x;
+    const hiX = w.x + w.width - cs.w;
+    const loY = w.y;
+    const hiY = w.y + w.height - cs.h;
+    // 窗比屏还宽/高时区间会翻过来（lo > hi）：这时靠上/靠左摆，别让 min/max 选到反的一头
     const pos = {
-      x: Math.round(Math.min(Math.max(want.x, w.x - il + 6), w.x + w.width - ir - 6)),
-      y: Math.round(Math.min(Math.max(want.y, w.y - it + 6), w.y + w.height - ib - 6)),
+      x: Math.round(loX > hiX ? loX : Math.min(Math.max(want.x, loX), hiX)),
+      y: Math.round(loY > hiY ? loY : Math.min(Math.max(want.y, loY), hiY)),
     };
     // 已经被夹在屏幕边上时 want 还在变、pos 却不动：这种「搬不动」的 move 全部丢掉。
     // 不丢也不会错，但是白白的 SetWindowPos + DWM 重合成，而且在边上会跟系统的
@@ -657,7 +671,7 @@ function applyBounds(width, height) {
     const ry = Number(payload.ry);
     if (!id || !Number.isFinite(rx) || !Number.isFinite(ry)) return;
     const { token } = readTokenAndHome();
-    const res = await callHost("set-position", { id, rx, ry }, token);
+const res = await callHost("set-position", { id, rx, ry, w: Number(payload.w), h: Number(payload.h) }, token);
     if (!res || res.ok !== true) {
       console.error(`[pi-dsh-pet] 位置没记住（${id}）：${res ? res.error : "no response"}`);
     }

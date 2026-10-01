@@ -417,7 +417,7 @@ const next = writeCtrl(patch);
 				// 窗里拖完报上来的落点（比例）。落盘 home/positions.json，下次启动就在那儿。
 				const id = String(arg.id || "").trim();
 				if (!id) return { ok: false, error: "set-position 缺 id" };
-				const map = rememberPosition(id, arg.rx, arg.ry);
+const map = rememberPosition(id, arg.rx, arg.ry, arg.w, arg.h);
 				if (!Object.prototype.hasOwnProperty.call(map, id)) {
 					return { ok: false, error: "set-position 的坐标不合法（要 0~1 的数字）" };
 				}
