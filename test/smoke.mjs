@@ -649,7 +649,7 @@ check("搬窗时把宠物夹在屏幕工作区内", /w\.x \+ w\.width - ir - 6/.
 check("搬完记住落点", /pet:window-drag-end/.test(elecSrc) && /endWinDrag\(\)/.test(petSrc));
 check("渲染进程报舞台尺寸（宠物 + 气泡）", /reportWindowSize\(\)/.test(petSrc) && /pet:window-size/.test(elecSrc));
 check("preload 三个新口都齐", /setWindowSize/.test(preloadSrc) && /moveWindow/.test(preloadSrc) && /endWindowDrag/.test(preloadSrc));
-check("舞台窗 = 宠物 + 四边留白（不是把动画放大）", /var STAGE_PAD_X = 80/.test(petSrc) && /var STAGE_PAD_TOP = 150/.test(petSrc) && /var STAGE_PAD_BOTTOM = 60/.test(petSrc) && /Math\.max\(MIN_STAGE_W, maxW \+ sidePad \* 2\)/.test(petSrc) && /Math\.max\(MIN_PET_SIZE, topOff \+ petH \+ botPad\)/.test(petSrc));
+check("舞台窗 = 宠物 + 四边留白（不是把动画放大）", /var STAGE_PAD_X = 200/.test(petSrc) && /var STAGE_PAD_TOP = 150/.test(petSrc) && /var STAGE_PAD_BOTTOM = 60/.test(petSrc) && /Math\.max\(MIN_STAGE_W, maxW \+ sidePad \* 2\)/.test(petSrc) && /Math\.max\(MIN_PET_SIZE, topOff \+ petH \+ botPad\)/.test(petSrc));
 // ⚠️ marginX/marginY 现在是**下限**（§9.21）：比留白小的抬到留白。头顶那截是气泡的舞台，
 //   不抬的话贴上边的宠物头顶只有 marginY（实测 100）= 三行字，窗底那截空白一点用没有。
 check("配置里的 marginX/marginY 当留白的下限（不够就抬上去）", /function topOffsetOf\(cfg\)[\s\S]{0,200}Math\.max\(m, STAGE_PAD_TOP\)/.test(petSrc) && /Math\.max\(mX, STAGE_PAD_X\)/.test(petSrc) && /Math\.max\(mY, STAGE_PAD_BOTTOM\)/.test(petSrc));
@@ -668,7 +668,14 @@ check("漫游/气泡仍按窗口尺寸算（舞台=窗口，逻辑没变）", /w
 // ② 气泡高度写死在 CSS 的「最多三行」，不量头顶真实空间。
 // 修法：窗 = 宠物 + 四边留白（配置里的 margin 当下限），气泡按头顶实测空间算行数与 max-height。
 console.log("\n气泡放得下（留白 + 按空间夹）…");
-check("气泡最宽 560、最多 6 行（原来 420/3 行，长文案被抽掉一半）", /max-width: min\(560px, calc\(100vw - 32px\)\)/.test(petCss) && /-webkit-line-clamp: 6/.test(petCss) && !/max-width: min\(420px/.test(petCss));
+check("气泡宽度跟着窗宽走（--bubble-max-w = 窗宽 - 16），最多 6 行", /max-width: min\(var\(--bubble-max-w, 544px\), calc\(100vw - 16px\)\)/.test(petCss) && /-webkit-line-clamp: 6/.test(petCss) && !/max-width: min\(420px/.test(petCss) && !/max-width: min\(560px/.test(petCss));
+// ⚠️ 气泡必须 border-box：--bubble-max-w 说的是**外框**宽，而 max-width 默认按内容盒算，
+//   差着 24px padding + 2px border。算错的后果不是不好看，是气泡比窗还宽 ⇒ 左右两个
+//   8px 边距永远夹不住，clampBubble 每次把它往另一边推 10px（实测 -12 → -22 来回甩）。
+check("气泡 border-box（max-width 按外框算，夹取才夹得住）", /\.pet-bubble \{[\s\S]{0,2400}box-sizing: border-box/.test(petCss));
+// ⚠️ 气泡的宽度上限只许有一个出处：窗宽算一次 → CSS 变量 → pet.css 读它。
+//   写死过一次（pet.css 560 / pet.js 按窗宽 620），多出来的留白就白留了（§9.22）。
+check("气泡上限只有一个出处（stageSize → --bubble-max-w → pet.css）", /function stageSize\(/.test(petSrc) && /function applyBubbleMaxWidth\(/.test(petSrc) && /applyBubbleMaxWidth\(s\.w\)/.test(petSrc) && /Math\.round\(winW\) - 16/.test(petSrc) && !/560px/.test(petCss));
 check("气泡高度由 clampBubble 按头顶空间写（不再写死三行）", /var room = Math\.max\(24, Math\.round\(cr\.top - BUBBLE_CHROME_H\)\)/.test(petSrc) && /bubble\.style\.maxHeight = room \+ "px"/.test(petSrc) && /bubble\.style\.webkitLineClamp = String\(lines\)/.test(petSrc));
 check("行数按空间收（空间不够就少几行，而不是把话抽掉）", /Math\.min\(6, Math\.floor\(\(room - 14\) \/ BUBBLE_LINE_H\)\)/.test(petSrc) && /var BUBBLE_LINE_H = 18\.85/.test(petSrc));
 // 「说点什么」输入框在气泡**底部**（bubbleText 之后 append），封整个气泡会把框裁掉 → 只封文字

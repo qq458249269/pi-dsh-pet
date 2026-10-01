@@ -242,13 +242,18 @@ var HIT_PAD_X = 10;
    * 舞台窗的留白（§9.21）：窗 = 宠物 + 四边 padding。
    *
    * 配置里的 marginX/marginY 当**下限**用：比 padding 小的抬到 padding。理由：
-   *   ① 头顶那截不是装饰，是气泡的舞台（150 = 5 行字 94 + 贴边 18 + 输入框 44，实测）；
-   *   ② 左右那截是**宽气泡**探出来的（气泡最宽 560，宠物 462 → 每边探出 49px）；
+   *   ① 头顶那截不是装饰，是气泡的舞台（150 = 6 行字 113 + 贴边 18，实测）；
+   *   ② 左右那截是**宽气泡**探出来的：气泡要能探到宠物两侧各 200px（§9.22）。
+   *      窗 = 宠物 462 + 400 = 862，气泡封顶 = 窗宽 - 32 = 830（≈63 字/行，
+   *      原来 560 只有 42 字/行 —— 一句话要占的行数多一倍，长文案先被行数封顶吃掉，
+   *      看着就是「气泡放不下」）。
    *   ③ 但这截窗里除了宠物和气泡全是透明的 —— 它不能挡住别的软件，
    *      所以窗可以大、形状必须小（见 pet-electron.cjs 的 setShape）。
    * ⚠️ 别拿「窗小一点」当省事：窗一小，气泡就被夹着抽字，句尾凭空消失。
+   * ⚠️ 气泡的宽度上限**不许**在 pet.css 里另写一个数：那边写死、这边按窗宽算，
+   *   两份数一定会走偏（多出来的留白就白留了）。一律走 --bubble-max-w（见 applyBubbleMaxWidth）。
    */
-  var STAGE_PAD_X = 80;
+  var STAGE_PAD_X = 200;
   var STAGE_PAD_TOP = 150;
   var STAGE_PAD_BOTTOM = 60;
   /**
@@ -1661,7 +1666,7 @@ if (config.animations.drag.length) {
    * 报「这扇窗要多大」给主进程（Electron 才有意义，浏览器里静默跳过）。
    *
    * 窗 = 宠物 + 四边留白（padding），不是「把宠物放大」（§9.21）：
-   *   宽：宠物宽 + 左右各 STAGE_PAD_X（最宽的气泡 560 也塞得下）
+   *   宽：宠物宽 + 左右各 STAGE_PAD_X（气泡封顶 = 窗宽 - 32，见 applyBubbleMaxWidth）
    *   高：头顶留白 + 宠物高 + 底下留白
    *     贴上边：头顶 = max(marginY, STAGE_PAD_TOP)，底下 STAGE_PAD_BOTTOM
    *     贴下边：头顶 STAGE_PAD_TOP，底下 = max(marginY, STAGE_PAD_BOTTOM)
@@ -1676,13 +1681,29 @@ if (config.animations.drag.length) {
    *   窗还挂到屏幕外头去了。见 §9.21。）
    */
   function reportWindowSize() {
+    var s = stageSize();
+    applyBubbleMaxWidth(s.w);
     var api = window.__petElectron__;
     if (!api || !api.setWindowSize || !config) return;
+    try {
+      // 宽度下限 = MIN_STAGE_W（380 + 边距）：宁可窗大一点，也不能把动画切掉半只
+      api.setWindowSize(s.w, s.h);
+    } catch (e) {
+      /* 主进程还没 ready：那就用它的默认尺寸，窗也不会因此坏掉 */
+    }
+  }
+
+  /**
+   * 舞台窗该多大（纯计算，不碰 DOM）：报尺寸、摆位置、气泡封顶三处共用一份。
+   * ⚠️ 别把它散回两个函数里各算一遍：上一轮就是「窗按一个公式、气泡按另一个常量」，
+   *   两边对不上，留白就成了白留（见 §9.22）。
+   */
+  function stageSize() {
     var maxW = 0;
     var topOff = 0;
     var botPad = 0;
     var sidePad = 0;
-    config.pets.forEach(function (cfg) {
+    (config && config.pets ? config.pets : []).forEach(function (cfg) {
       var s = Number(cfg.size);
       if (!(s > maxW)) return;
       maxW = s;
@@ -1704,11 +1725,24 @@ if (config.animations.drag.length) {
     if (!maxW) maxW = 400;
     if (maxW < MIN_PET_SIZE) maxW = MIN_PET_SIZE;
     var petH = Math.round((maxW * 9) / 16);
+    return {
+      petW: maxW,
+      w: Math.max(MIN_STAGE_W, maxW + sidePad * 2),
+      h: Math.max(MIN_PET_SIZE, topOff + petH + botPad),
+    };
+  }
+
+  /**
+   * 气泡能有多宽 = 窗宽 - 16（左右各留 8 给 clampBubble 的贴边夹取），写进 CSS 变量。
+   * pet.css 那侧读 var(--bubble-max-w, 544px)：默认值只是「拿不到配置时也别太宽」的兜底。
+   * ⚠️ 这个数是**外框**宽（.pet-bubble 是 border-box）：按内容盒算的话会差
+   *   24px padding + 2px border，气泡就比窗宽，夹取永远夹不住（§9.22）。
+   */
+  function applyBubbleMaxWidth(winW) {
     try {
-      // 宽度下限 = MIN_STAGE_W（380 + 边距）：宁可窗大一点，也不能把动画切掉半只
-      api.setWindowSize(Math.max(MIN_STAGE_W, maxW + sidePad * 2), Math.max(MIN_PET_SIZE, topOff + petH + botPad));
+      document.documentElement.style.setProperty("--bubble-max-w", Math.max(240, Math.round(winW) - 16) + "px");
     } catch (e) {
-      /* 主进程还没 ready：那就用它的默认尺寸，窗也不会因此坏掉 */
+      /* 老浏览器不支持自定义属性：CSS 里那个兜底值还在 */
     }
   }
 

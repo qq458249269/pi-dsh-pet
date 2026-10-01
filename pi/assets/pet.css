@@ -69,14 +69,22 @@
 /* ⚠️ 不能再用「自适应宽度」：left:50% 时可用宽度 = 宠物宽度的一半（231px），
      写在 max-width 上的 320/420 永远够不着，长文案就在 231px 处被切了。
      要宽度就得显式 width:max-content（先撑到 max-width，再由它封顶）。
-     上限 560（实测 542 宽的窗里 = 100vw-32，行长从 30 字涨到 37 字，见 §9.21）：
-     宽窗就该用宽，宽窗本来就是「为气泡留出来的」。窄窗仍按 100vw-32 夹住。 */
+     上限走 CSS 变量 --bubble-max-w：pet.js 按「窗宽 - 16」写进来（§9.22），
+     那边只留一个 544px 兜底（拿不到配置 / 老浏览器不支持自定义属性时）。
+     ⚠️ 不要再在这里写死一个数 —— 写死过一次（560），结果窗按 620 算、气泡按 560 封顶，
+     多出来的那截留白白留，气泡还是 42 字/行（现在 846 = 63 字/行）。
+     窄窗仍按 100vw-16 夹住。 */
   width: max-content;
-  max-width: min(560px, calc(100vw - 32px));
+  max-width: min(var(--bubble-max-w, 544px), calc(100vw - 16px));
   /* 高度不给死：clampBubble() 按「头顶真实空间」写 max-height（§9.21），
      这里只兜底一个下限，别让它在没有空间时把窗顶顶出去。 */
   max-height: 60vh;
   padding: 7px 12px;
+  /* ⚠️ 必须是 border-box：--bubble-max-w 说的是「气泡外框最宽多少」，
+     而 max-width 默认按**内容盒**算 —— 差着 24px padding + 2px border（§9.22）。
+     算错的后果不是不好看，是**夹取来回甩**：气泡比窗还宽，左右两个 8px 边距
+     永远满足不了，clampBubble 每次把它往另一边推 10px，拖一下就跟着抖。 */
+  box-sizing: border-box;
   border-radius: 12px;
   background: rgba(28, 30, 38, 0.92);
   color: #f2f4f8;
