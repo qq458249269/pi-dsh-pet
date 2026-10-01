@@ -22,7 +22,13 @@
   pointer-events: none;
 }
 
-/* Dual video buffers */
+/* Dual video buffers —— 换手是**硬切**（没有淡入淡出），见 pet.js 的 switchTo。
+   ⚠️ 千万别再写回 `transition: opacity .18s`：两头一起淡的话，中间那 180ms 里
+   「旧的半透明 + 新的半透明」叠在一起 —— 宠物整整淡掉一半还带着重影，
+   屏幕上就是「闪一下」。拖一次要换两次姿势（抓起 + 落下），一次状态抖动还会再换几次，
+   于是拖动过程中每隔一两秒就闪一次。淡入淡出唯一的作用是「遮住新视频的第一帧还没解出来」，
+   而这件事该在 JS 里等「首帧真的贴上屏幕了再换手」（requestVideoFrameCallback），
+   不该拿透明度去换。 */
 .pet-video {
   position: absolute;
   inset: 0;
@@ -31,7 +37,7 @@
   object-fit: contain;
   pointer-events: none;
   opacity: 0;
-  transition: opacity 0.18s ease;
+  transition: none;
 }
 .pet-video.is-front {
   opacity: 1;

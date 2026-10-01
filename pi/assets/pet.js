@@ -29,8 +29,16 @@
    *   ③ reportWindowSize（舞台窗宽度下限，= 380 + 边距）
    */
   var MIN_PET_SIZE = 380;
-  /** 舞台窗的最小宽度：下限 380 + 左右各 40 的余量（气泡最宽 420，得放得下）。 */
+/** 舞台窗的最小宽度：下限 380 + 左右各 40 的余量（气泡最宽 420，得放得下）。 */
   var MIN_STAGE_W = MIN_PET_SIZE + 80;
+
+  /**
+   * 换动画时，等「新的一段首帧真的贴上屏幕」最多等多久（ms）。
+   *
+   * 正常只要 30~50ms（requestVideoFrameCallback 一回调就换手，见 switchTo）。这是给
+   * 「回调一直不来」的兜底：宁可让旧姿势多顶一会儿，也不能让宠物卡在旧动作上不动。
+   */
+  var FRAME_WAIT_MS = 220;
 
   // ========================================================================
   // 2. Config helpers (from config.ts)
@@ -882,7 +890,7 @@
       window.__petElectron__.onSayCancel(function () { closeInput(); });
     }
 
-    // ---- Switch to animation (dual buffer crossfade) ----
+// ---- Switch to animation (dual buffer, hard cut) ----
     //
     // ⚠️ 门禁：一段动画**没播够 minPlayMs 就不许被别人切走**（用户自己动手除外）。
     // 待机时把一段动作从中间砍掉的全是**被动**切换 —— 鼠标扫过宠物（hover 移出就回待机）、
@@ -890,6 +898,12 @@
     // 「动画还没执行完就跳下一个」。现在这些请求先排队（queueSwitch），等当前这段播完
     // （ended）或播够 minPlayMs 再切；只有用户自己的动作（点一下 / 拖起来 / 拖完落回待机）
     // 和状态驱动的 override 才立刻打断 —— 打断本来就是它们的本意。
+    //
+    // ⚠️ 换手是**硬切**，不是淡入淡出（CSS 里 .pet-video 没有 opacity 过渡了）：
+    //   两头一起淡的话，中间那 180ms 里旧的一半 + 新的一半叠着，宠物整整淡掉一半还带重影
+    //   —— 拖一次要换两次姿势（抓起 + 落下），状态抖一下还要再换几次，于是「一拖就闪」。
+    //   代价是新视频的第一帧得先解码出来（约 40ms），所以等
+    //   requestVideoFrameCallback —— 它回调 = 这一帧真的贴到屏幕上了，这时候换手不���会闪。
     this.switchTo = function (next, nextOnce, opts) {
       if (!next) return;
       // 冻住时**连 src 都不换**（换 src = 解码首帧 + 一次重绘，那正是要省掉的开销）。
@@ -916,12 +930,20 @@
       var gen = ++self.gen;
       self.pending = { anim: next, once: nextOnce, gen: gen };
       var target = self.frontIdx === 0 ? videoB : videoA;
-      target.src = "/thumb/" + encodeURIComponent(next) + ".webm";
+      var url = "/thumb/" + encodeURIComponent(next) + ".webm";
+      // 预热过的（warmAnim）别再赋一次 src：同一个 URL 重写会重新走一遍资源选择，
+      // 白白把刚解好的首帧扔掉，等于又变回「切过去要等 40ms」。
+      if (target.getAttribute("src") !== url || target.readyState < 2) target.src = url;
       target.loop = !nextOnce;
       target.onended = nextOnce ? handleEnded : null;
 
-      var onReady = function () {
-        target.removeEventListener("loadeddata", onReady);
+      var swapped = false;
+      var fallback = 0;
+      /** 真正换手：旧的一帧都不淡，直接换成新的（见上面为什么要硬切）。 */
+      var commit = function () {
+        if (swapped) return;
+        swapped = true;
+        if (fallback) clearTimeout(fallback);
         if (self.pending && self.pending.gen !== gen) return;
         var old = self.frontIdx === 0 ? videoA : videoB;
         target.classList.add("is-front");
@@ -931,11 +953,43 @@
         self.playing = next;   // 屏幕上真正在放的（判定「演到哪了」只看它）
         self.playedAt = Date.now();
         target.style.transform = self.facingRef === "right" ? "scaleX(-1)" : "";
-        if (!self.asleep) target.play().catch(function () {});
+        if (!self.asleep && target.paused) target.play().catch(function () {});
         if (self.pendingMove && !self.asleep) self.startMoveDrive(target);
+      };
+      /** loadeddata 只说明解码器交出了首帧，合成器还没把它贴上去；那时候换手就是闪一帧空白。 */
+      var onReady = function () {
+        target.removeEventListener("loadeddata", onReady);
+        if (self.pending && self.pending.gen !== gen) return;
+        if (!self.asleep) target.play().catch(function () {});
+        if (typeof target.requestVideoFrameCallback === "function") {
+          target.requestVideoFrameCallback(function () { commit(); });
+          // 兜底：这个回调在极端情况下可能不来（解码被系统抢停），到点还是换，
+          // 宁可淡一下也不能让宠物卡在旧动作上。
+          fallback = setTimeout(commit, FRAME_WAIT_MS);
+        } else {
+          fallback = setTimeout(commit, 0);
+        }
       };
       target.addEventListener("loadeddata", onReady);
       if (target.readyState >= 2) onReady();
+    };
+
+    /**
+     * 把「马上要演的那一段」先塞进**后台那个缓冲区**（不换手、不改播放状态）。
+     * 用途：鼠标按下去的那一刻就把拖拽姿势预热好 —— 真正拖起来（过了 DRAG_THRESHOLD）
+     * 时那一段的首帧早就解好了，换手是零延迟的硬切，而不是「先拿旧姿势顶着 40ms」。
+     * 反过来，不预热的话抓起宠物会有一下可察觉的停顿。
+     */
+    this.warmAnim = function (name) {
+      if (!name || self.asleep || self.destroyed) return;
+      var target = self.frontIdx === 0 ? videoB : videoA;
+      var url = "/thumb/" + encodeURIComponent(name) + ".webm";
+      if (target.getAttribute("src") === url && target.readyState >= 2) return;
+      try {
+        target.src = url; // 只加载；不加 is-front、不碰 frontIdx，屏幕上还是旧的
+      } catch (e) {
+        /* 预热失败就当没预热：真要演的时候 switchTo 会自己再加载一次 */
+      }
     };
 
     /** 现在允许把屏幕上这一段切走吗？ */
@@ -1225,12 +1279,15 @@
     }
 
     // ---- Pointer events (click vs drag) ----
-    hit.addEventListener("pointerdown", function (e) {
+hit.addEventListener("pointerdown", function (e) {
       e.currentTarget.classList.add("dragging");
       // 输入框开着的时候点宠物 = 「不说了」：先收掉，别把焦点一直扣在透明窗上
       if (self.closeInput) self.closeInput();
       self.stopDwell(); // 用户上手了，待机停留立刻收摊
       self.stopMove();
+      // 先把拖拽姿势解到后台缓冲区去（见 warmAnim）：手指刚按下到真拖起来还有几帧，
+      // 这几帧足够把首帧解出来，拖起来那一瞬间就是硬切，不用拿旧姿势顶着。
+      if (self.warmAnim && config.animations.drag.length) self.warmAnim(pick(config.animations.drag));
       setPassthrough(false); // capture during drag
       e.currentTarget.setPointerCapture(e.pointerId);
       var r = container.getBoundingClientRect();
@@ -1256,9 +1313,9 @@
         dragState.dragging = true;
         self.dragging = true;
         self.once = true;
-        if (config.animations.drag.length) {
+if (config.animations.drag.length) {
           self.anim = pick(config.animations.drag);
-          self.switchTo(self.anim, true, { force: true }); // 拖起来了就得立刻换姿势
+          self.switchTo(self.anim, true, { force: true }); // 拖起来了就得立刻换姿势（已预热 → 零延迟硬切）
         }
       }
       // 窗只包住宠物（见 pet-electron.cjs 文件头），所以在 Electron 里「拖宠物」

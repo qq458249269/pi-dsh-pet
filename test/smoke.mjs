@@ -163,6 +163,24 @@ check("最小档 ≥ 380px（气泡不被挤到屏外）", MIN_SIZE >= 380, `实
 check("两处 SIZE_MAP 一致（pet.js ↔ pi 扩展补全）", sizeOf(petJs, /SIZE_MAP = \{ small: (\d+), normal: (\d+), large: (\d+)/) === sizeOf(extTs, /SIZE_MAP: Record<string, number> = \{ small: (\d+), normal: (\d+), large: (\d+)/));
 }
 
+// ---------------------------------------------- 换手不许交叉淡化（拖动闪烁的病根）
+// 症状：拖动时宠物“闪一下”。根因不是搬运，是换姿势那一下两头视频在交叉淡化：
+// `transition: opacity .18s` 让旧姿势淡出、新姿势淡入同时进行，约 180ms 里宠物只剩
+// 一半亮度还叠着鬼影；一次拖拽连着切好几次（抓起 → 状态帧 → 落回），于是连成一片闪。
+// 修法：`.pet-video` 不许有 opacity 过渡 + 换手改成等 requestVideoFrameCallback 的硬切。
+// 这两条要钉住：DOM/CSS 层面一改回去，闪就回来了（见 DESIGN.md §9.19 的实测数据）。
+console.log("\n换手不淡化（拖动不闪）…");
+{
+	const petJs = readFileSync(join(ROOT, "pi", "assets", "pet.js"), "utf8");
+	const petCss = readFileSync(join(ROOT, "pi", "assets", "pet.css"), "utf8");
+	const videoRule = (petCss.match(/\.pet-video\s*\{[^}]*\}/) || [""])[0];
+	check(".pet-video 没有 opacity 过渡（淡化=宠物半透明+重影）", !/transition\s*:[^;}]*opacity/.test(videoRule), videoRule.replace(/\s+/g, " ").slice(0, 90));
+	check("换手等 requestVideoFrameCallback（loadeddata 时首帧还没贴屏）", /requestVideoFrameCallback/.test(petJs));
+	check("硬切有超时兜底（FRAME_WAIT_MS，rVFC 不回调时不能卡在旧姿势）", /FRAME_WAIT_MS = \d+/.test(petJs) && /setTimeout\(commit, FRAME_WAIT_MS\)/.test(petJs));
+	check("换手只做一次（swapped 守卫，别让兜底和 rVFC 抢着换）", /swapped/.test(petJs));
+	check("拖拽姿势在 pointerdown 预热（抓起那一下不等解码）", /warmAnim/.test(petJs) && /pointerdown[\s\S]{0,900}warmAnim/.test(petJs));
+}
+
 // ------------------------------------------------ 待机动画的节奏（别切一半 / 别太短）
 // 症状两条，都是同一个病根：**待机时正在演的那段动画被从中间砍掉**。
 //   ① 动画还没执行完就跳下一个 —— 触发者全是「被动」切换：鼠标扫过宠物（hover 移出就回
