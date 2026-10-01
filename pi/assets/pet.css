@@ -109,24 +109,10 @@
   opacity: 1;
   transform: translate(-50%, 0);
 }
-/* 贴到屏幕上边时头顶没地方了，气泡改挂**身下**（§9.25）：不然「边贴上了、话却说不出来」。
-   位置与间距是头顶那套的镜像（top:100% + margin-top + 反向位移），尾巴也跟着翻上去。 */
-.pet-bubble.below {
-  bottom: auto;
-  top: 100%;
-  margin-bottom: 0;
-  margin-top: 10px;
-  transform: translate(-50%, -6px);
-}
-.pet-bubble.below.show {
-  transform: translate(-50%, 0);
-}
-.pet-bubble.below::after {
-  top: auto;
-  bottom: 100%;
-  border-top-color: transparent;
-  border-bottom-color: rgba(28, 30, 38, 0.92);
-}
+/* ⚠️ 头顶挂不下了也**不翻到身下**（§9.27）：脚下只有 bottomPad 60 的余量，翻下去就是
+   把气泡塞进一条 60px 缝里 —— 字被裁掉还压着脚（用户口径：「脚下气泡被遮挡了 高度不够」）。
+   clampBubble 现在只按头顶空间封高（max-height + 行数），位置也只有头顶这一套。
+   以前这里有一整套 .below（top:100% / 尾巴朝上 / 身下那套偏移），别再写回来。 */
 /* 输入框亮着的时候别用 -webkit-box 排版（它会拿输入框当匿名 flex 项），老实用 block */
 .pet-bubble.with-input {
   display: block;
