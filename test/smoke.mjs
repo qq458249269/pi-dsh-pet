@@ -778,23 +778,25 @@ check("多开按序号在舞台里错开（都居中会叠在一起）", /functi
 // ⚠️ 可见框口径直接用 HIT_BOX（它本来就是按「看着像角色」调出来的 640×360 框），别另写一份。
 check("可见框口径只有一份（= HIT_BOX，640×360 基准）", /var INK_X0 = HIT_BOX\.x0 \/ 640/.test(petSrc) && /var INK_X1 = HIT_BOX\.x1 \/ 640/.test(petSrc) && /function inkWidth\(size\)/.test(petSrc) && /\(INK_X1 - INK_X0\)/.test(petSrc) && !/inkWidth\s*=\s*\d/.test(petSrc));
 // 贴边（slideTo）：夹可见框、写容器左边 —— 少这一步就是「容器贴到 0、角色还在 144 外」
-check("贴边按可见框夹（写回容器左边），不是按舞台夹", /var inkW = inkWidth\(this\.size\)/.test(petSrc) && /var inkOff = INK_X0 \* this\.size/.test(petSrc) && /var inkLeft = Math\.min\(Math\.max\(d\.base\.x \+ inkOff \+ \(want\.x - at\.x\), 0\), Math\.max\(0, winW - inkW\)\)/.test(petSrc) && /var left = inkLeft - inkOff/.test(petSrc) && !/winW - self\.size\)/.test(petSrc));
+check("贴边按可见框夹（写回容器左边），不是按舞台夹", /var inkW = inkWidth\(this\.size\)/.test(petSrc) && /var inkOff = INK_X0 \* this\.size/.test(petSrc) && /var safe = inkSafe\(\)[\s\S]{0,400}var left = safeLeft - safe\.off/.test(petSrc) && !/winW - self\.size\)/.test(petSrc));
 // 漫游/拖拽/站位回夹：同理，「进的是可见框左边、出的是容器左边」（clampPos 的固定口径）
-check("clampPos 进可见框、出容器（漫游/浏览器拖拽都走它）", /function clampPos\(inkLeft, top, extraBottom\)/.test(petSrc) && /var maxInkLeft = Math\.max\(0, window\.innerWidth - inkW\)/.test(petSrc) && /left: Math\.min\(Math\.max\(inkLeft, 0\), maxInkLeft\) - inkOff/.test(petSrc) && /clampPos\(px - inkHalf, py - halfH, bottomPad\)/.test(petSrc) && /clampPos\(e\.clientX - dragState\.offX - inkHalf/.test(petSrc));
+check("clampPos 进可见框、出容器（漫游/浏览器拖拽都走它）", /function clampPos\(inkLeft, top\)/.test(petSrc) && /var safeLeft = inkLeft - inkOff \+ safe\.off/.test(petSrc) && /left: safeLeft - safe\.off/.test(petSrc) && /clampPos\(px - inkHalf, py - halfH\)/.test(petSrc) && /clampPos\(e\.clientX - dragState\.offX - inkHalf/.test(petSrc));
 // 漫游道两端按可见框半宽夹（道是给角色走的，透明舞台区不占地）
 check("漫游道按可见框半宽夹（planMove 的 halfW 是 inkHalf）", /halfW: inkHalf/.test(petSrc));
-// 窗宽基数改成可见框：maxStage（size 口径，MIN 下限照旧）→ inkWidth → 窗宽
-check("窗宽基数是可见框（maxStage → inkWidth → w）", /var maxStage = 0/.test(petSrc) && /if \(maxStage < MIN_PET_SIZE\) maxStage = MIN_PET_SIZE/.test(petSrc) && /var maxW = inkWidth\(maxStage\)/.test(petSrc) && /var w = maxW \+ sidePad \* 2 \+ roamRoom\(sidePad\)/.test(petSrc) && /applyBubbleMaxWidth\(s\.w, s\.petW\)/.test(petSrc));
-// 站位记忆的比例仍然存**中心**（可见框在舞台里居中 ⇒ 中心 = 容器中心），老 positions.json 继续能用
-check("站位比例仍存中心（可见框居中，老位置记忆继续可用）", /stageKeepIn\(cp\.rx \* window\.innerWidth - inkHalf, cp\.ry \* window\.innerHeight - halfH, inkW, halfH \* 2, cfg\)/.test(petSrc) && /self\.customPos\.rx = \(keep\.left \+ inkHalf\) \/ window\.innerWidth/.test(petSrc) && /stageKeepIn\(left, top, inkW, stageH, cfg\)/.test(petSrc));
-// 纵向不动：仍按舞台高 + 脚底下移算（量过，纵向没这问题）
-check("纵向没跟着改（仍按舞台高算站位区间）", /var hiY = H - stageH - bottomPadOf\(cfg\)/.test(petSrc) && !/var hiY = H - inkH/.test(petSrc));
-// 纵向的**下界**：站位/漫游/拖拽三处都得是「头顶留气泡的舞台」，不能又有一处 0 起夹。
-//   实测（§9.27）：拖到屏幕顶、容器贴 0 时 bubble 的 roomAbove = 0-18 = 0，
-//   max-height 落到下限 24px，字全裁没。§9.25 当初就是为这个把气泡翻到身下，
-//   结果脚下的更不够（用户实测打回：「脚下气泡被遮挡了 高度不够」）。
-//   既然没有翻法了，头顶的台子就得留着 —— 而且要跟站位同一个数（topOffsetOf），不然又是对不齐。
-check("纵向下界三处同口径（拖到顶也留 150 气泡台，不 0 起夹）", /var minTop = Math\.min\(topOffsetOf\(cfg\), maxTop\)/.test(petSrc) && /top: Math\.min\(Math\.max\(top, minTop\), maxTop\)/.test(petSrc) && /var hiTop = Math\.max\(0, winH - halfH \* 2 - bottomPad\)/.test(petSrc) && /var loTop = Math\.min\(topOffsetOf\(cfg\), hiTop\)/.test(petSrc) && /var top = Math\.min\(Math\.max\(d\.base\.y \+ \(want\.y - at\.y\), loTop\), hiTop\)/.test(petSrc));
+// 窗宽基数：maxStage（size 口径，MIN 下限照旧）→ **整个舞台** → 窗宽（§9.28）。
+//   为什么不是角色那一条/可见框并集：动画自带的气泡/火花（思考 93..551、蝴蝶蜜蜂 4..629）
+//   比角色宽得多，窗装不下它们时靠边播放必被窗边切；舞台本来就是「这段动画可能画到的全部」，
+//   配合 inkSafe() 的夹取，任何动画的像素都不会跑出窗（并集是运行时量的，不能拿来算窗宽）。
+check("窗宽基数是整个舞台（maxStage → w），气泡封顶仍按角色可见框", /var maxStage = 0/.test(petSrc) && /if \(maxStage < MIN_PET_SIZE\) maxStage = MIN_PET_SIZE/.test(petSrc) && /var maxW = maxStage/.test(petSrc) && /var w = maxW \+ sidePad \* 2 \+ roamRoom\(sidePad\)/.test(petSrc) && /applyBubbleMaxWidth\(s\.w, s\.petW\)/.test(petSrc) && /petW: inkWidth\(maxStage\)/.test(petSrc));
+// 站位记忆的比例仍然存**中心**（可见框在舞台里居中 ⇒ 中心 = 容器中心），老 positions.json 继续能用；
+// 横向区间走 inkSafe（角色 ∪ 当前动画），不然老落点靠边时宽动画仍被窗边切。
+check("站位比例仍存中心（可见框居中，老位置记忆继续可用）+ 横向按 art 框夹", /stageKeepIn\(cp\.rx \* window\.innerWidth - inkHalf \+ over, cp\.ry \* window\.innerHeight - halfH, safe\.w, halfH \* 2\)/.test(petSrc) && /container\.style\.left = keep\.left - over - inkOff \+ "px"/.test(petSrc) && /var over = inkOff - safe\.off/.test(petSrc) && /self\.customPos\.rx = \(keep\.left \+ inkHalf\) \/ window\.innerWidth/.test(petSrc) && /stageKeepIn\(left, top, inkW, stageH\)/.test(petSrc));
+// 纵向按舞台高算区间（量过，纵向没这问题），但**上下界都是 0**（§9.28）：能贴到屏边。
+check("纵向按舞台高算区间（不改成 inkH），上下界 0 起夹", /var hiY = H - stageH/.test(petSrc) && !/var hiY = H - inkH/.test(petSrc) && /var loY = 0/.test(petSrc));
+// 纵向的**上下界**：§9.28 起四边全 0 起夹 —— 宠物能真的贴到屏幕上/下边。
+//   头顶没有空间时不再封高（那会是一条 24px 的东西，字全裁没），改让气泡盖在头顶上。
+//   底下不用再减 bottomPad：stage 有 translateY(bottomPad)，容器底本来就是脚底。
+check("纵向下界 0 起夹（上下都能贴边），头顶不够就不封高", /top: Math\.min\(Math\.max\(top, 0\), maxTop\)/.test(petSrc) && /var hiTop = Math\.max\(0, winH - halfH \* 2\)/.test(petSrc) && /var top = Math\.min\(Math\.max\(d\.base\.y \+ \(want\.y - at\.y\), 0\), hiTop\)/.test(petSrc) && /var overlap = roomAbove < BUBBLE_LINE_H \* 2/.test(petSrc) && /if \(overlap\)/.test(petSrc));
 
 // 位置记忆换算：窗内比例是**相对窗**的，而舞台窗会变（这一版左右留白 80→200，宽 622→862）：
 //   老落点 rx=0.5797 直接套上去，宠物水平平移 (862-622)*0.58 = 139px（「启动后宠物自己跑了一边」）。
@@ -886,6 +888,37 @@ console.log("\nREADME 图库…");
 		`README 里找「全部 ${onDisk.length} 个动画」没找到（目录里有 ${onDisk.length} 个）`,
 	);
 }
+
+// ------------------------------------------------ 动画可见框：运行时自测（§9.28）
+// 症状：「思考动画的气泡左右还是会被截断」—— 不是文案气泡，是**动画里画的那个**。
+//   原因：命中区（主进程 SetWindowRgn）按 HIT_BOX（200..440，只框角色）报，而
+//   「深度思考碎碎念」画出来的气泡逐帧真值是 93..551、「蝴蝶蜜蜂环绕头顶开花」4..629，
+//   超出去的那截像素直接被形状裁掉。
+// ⚠️ 自测（decode webm + 按步长 seek + 扫 alpha）而不是硬编一张表：24 帧采样就把右边界
+//   少报成 547（真值 551，用户反馈「右边还是展示不全」），而且以后每加一段新动画都得重新量。
+check("可见框是运行时自测的（没有 ink-boxes.js 那种硬编表）", /var INK_CACHE_KEY = "petInkBoxV\d"/.test(petSrc) && /localStorage\.getItem\(INK_CACHE_KEY\)/.test(petSrc) && /function measureInkBox\(name\)/.test(petSrc) && /function scanInkBox\(name, src\)/.test(petSrc) && !/PET_INK_BOXES/.test(petSrc) && !existsSync(join(ROOT, "pi", "assets", "ink-boxes.js")));
+// ⚠️ src 必须是 blob: URL：服务端不支持 Range ⇒ 直连的 <video> seekable=[0,0]，
+//   seek 只会「立刻 seeked 回到 0」= 32 次量同一帧，看着量过了其实整段漏光（实测踩过）。
+check("扫描的 webm 先 fetch 成 blob（直连的 video 根本不可 seek）", /fetch\(url\)/.test(petSrc) && /URL\.createObjectURL\(blob\)/.test(petSrc) && /URL\.revokeObjectURL\(src\)/.test(petSrc));
+check("自测走 seek（不是 play）——透明窗里播放被 Chromium 节流", /addEventListener\("seeked"/.test(petSrc) && /video\.currentTime = Math\.min\(video\.duration, video\.currentTime \+ step\)/.test(petSrc) && !/measureInkBox[\s\S]{0,900}video\.play\(/.test(petSrc));
+check("扫描均匀铺满整段（固定步长只看得到头 1.3s，后半段的气泡整段漏掉）", /step = Math\.max\(video\.duration \/ INK_FRAMES, 1 \/ 120\)/.test(petSrc));
+check("扫描用的 video 必须挂在 DOM 上（不挂的 video 拿到的还是首帧）", /appendChild\(video\)/.test(petSrc) && /width:1px;height:1px;opacity:0;pointer-events:none/.test(petSrc) && /if \(video\.parentNode\) video\.parentNode\.removeChild\(video\)/.test(petSrc));
+check("采样余量只加在形状上（烘进缓存会渗进几何，待机贴边白差 9px）", /var mg = INK_MARGIN \* kx/.test(petSrc) && /var INK_MARGIN = 8/.test(petSrc) && /x0: minX \* 2,\s*x1: maxX \* 2 \+ 2/.test(petSrc));
+check("起动就排上扫描（状态 override 最优先）+ 正在播的插队 + 量完重夹位置重报形状", /prewarmInkBoxes\(\)/.test(petSrc) && /function prewarmInkBoxes\(\)/.test(petSrc) && /EVENT_ANIM_MAP\[k\]\); \}/.test(petSrc) && /queueInkMeasure\(next\)/.test(petSrc) && /INK_QUEUE\.unshift\(name\)/.test(petSrc) && /function onInkBoxReady[\s\S]{0,400}p\.refitInk\(\)/.test(petSrc) && /this\.refitInk = function \(\)[\s\S]{0,600}clampPos\(r\.left \+ inkOff, r\.top\)/.test(petSrc));
+check("扫描不拖累正常播放（一次一段 + 段间让开 + 超时兜底不死锁队列）", /if \(INK_BUSY\) return/.test(petSrc) && /setTimeout\(drainInkQueue, 200\)/.test(petSrc) && /setTimeout\(function \(\) \{ finish\(null\); \}, 20000\)/.test(petSrc));
+
+check("夹取范围 = 角色 ∪ 当前动画（三条路都得走 inkSafe，漏一条就有一路靠边时被切）", /function inkSafe\(\)[\s\S]{0,320}animInkBox\(self\.playing\)/.test(petSrc) && /clampPos\(inkLeft, top\)[\s\S]{0,220}var safe = inkSafe\(\)/.test(petSrc) && /function slideTo[\s\S]{0,900}var safe = inkSafe\(\)/.test(petSrc) && /function applyPosition\(\)[\s\S]{0,400}var safe = inkSafe\(\)/.test(petSrc) && /Math\.min\(Math\.max\(safeLeft, 0\), Math\.max\(0, window\.innerWidth - safe\.w\)\)/.test(petSrc));
+check("量出新框后重夹位置 + 重报形状（不然新量到的宽动画第一次播仍靠窗边）", /this\.refitInk = function \(\)[\s\S]{0,700}clampPos\(r\.left \+ inkOff, r\.top\)/.test(petSrc) && /function onInkBoxReady[\s\S]{0,300}refitInk\(\)[\s\S]{0,120}pushHitRegion\(\)/.test(petSrc));
+check("窗宽按整个舞台算（宽动画的像素不会被窗边裁，加新动画也不用重算）", /var maxW = maxStage/.test(petSrc) && /var w = maxW \+ sidePad \* 2 \+ roamRoom\(sidePad\)/.test(petSrc));
+
+// ------------------------------------------------ 只镜像走位动画（§9.29）
+// 症状：「为什么有的动画是镜像的」。病根：以前 facingRef 一变就把**所有**动画 scaleX(-1)，
+//   于是待机/小动作/点击/状态 override 有一半时间在看镜像（写字、玩道具、文字全不对）。
+//   修法：只有 turn（转身）+ moves.actions（走路）镜像 —— 那是「行进方向」才需要程序翻面，
+//   其余按素材原样；镜不镜像与走位方向取同一口径（moveDir），别写两份。
+check("只有 turn + moves.actions 镜像，其余按素材原样", /function isDirAnim\(name\)/.test(petSrc) && /a\.turn\.indexOf\(name\) >= 0\) return true/.test(petSrc) && /actions\[i\]\.name === name\) return true/.test(petSrc) && /isDirAnim\(next\) && moveDir\(\) === 1 \? "scaleX\(-1\)" : ""/.test(petSrc) && !/facingRef === "right" \? "scaleX\(-1\)"/.test(petSrc));
+check("镜像方向与走位方向同一口径（moveDir 一处算，两处用）", /function moveDir\(\)/.test(petSrc) && /var dir = moveDir\(\)/.test(petSrc) && /return \(self\.facingRef === "right"\) !== turnAnim \? 1 : -1/.test(petSrc));
+check("turn 动画放完仍翻 facing（不然转身动画永远朝一个方向）", /anims\.turn\.indexOf\(endedAnim\) >= 0[\s\S]{0,200}self\.facingRef = nextF/.test(petSrc));
 
 // ---------------------------------------------------------------- 收尾
 console.log("\n收尾…");

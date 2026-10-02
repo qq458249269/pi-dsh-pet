@@ -42,6 +42,224 @@ var HIT_BOX = { x0: 200, y0: 50, x1: 440, y1: 335 };
     return (Number(size) || 0) * (INK_X1 - INK_X0);
   }
 
+  /** 每段动画**自己**的可见框（640×360 画布坐标），**运行时量**，量不到就没有（用 null）。
+   *
+   * 为什么必须量：HIT_BOX(200..440) 只框得住角色本体，而有些动画画出来的效果比角色宽得多 ——
+   * 「深度思考碎碎念」自带一个气泡（实测逐帧真值 93..551）、「蝴蝶蜜蜂环绕头顶开花」几乎铺满
+   * 画布（4..629）。拿 HIT_BOX 当它们的框，形状（SetWindowRgn）就把那截像素切了：
+   * 用户口径「思考动画的气泡左右还是会被截断」（不是文案气泡，是动画里画的那个）。
+   *
+   * ⚠️ 别再把量出来的数硬编成一张表（以前是 pi/assets/ink-boxes.js）：那是 24 帧采样的结果，
+   *   采漏的帧照样被切（实测真值右边界 551，表里只有 547 —— 用户反馈「右边还是展示不全」），
+   *   而且以后每加一段新动画都得重新量一遍。现在改成起动时自己扫一遍、结果存 localStorage，
+   *   加多少新动画都不用改代码、也不会被采样精度坑到。
+   */
+  var INK_CACHE_KEY = "petInkBoxV2";
+  var INK_BOXES = (function () {
+    var out = {};
+    try {
+      var raw = window.localStorage.getItem(INK_CACHE_KEY);
+      var o = raw ? JSON.parse(raw) : null;
+      if (o && typeof o === "object") {
+        Object.keys(o).forEach(function (k) {
+          var v = o[k];
+          if (Array.isArray(v) && v.length === 4 && v.every(function (n) { return typeof n === "number" && isFinite(n); })) {
+            out[k] = [Math.round(v[0]), Math.round(v[1]), Math.round(v[2]), Math.round(v[3])];
+          }
+        });
+      }
+    } catch (e) {
+      /* localStorage 不可用（隐私模式）就只留内存里的结果，功能不受影响 */
+    }
+    return out;
+  })();
+  /** 某一段动画的可见框；没量过就 null（调用方退回 HIT_BOX，退回的是老行为，不会更糟）。 */
+  function animInkBox(name) {
+    var b = name ? INK_BOXES[name] : null;
+    return b ? { x0: b[0], x1: b[1], y0: b[2], y1: b[3] } : null;
+  }
+
+  /** 量一段动画要取多少帧（640 画布坐标下的扫描分辨率是 320×180 ⇒ 2px 一格）。
+      32 帧均匀铺满整段 ≈ 1~2s 一段动画，够快也不至于把起动卡住。 */
+  var INK_FRAMES = 32;
+  /** 采样漏掉的余量（640 画布坐标，size 462 时 ≈6px）：只给**形状**用（collectHitRects）——
+      实测 32 帧采样比逐帧真值少 4~11px（思考气泡真值右边界 551，采样 547）。 */
+  var INK_MARGIN = 8;
+  var INK_QUEUE = [];
+  var INK_PENDING = {};
+  var INK_BUSY = false;
+
+  function rememberInkBox(name, box) {
+    INK_BOXES[name] = [box.x0, box.x1, box.y0, box.y1];
+    try {
+      window.localStorage.setItem(INK_CACHE_KEY, JSON.stringify(INK_BOXES));
+    } catch (e) {
+      /* 写不进去（配额/隐私模式）就只在内存里留着 */
+    }
+  }
+
+  /**
+   * 量一段动画的可见框：解一次 webm，按固定步长 **seek**，把每帧缩到 320×180 扫 alpha>24 取并集。
+   *
+   * ⚠️ 必须 seek，不能「play() + requestVideoFrameCallback」等它自己播完：这扇窗是常驻透明层，
+   *   Chromium 会按「看不见」节流它的媒体播放（实测：这种窗里 play() 根本不动，seeked 照常来）。
+   *   seek 一次解一帧，一次一段、段间让开 —— 别跟正在播的动画抢解码。
+   */
+  function measureInkBox(name) {
+    var url = "/thumb/" + encodeURIComponent(name) + ".webm";
+    return fetch(url)
+      .then(function (r) { return r.ok ? r.blob() : null; })
+      .catch(function () { return null; })
+      .then(function (blob) { return blob ? scanInkBox(name, URL.createObjectURL(blob)) : null; });
+  }
+
+  /**
+   * 扫一段动画的可见框：把 webm 按固定步长 **seek**，每帧缩到 320×180 扫 alpha>24 取并集。
+   *
+   * ⚠️⚠️ src 必须是 **blob: URL**，不能直接 "/thumb/x.webm"：
+   *   本地服务端不支持 Range（sendFile 一次发整个文件），Chromium 就把这个 <video> 的
+   *   `seekable` 判成 [0,0] —— 即使整个文件已经在 buffer 里，seek 也会「立刻 seeked
+   *   回到 0」。于是 32 次扫描量的是**同一帧**，量出来 202..436 的「只有角色」的框，
+   *   后半段才长出来的气泡/道具一个没量到，而日志/缓存看着还「量过了」——
+   *   最坏的一种错（实测踩过）。先 fetch 成 blob 再喂给 video 就没有这层限制。
+   * ⚠️ 必须 seek，不能「play() + requestVideoFrameCallback」等它自己播完：这扇窗是常驻透明层，
+   *   Chromium 会按「看不见」节流它的媒体播放（实测：这种窗里 play() 根本不动，seeked 照常来）。
+   * ⚠️ <video> 必须挂在 DOM 上：不挂的 video 不走渲染管线，drawImage 拿到的还是首帧。
+   */
+  function scanInkBox(name, src) {
+    return new Promise(function (resolve) {
+      var video = document.createElement("video");
+      video.muted = true;
+      video.playsInline = true;
+      video.preload = "auto";
+      var canvas = document.createElement("canvas");
+      canvas.width = 320;
+      canvas.height = 180;
+      var g = canvas.getContext("2d", { willReadFrequently: true });
+      var minX = 1e9, maxX = -1, minY = 1e9, maxY = -1, i = 0;
+      var step = 1 / 24; // loadedmetadata 后改成「时长 / 帧数」：必须铺满整段
+      var ended = false;
+      var finish = function (box) {
+        if (ended) return;
+        ended = true;
+        clearTimeout(guard);
+        if (video.parentNode) video.parentNode.removeChild(video);
+        video.removeAttribute("src");
+        try { URL.revokeObjectURL(src); } catch (e) { /* 回收失败只是内存 */ }
+        try { video.load(); } catch (e) { /* 已经丢了，无所谓 */ }
+        resolve(box);
+      };
+      var guard = setTimeout(function () { finish(null); }, 20000); // 坏文件别把队列卡死
+      video.addEventListener("error", function () { finish(null); });
+      video.addEventListener("loadedmetadata", function () {
+        // ⚠️ 步长必须按**整段时长**摊：固定 1/24 只看得到头 1.3s，而这些动画的气泡/道具
+        //   是后半段才长出来的（实测「深度思考碎碎念」整段 10s，头 1.3s 只有角色 ——
+        //   量出来 206..434，看着「量过了」其实把气泡整段漏了）。
+        step = Math.max(video.duration / INK_FRAMES, 1 / 120);
+        video.currentTime = 0;
+      });
+      video.addEventListener("seeked", function () {
+        if (ended) return;
+        try {
+          g.clearRect(0, 0, 320, 180);
+          g.drawImage(video, 0, 0, 320, 180);
+          var d = g.getImageData(0, 0, 320, 180).data;
+          for (var y = 0; y < 180; y++) {
+            var row = y * 320 * 4;
+            for (var x = 0; x < 320; x++) {
+              if (d[row + x * 4 + 3] > 24) {
+                if (x < minX) minX = x;
+                if (x > maxX) maxX = x;
+                if (y < minY) minY = y;
+                if (y > maxY) maxY = y;
+              }
+            }
+          }
+        } catch (e) {
+          finish(null); // 画不出来（还没解出帧）就放弃这一段
+          return;
+        }
+        i++;
+        if (i >= INK_FRAMES || video.ended || video.currentTime >= video.duration - step * 1.5) {
+          if (maxX < 0) return finish(null); // 一帧像素都没有 = 名字对不上/文件坏
+          // 存**原始**量值，不把采样余量烘进来：余量是给形状（§9.28 的裁剪）用的，
+          // 烘进缓存的话它会一路渗进夹取/贴边的几何，待机那种窄动画就会白白差 9px
+          // （实测带余量的待机框 188..444 vs 角色框 200..440）。余量在 collectHitRects 加。
+          finish({
+            x0: minX * 2,
+            x1: maxX * 2 + 2,
+            y0: minY * 2,
+            y1: maxY * 2 + 2,
+          });
+          return;
+        }
+        // 同帧 seek 不会再触发一次 seeked（会死等），所以每次都要往前挪一格
+        video.currentTime = Math.min(video.duration, video.currentTime + step);
+      });
+      video.src = src;
+      // ⚠️⚠️ 必须挂进 DOM：不挂的 <video> 不走渲染管线，seek 完了 drawImage 拿到的还是**首帧**
+      //   （实测：量出来 15 段全是 202..436 的「只有角色」的框 = 整段都画成了第 0 帧，
+      //   后半段才长出来的气泡一个没量到，而看着还「量过了」—— 最坏的一种错）。
+      //   1px + opacity 0：不占地方、不被点到，也看不见。
+      video.style.cssText =
+        "position:fixed;left:0;top:0;width:1px;height:1px;opacity:0;pointer-events:none";
+      (document.body || document.documentElement).appendChild(video);
+    });
+  }
+
+  /** 量完一段：位置重夹（宽出来的那截得往窗里挪）+ 命中区重报。 */
+  function onInkBoxReady() {
+    for (var i = 0; i < pets.length; i++) {
+      var p = pets[i];
+      if (p && typeof p.refitInk === "function") p.refitInk();
+    }
+    pushHitRegion();
+  }
+
+  /** 排队量一段动画（正在播的插队最前：它马上要用）。 */
+  function queueInkMeasure(name) {
+    if (!name || INK_BOXES[name] || INK_PENDING[name]) return;
+    if (INK_QUEUE.indexOf(name) < 0) INK_QUEUE.unshift(name);
+    drainInkQueue();
+  }
+
+  function drainInkQueue() {
+    if (INK_BUSY) return;
+    var name = INK_QUEUE.shift();
+    if (!name) return;
+    INK_BUSY = true;
+    INK_PENDING[name] = true;
+    measureInkBox(name).then(function (box) {
+      delete INK_PENDING[name];
+      INK_BUSY = false;
+      if (box) {
+        rememberInkBox(name, box);
+        onInkBoxReady(name);
+      }
+      setTimeout(drainInkQueue, 200); // 让解码器喘口气，别和正在播的动画抢
+    });
+  }
+
+  /** 起动时先排上「马上就会播到」的那几段：状态 override（agent 一有事就放）→ 待机/转身/
+      拖拽/点击/悬停 → 走路。分类动作（几十段）不排：等真播到它时 switchTo 会插队量
+      （queueInkMeasure），热路径不受影响，也不用起动就烧三分钟解码。 */
+  function prewarmInkBoxes() {
+    var a = (config && config.animations) || {};
+    var names = [];
+    var push = function (n) { if (typeof n === "string" && n && !INK_BOXES[n] && names.indexOf(n) < 0) names.push(n); };
+    Object.keys(EVENT_ANIM_MAP).forEach(function (k) { push(EVENT_ANIM_MAP[k]); });
+    Object.keys(TOOL_ANIM_MAP).forEach(function (k) { push(TOOL_ANIM_MAP[k]); });
+    ["idle", "turn", "drag", "clicks", "hover"].forEach(function (k) {
+      (Array.isArray(a[k]) ? a[k] : []).forEach(push);
+    });
+    var moves = a.moves || {};
+    (Array.isArray(moves.actions) ? moves.actions : []).forEach(function (m) { push(m && m.name); });
+    names.forEach(function (n) {
+      if (!INK_BOXES[n] && INK_QUEUE.indexOf(n) < 0) INK_QUEUE.push(n);
+    });
+    drainInkQueue();
+  }
+
   /**
    * 宠物（动画）的**最小宽度**，px。
    *
@@ -227,6 +445,26 @@ var HIT_BOX = { x0: 200, y0: 50, x1: 440, y1: 335 };
 
   function randomBetween(min, max) {
     return Math.floor(min + Math.random() * (max - min));
+  }
+
+  /** 该不该随行进方向镜像（scaleX(-1)）。
+   *
+   * ⚠️⚠️ 只有 **turn（转身）+ moves.actions（走路）** 镜像（§9.28）：镜像是为了让角色
+   *   朝着它正在走的那边。以前是「facingRef 一变就镜像所有动画」，于是待机、小动作、
+   *   点击回应、状态 override 有一半时间在看镜像 —— 文字、写字、玩道具那些一翻过来就
+   *   全不对（用户口径「为什么有的动画是镜像的」）。素材作者本来就把动作画成了他们要的样子，
+   *   只有「行进方向」才需要程序替它翻面。
+   */
+  function isDirAnim(name) {
+    var a = config && config.animations;
+    if (!a || !name) return false;
+    if (Array.isArray(a.turn) && a.turn.indexOf(name) >= 0) return true;
+    var moves = a.moves || {};
+    var actions = Array.isArray(moves.actions) ? moves.actions : [];
+    for (var i = 0; i < actions.length; i++) {
+      if (actions[i] && actions[i].name === name) return true;
+    }
+    return false;
   }
 
   function pickWeightedCategory(categories, facing) {
@@ -451,19 +689,17 @@ function topOffsetOf(cfg) {
     return Math.max(m, STAGE_PAD_BOTTOM);
   }
   /**
-   * 站位记忆（customPos）套回来时，宠物在**窗里**能站的范围。
-   *
-   * ⚠️ 为什么只管站位，不管漫游/拖动（clampPos 仍是 0 起夹）：
-   *   留白是**气泡的舞台**。站位是「上次停哪儿」，会被 resize 反复重新套用；
-   *   实测那条把宠物钉在窗顶的记录（ry 算出来正好 0）套上后头顶 0 留白，
-   *   气泡被压成 846x24 的一条、字全裁没了（§9.23）。
-   *   漫游只改 left 不改 top（纵向由站位打底），横向窗里还有整条漫游道可夹。
-   *
-   * ⚠️⚠️ 横向的下界从 STAGE_PAD_X 改成 **0**（§9.25）：贴边是**屏幕**上的概念，
-   *   而窗和宠物的偏移是两个自由度。夹在 32 就等于「永远不许宠物贴到窗边」——
-   *   拖到屏幕边（窗也被夹到屏幕边）时宠物还差 32，而且下次启动这 32 还会把它拽回来。
-   *   横向留白的气泡问题 clampBubble 已经管了（它按**窗**夹），不需要在这儿再留一道。
-   *   纵向仍留 topOffsetOf：站位是要重复套用的，头顶必须一直有气泡的舞台。
+     * 夹取时宠物在**窗里**能站的范围。
+     *
+     * ⚠️ 纵向 **0 起夹**（§9.28）：和拖拽同一个口径 —— 上下都能贴到屏边。
+     *   以前下界是 topOffsetOf（150），实测把那条把宠物钉在窗顶的记录（ry 正好 0）套上后
+     *   头顶 0 留白，气泡被压成 846x24 的一条、字全裁没了（§9.23）。
+     *   现在头顶空间不够时气泡改盖在头顶上（见 clampBubble），不必再靠留台子换。
+     *
+     * ⚠️ 横向的下界是 **0**（§9.25）：贴边是**屏幕**上的概念，
+     *   而窗和宠物的偏移是两个自由度。夹在 32 就等于「永远不许宠物贴到窗边」——
+     *   拖到屏幕边（窗也被夹到屏幕边）时宠物还差 32，而且下次启动这 32 还会把它拽回来。
+     *   横向留白的气泡问题 clampBubble 已经管了（它按**窗**夹），不需要在这儿再留一道。
    *
 * ⚠️ 窗比「宠物 + 两侧留白」还窄时（多开时窗按最大的那只算，小的那只就在区间外）
    *   区间会翻过来，这时取中间值而不是硬贴左边 —— 否则照样贴到窗边、同样没头顶。
@@ -472,14 +708,14 @@ function topOffsetOf(cfg) {
    *   两者不是一回事 —— 舞台左右各有 144px 透明边，按舞台宽算就永远贴不上屏边。
    *   返回值也是**可见框**左边（调用方自己减掉 inkOff 才是容器左边）。
    */
-function stageKeepIn(left, top, inkW, stageH, cfg) {
+function stageKeepIn(left, top, inkW, stageH) {
     var W = window.innerWidth;
     var H = window.innerHeight;
     var loX = 0;
     var hiX = W - inkW;
     if (hiX < loX) loX = hiX = Math.max(0, (W - inkW) / 2);
-    var loY = topOffsetOf(cfg);
-    var hiY = H - stageH - bottomPadOf(cfg);
+    var loY = 0;
+    var hiY = H - stageH;
     if (hiY < loY) loY = hiY = Math.max(0, (H - stageH) / 2);
     return {
       left: Math.min(Math.max(left, loX), hiX),
@@ -547,6 +783,21 @@ var box = {
         right: r.right + HIT_PAD_X,
         bottom: r.bottom + HIT_PAD_BOTTOM,
       };
+      // ⚠️ 形状是**又当裁剪用**的（主进程 SetWindowRgn），所以它必须罩住当前动画画出来的
+      //   全部像素：拿 HIT_BOX 一条（只框角色）去报，动画里自带的气泡/火花就被切掉一截
+      //   （「思考动画的气泡左右还是会被截断」）。所以并上 animInkBox(playing)。
+      var ab = animInkBox(p.playing);
+      if (ab && p.el && p.el.getBoundingClientRect) {
+        var sr = p.el.getBoundingClientRect();
+        if (sr && sr.width > 0) {
+          var kx = sr.width / 640;
+          var mg = INK_MARGIN * kx; // 采样余量只在这层加（几何层用它会让贴边白差 9px）
+          box.left = Math.min(box.left, sr.left + ab.x0 * kx - mg - HIT_PAD_X);
+          box.right = Math.max(box.right, sr.left + ab.x1 * kx + mg + HIT_PAD_X);
+          box.top = Math.min(box.top, sr.top + ab.y0 * kx - mg);
+          box.bottom = Math.max(box.bottom, sr.top + ab.y1 * kx + mg);
+        }
+      }
       // 气泡长在头顶（bottom:100%），可见时并进来
       var b = p.bubbleEl;
       if (b && b.classList && b.classList.contains("show")) {
@@ -850,6 +1101,42 @@ var halfW = this.size / 2;
     var inkOff = INK_X0 * this.size;  // 可见框左边 = 容器左边 + inkOff
 
     /**
+     * 横向要保证「不越出窗」的那一段（px，相对容器左边）：角色可见框 ∪ **当前动画**可见框。
+     *
+     * ⚠️ 为什么要把动画的框也算进来（§9.28）：形状（SetWindowRgn）报多宽，窗外那截就被裁掉；
+     *   而窗宽是固定的，于是宠物贴近窗边时，画出来的那截像素（思考气泡 93..551、蝴蝶 4..629）
+     *   必然有一边跑到窗外被切 —— 用户口径「右侧还是展示不全」。
+     *   两害相权：宁可宽动画播放时宠物往里挪一点，也不切像素。
+     *   待机/走路这类窄动画的框本来就没超角色框 ⇒ inkSafe() 就等于角色可见框，
+     *   §9.27 的「左右贴边」行为**一字不变**。
+     */
+    function inkSafe() {
+      var s = self.size / 640;
+      var b = animInkBox(self.playing);
+      var x0 = HIT_BOX.x0, x1 = HIT_BOX.x1;
+      if (b) {
+        x0 = Math.min(x0, b.x0);
+        x1 = Math.max(x1, b.x1);
+      }
+      return { off: x0 * s, w: (x1 - x0) * s };
+    }
+
+    /** 量出更宽的可见框之后重夹一次位置：不动的话，宽出来的那截就在窗外被裁掉了。
+        夹取以**角色**可见框当前的位置为入参 ⇒ 角色不跳，只是整只往里挪。 */
+    this.refitInk = function () {
+      if (!container.getBoundingClientRect) return;
+      var r = container.getBoundingClientRect();
+      if (!(r.width > 0)) return;
+      var m = clampPos(r.left + inkOff, r.top);
+      if (Math.abs(m.left - r.left) > 0.5) {
+        container.style.left = Math.round(m.left) + "px";
+        container.style.right = "auto";
+        clampBubbles();
+      }
+      pushHitRegion();
+    };
+
+    /**
      * 把容器位置夹回屏幕内。不夹的话宠物能被拖到只剩半个身子在屏幕里（头顶的气泡
      * 跟着出屏，再被主进程的 SetWindowRgn 裁一刀，看着就像「气泡被切了一半」）。
      * extraBottom = 舞台额外的下移量（站位对齐脚底用的），算下边界时算进去。
@@ -857,18 +1144,23 @@ var halfW = this.size / 2;
      * ⚠️ left 进的是**可见框**左边（调用方传「中心 − 可见半宽」），出的是**容器**左边
      *   —— 样式只能写容器左边。省一次换算的机会，但反过来算错就是「贴边差 144px」，
      *   而那种错看着还挺像正常（就差一点），所以固定成「进可见框、出容器」。
+     * ⚠️⚠️ 纵向 **0 起夹**（§9.28）：以前下界是 topOffsetOf（150），上边必须给气泡留台子，
+     *   结果就是「左右能贴边了、上下贴不上」。现在两头都 0 起夹：宠物能真的贴到屏幕上/下边，
+     *   代价是贴上边时头顶没有空间 —— 那时气泡改成**盖在头顶上**（见 clampBubble），
+     *   而不是被压成 24px 的一条。
      */
-    function clampPos(inkLeft, top, extraBottom) {
-      var maxInkLeft = Math.max(0, window.innerWidth - inkW);
-      var maxTop = Math.max(0, window.innerHeight - halfH * 2 - (extraBottom || 0));
-      // 纵向下界和站位同一个口径：头顶永远留气泡的舞台（§9.27）。
-      // 实测：拖到窗顶时容器贴 0，bubble 的 roomAbove = 0 - 18 → max-height 只剩 24px 的一条，
-      // 字全裁没（§9.25 当初是为了这个才把气泡翻到身下，结果脚下的更不够 —— 用户实测打回）。
-      // 现在头顶没有翻法了，就得把头顶的台子留着：容器不下去，头顶就一直在。
-      var minTop = Math.min(topOffsetOf(cfg), maxTop);
+    function clampPos(inkLeft, top) {
+      // 横向夹的是「角色 ∪ 当前动画」的可见框（inkSafe），所以宽动画的像素不会跑出窗；
+      // 窄动画下 inkSafe 就等于角色可见框，退回 §9.27 那套贴边行为。
+      var safe = inkSafe();
+      var safeLeft = inkLeft - inkOff + safe.off;
+      safeLeft = Math.min(Math.max(safeLeft, 0), Math.max(0, window.innerWidth - safe.w));
+      // 容器底 = 脚底（stage 有 translateY(bottomPad) 把脚下那段透明留白顶下去，见 §9.22），
+      // 所以下界就是「容器底贴窗底」：不再减 bottomPad，宠物才能贴到屏幕最下边。
+      var maxTop = Math.max(0, window.innerHeight - halfH * 2);
       return {
-        left: Math.min(Math.max(inkLeft, 0), maxInkLeft) - inkOff,
-        top: Math.min(Math.max(top, minTop), maxTop),
+        left: safeLeft - safe.off,
+        top: Math.min(Math.max(top, 0), maxTop),
       };
     }
 
@@ -964,9 +1256,13 @@ window.addEventListener("resize", function () {
     function applyPosition() {
 if (self.customPos) {
         var cp = self.customPos;
-        // 站位也要给气泡留舞台（§9.23）
-var keep = stageKeepIn(cp.rx * window.innerWidth - inkHalf, cp.ry * window.innerHeight - halfH, inkW, halfH * 2, cfg);
-        container.style.left = keep.left - inkOff + "px";
+        // 横向夹的是「角色 ∪ 当前动画」的可见框（§9.28）：靠边时宽动画画出来的像素也得到窗里，
+        //   不能只在漫游/拖拽时才保证（老落点照样会把思考气泡的左侧顶到窗外）。
+        //   overhang = art 比角色框往左多出来的那截；art 不比角色宽时它就是 0 ⇒ 与旧行为一致。
+        var safe = inkSafe();
+        var over = inkOff - safe.off;
+        var keep = stageKeepIn(cp.rx * window.innerWidth - inkHalf + over, cp.ry * window.innerHeight - halfH, safe.w, halfH * 2);
+        container.style.left = keep.left - over - inkOff + "px";
         container.style.top = keep.top + "px";
         container.style.right = "auto";
         container.style.bottom = "auto";
@@ -1126,13 +1422,22 @@ container.style.left = centeredLeft(inkW, self.slot, Math.max(pets.length, self.
       // ⚠️⚠️ 不再「头顶不够就翻到身下」（§9.25 那支实测后删掉了）：身下那侧**永远**不够 ——
       //   脚下只有 bottomPad 60 的余量，翻下去等于把气泡塞进一条 60px 的缝里，字被裁成
       //   两行还压着脚（用户口径：「脚下气泡被遮挡了 高度不够」）。现在高度只按头顶空间收；
-      //   真的贴到屏幕上边（头顶 0）时气泡被压到最小 —— 那就是 §9.25 之前的老行为，用户认了。
+      //   真的贴到屏幕上边（头顶 0）时**不封高**（§9.28）—— 气泡盖在头顶上，字全都在。
       var cr = container.getBoundingClientRect();
       var roomAbove = Math.max(0, Math.round(cr.top - BUBBLE_CHROME_H));
+      // 头顶放不下两行 → 放弃「按空间封高」，改盖在头顶上（见下面的 overlap 分支）。
+      // 不封高的话 max-height 只剩 24px 下限，气泡是一条 24px 的东西，字全裁没。
+      var overlap = roomAbove < BUBBLE_LINE_H * 2;
       var room = Math.max(24, roomAbove);
       cr = container.getBoundingClientRect(); // 上面被写样式弄脏了？重拿一份干净的（下方 baseL/baseT 用它）
       var withInput = bubble.classList.contains("with-input");
-      if (withInput) {
+      if (overlap) {
+        // 盖在头顶：不限高、不限行数（CSS 的 60vh / 6 行仍兜着），位置交给下面的 wantT = 8。
+        bubble.style.removeProperty("max-height");
+        bubble.style.removeProperty("-webkit-line-clamp");
+        bubbleText.style.removeProperty("max-height");
+        bubbleText.style.removeProperty("overflow");
+      } else if (withInput) {
         // 输入框在气泡**底部**（bubbleText 之后 append），封整个气泡会把框裁掉
         // → 只封文字，把框那 44px 留出来。
         bubble.style.removeProperty("max-height");
@@ -1175,7 +1480,7 @@ container.style.left = centeredLeft(inkW, self.slot, Math.max(pets.length, self.
       var wantT = r.top;
       if (wantL < 8) wantL = 8;
       else if (r.right > W - 8) wantL = W - 8 - r.width;
-      // 越界只有一种：顶出窗顶；掉出窗底的那侧高度已经按头顶空间封死了，量一下防意外。
+      // 越界只有两种：顶出窗顶、掉出窗底（后者只在没封高、盖在头顶上的那档可能出现）。
       if (r.top < 8) wantT = 8;
       else if (r.bottom > H - 8) wantT = H - 8 - r.height;
       dx = Math.round(wantL - baseL);
@@ -1372,8 +1677,12 @@ container.style.left = centeredLeft(inkW, self.slot, Math.max(pets.length, self.
         self.frontIdx = self.frontIdx === 0 ? 1 : 0;
         self.pending = null;
         self.playing = next;   // 屏幕上真正在放的（判定「演到哪了」只看它）
+        // 命中区跟着「当前这段动画画了多大」变（见 animInkBox）；emitHitRegion 会按矩形去重
+        pushHitRegion();
+        // 这段还没量过可见框？插队量一下（量完 onInkBoxReady 会重夹位置 + 重报形状）
+        queueInkMeasure(next);
         self.playedAt = Date.now();
-        target.style.transform = self.facingRef === "right" ? "scaleX(-1)" : "";
+        target.style.transform = isDirAnim(next) && moveDir() === 1 ? "scaleX(-1)" : "";
         if (!self.asleep && target.paused) target.play().catch(function () {});
         if (self.pendingMove && !self.asleep) self.startMoveDrive(target);
       };
@@ -1608,7 +1917,7 @@ container.style.left = centeredLeft(inkW, self.slot, Math.max(pets.length, self.
         // 最后一帧必须写进去（否则会停在倒数第二帧的位置上）
         if (last || now - lastWrite >= MOVE_FRAME_MS) {
           lastWrite = now;
-var mp = clampPos(px - inkHalf, py - halfH, bottomPad);
+var mp = clampPos(px - inkHalf, py - halfH);
           container.style.left = mp.left + "px";
           container.style.top = mp.top + "px";
           container.style.right = "auto";
@@ -1629,6 +1938,13 @@ self.customPos = { rx: (done.left + halfW) / W, ry: (done.top + halfH) / H, w: W
       self.moveRef = requestAnimationFrame(step);
     };
 
+    /** 走位方向：+1 = 往右，-1 = 往左。
+        turn 动画放完会翻 facing，所以此刻它是在朝**反方向**走（与 tryMove 同一口径，别写两份）。 */
+    function moveDir() {
+      var turnAnim = config.animations.turn.indexOf(self.playing || self.anim) >= 0;
+      return (self.facingRef === "right") !== turnAnim ? 1 : -1;
+    }
+
     this.tryMove = function () {
       if (self.moveRef !== null || self.pendingMove) return true;
       var moves = config.animations.moves;
@@ -1636,7 +1952,7 @@ self.customPos = { rx: (done.left + halfW) / W, ry: (done.top + halfH) / H, w: W
       if (!actions.length) return false;
       var chosen = actions[Math.floor(Math.random() * actions.length)];
       var mp = Object.assign({}, moves.default, chosen.params || {});
-      var dir = (self.facingRef === "right") !== (config.animations.turn.indexOf(self.playing || self.anim) >= 0) ? 1 : -1;
+      var dir = moveDir();
       var W = window.innerWidth;
       var plan = planMove({
         cx: self.currentCenterX(),
@@ -1772,15 +2088,16 @@ hit.addEventListener("pointerdown", function (e) {
       // 显示器按**宠物**落点选（与主进程 pet:window-move 同一口径：窗落点 + 宠物在窗里的偏移）
       var wa = workAreaNear(want.x + d.inset.left + 20, want.y + d.inset.top + 20);
       var at = clampWinToScreen(want, winW, winH, wa);
-// 横向夹的是**可见框**（§9.27）：d.base.x 是容器左边，+inkOff 才是角色左边；
-      // 夹完减回 inkOff —— 写进样式的仍然是容器左边。窗边裁掉的那截是透明边，看不见。
-      var inkLeft = Math.min(Math.max(d.base.x + inkOff + (want.x - at.x), 0), Math.max(0, winW - inkW));
-      var left = inkLeft - inkOff;
-      // 纵向算上下移量（脚底对齐 translateY），不然拖到窗底时脚底那截会挂到窗外；
-      // 下界和站位同口径（头顶留气泡的舞台，见 clampPos 里的实测），别又写成 0 起夹
-      var hiTop = Math.max(0, winH - halfH * 2 - bottomPad);
-      var loTop = Math.min(topOffsetOf(cfg), hiTop);
-      var top = Math.min(Math.max(d.base.y + (want.y - at.y), loTop), hiTop);
+// 横向夹的是**可见框**（§9.27）：d.base.x 是容器左边，art 框左边 = 容器左边 + safe.off。
+      // 夹完减回 safe.off —— 写进样式的仍然是容器左边。窄动画时 safe.off/w 就是角色那一份，
+      // 窗边裁掉的仍是透明边，看不见（§9.28：宽动画时要连它画出来的像素一起保证在窗内）。
+      var safe = inkSafe();
+      var safeLeft = Math.min(Math.max(d.base.x + safe.off + (want.x - at.x), 0), Math.max(0, winW - safe.w));
+      var left = safeLeft - safe.off;
+      // 纵向：0 起夹（§9.28）—— 上下都能贴到屏边。容器底就是脚底（stage 的
+      // translateY(bottomPad) 把脚下那段透明留白顶下去了），所以下界直接是「容器底贴窗底」。
+      var hiTop = Math.max(0, winH - halfH * 2);
+      var top = Math.min(Math.max(d.base.y + (want.y - at.y), 0), hiTop);
       if (d.slideAt && Math.abs(d.slideAt.x - left) < 0.5 && Math.abs(d.slideAt.y - top) < 0.5) return;
       d.slideAt = { x: left, y: top };
       container.style.left = Math.round(left) + "px";
@@ -1826,8 +2143,8 @@ if (config.animations.drag.length) {
         queueWinMove(dx, dy, dragState.inset);
         return;
       }
-      // 拖拽也要夹在屏幕内（舞台的下移量这时是 none，所以按 halfH 算下边界）
-var dp = clampPos(e.clientX - dragState.offX - inkHalf, e.clientY - dragState.offY - halfH, 0);
+      // 拖拽也要夹在屏幕内（窗内的纵向 0 起夹，见 clampPos §9.28）
+var dp = clampPos(e.clientX - dragState.offX - inkHalf, e.clientY - dragState.offY - halfH);
       container.style.left = dp.left + "px";
       container.style.top = dp.top + "px";
       container.style.right = "auto";
@@ -2129,10 +2446,15 @@ if (!maxStage) maxStage = 400;
     //   按舞台算出来的窗，左右就各空着一大块，角色永远离屏边那么远（实测把窗拖到屏边
     //   x=0，容器也贴到 0，可见 ink 还在 x=153）。按可见框算完，窗里就没有白留的透明区。
     //   舞台仍然 size 宽（视频铺满它），超出窗的那截是透明的，裁掉看不见。
-    var maxW = inkWidth(maxStage);
+    // ⚠️⚠️ §9.28：窗宽按**整个舞台**算，不再用「所有可能播的动画的可见框并集」——
+    //   并集是运行时才量出来的，拿它算窗宽会先小后大（窗口中途跳一下）。
+    //   舞台本来就是「这段动画可能画到的全部」：窗装得下舞台 + inkSafe() 又保证宽动画
+    //   往窗里挪，任何动画的像素都不会被窗边裁掉。以前按角色框算窗，宠物靠边时宽动画
+    //   （思考 93..551、蝴蝶蜜蜂 4..629）的右侧必被切 —— 用户口径「右侧还是展示不全」。
+    var maxW = maxStage;
     var w = maxW + sidePad * 2 + roamRoom(sidePad);
     return {
-      petW: maxW,
+      petW: inkWidth(maxStage),
       w: w,
       h: Math.max(Math.round((MIN_PET_H * 16) / 9), topOff + petH + botPad),
     };
@@ -2343,6 +2665,9 @@ var root = document.getElementById("pet-root");
     var text = await resp.text();
     var raw = JSON.parse(stripJsonc(text));
     config = assertClientConfig(raw);
+    // 扫描一遍各段动画的可见框（§9.28）：形状（SetWindowRgn）按它报，宽动画的像素才不被切。
+    // 背景里一段一段来（decode 一次约 1~2s），起动不等它。
+    prewarmInkBoxes();
 
     // 窗要开多大：只包住最大的那只宠物 + 头顶气泡 + 横向漫游行程（§9.25）。
     // 拿到配置就报，晚了窗会先按主进程那个 620x560 的默认大小摆一下再跳一下。
