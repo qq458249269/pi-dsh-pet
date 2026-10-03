@@ -100,6 +100,24 @@ npm run build:dir      # 只出免安装目录版 dist/win-unpacked/，跑得快
 > 不再出安装包（NSIS setup）：一个项目两个 exe 时最容易踩的是「双击了没反应」——
 > setup 双击先弹 UAC 和安装向导，用户以为程序挂了。免安装单文件双击即用。
 
+本地打包必踩的两个坑（CI 不会遇到：workflow 已经把环境和镜像备好了）：
+
+| 坑 | 症状 | 怎么办 |
+|----|------|--------|
+| 没设镜像 | `connect ETIMEDOUT 20.205.243.166:443`（GitHub 的 IP），而且**炸在打包中途**，看着像随机挂 | 两个都得设：`ELECTRON_MIRROR` 管 electron 运行时 zip，`ELECTRON_BUILDER_BINARIES_MIRROR` 管 nsis / nsis-resources / 7zip。少设一个就卡那一个 |
+| `--no-save` 分两次装 | 第二次 `npm i` 装完，electron 没了 → `Cannot compute electron version from installed node modules` | `--no-save` 装的包不进 package.json，**后一次 install 会把前一次的 prune 掉**。要装的写进同一条命令 |
+
+```sh
+# Git Bash / zsh
+ELECTRON_MIRROR=https://npmmirror.com/mirrors/electron/ \
+ELECTRON_BUILDER_BINARIES_MIRROR=https://npmmirror.com/mirrors/electron-builder-binaries/ \
+npm run build
+```
+
+PowerShell 用 `$env:ELECTRON_MIRROR="..."` 设同一个变量。
+`slim:assets` 还要本机有 `ffmpeg`；`npm i --no-save ffmpeg-static` 装完记得手动补一下
+postinstall（npm 11 默认拦 install script）：`node node_modules/ffmpeg-static/install.js`。
+
 CI（推 main / 手动触发 `release` workflow）走同一条链，只是多两件事：
 先用 `win-unpacked/pi-dsh-pet.exe` 真跑一次冒烟（起服务、查 `/health`、确认 asar 里的
 页面与 91 个素材读得出来）
