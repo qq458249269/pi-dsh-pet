@@ -206,12 +206,13 @@ console.log("\n待机动画节奏（不切一半 / 待机别太短）…");
 	check("待机放完先停留再抽", /self\.canDwell\(endedAnim\)[\s\S]{0,80}self\.startDwell\(endedAnim\)/.test(petJs));
 	check("停留期间循环续播当前片（不换 src）", /this\.startDwell = function[\s\S]{0,600}front\.loop = true/.test(petJs));
 	check("用户上手就收摊（点击/拖拽/状态帧都停 dwell）", (petJs.match(/stopDwell\(\)/g) || []).length >= 4);
-	// ⑤ 节奏参数可配，且两个默认值都写在 config.jsonc 里
-	//    ⚠️ 默认值 = 用户口径的「每段动画播放时间延长 5 秒」：2.6s+5s / 6s+5s / 45s+5s。
-	//    这里把三个数都钉住：改小回去就等于「动画又被切一半」，那就是回归。
+// ⑤ 节奏参数可配，两个默认值都写在 config.jsonc 里
+	//    ⚠️ 默认值 = 用户口径的「每段动画播放时间延长 5 秒」：2.6s+5s / 6s+5s。
+	//    这里把两个数都钉住：改小回去就等于「动画又被切一半」，那就是回归。
 	check("timing 段带 minPlayMs / idleDwellMs（+5s 后的值）", /"minPlayMs"\s*:\s*7600/.test(cfg) && /"idleDwellMs"\s*:\s*11000/.test(cfg));
-	check("timing 缺省/写错都有兜底", /function readTiming\(raw\)/.test(petJs) && /TIMING_DEFAULT = \{ minPlayMs: 7600, idleDwellMs: 11000, idleSleepMs: \d+ \}/.test(petJs));
-	check("timing 段带 idleSleepMs（空闲多久冻住）", /"idleSleepMs"\s*:\s*\d+/.test(cfg) && /num\("idleSleepMs"/.test(petJs));
+	check("timing 缺省/写错都有兜底", /function readTiming\(raw\)/.test(petJs) && /TIMING_DEFAULT = \{ minPlayMs: 7600, idleDwellMs: 11000 \}/.test(petJs));
+	// ⚠️ 空闲自动冻住（idleSleepMs）已按用户意见拿掉：写回去就等于宠物空闲就停。
+check("timing 段不再有 idleSleepMs（空闲不自动冻）", !/idleSleepMs/.test(cfg) && !/idleSleepMs/.test(petJs.replace(/^.*原 timing\.idleSleepMs.*$/m, "")));
 }
 
 // ------------------------------------------------ 空闲别硬烧（别抢别的窗口的渲染预算）
@@ -236,15 +237,17 @@ console.log("\n空闲别硬烧（不抢别的窗口的渲染预算）…");
 	check("醒来接着当前帧放（有排队就补演）", /this\.wake = function[\s\S]{0,500}self\.asleepNext[\s\S]{0,400}front\.play\(\)/.test(petJs));
 	check("睡着时不换 src（换 src = 一次解码 + 一次重绘）", /if \(self\.asleep\) \{[\s\S]{0,80}self\.asleepNext = \{ anim: next, once: nextOnce \};[\s\S]{0,40}return;/.test(petJs));
 	check("待机续播不会把睡着的视频叫醒", /this\.startDwell = function[\s\S]{0,600}front\.loop = true[\s\S]{0,200}if \(!self\.asleep\)/.test(petJs));
-	// ③ 唤醒口子齐：WS / 主进程（最小化、锁屏）/ 页签隐藏 / 鼠标
-	check("活动唤醒有定时器（noteActivity/armIdle）", /function noteActivity\(\)/.test(petJs) && /function armIdle\(\)/.test(petJs) && /setTimeout\(function \(\)[\s\S]{0,120}goSleep\(\)/.test(petJs));
+// ③ 睡/醒的口子：主进程（最小化、锁屏）/ 页签隐藏 / 手动省电帧。
+	//    ⚠️ 空闲自动冻住（noteActivity + armIdle 定时器）已拿掉：宠物就该一直动。
+	check("空闲自动休眠已拿掉（不再有 noteActivity/armIdle）", !/function noteActivity\(\)/.test(petJs) && !/function armIdle\(\)/.test(petJs));
 check("最小化/锁屏/挂起 → 睡（pet:power）", /onPower: \(cb\) => ipcRenderer\.on\("pet:power"/.test(pre) && /win\.on\("minimize", \(\) => sendPower\(true\)\)/.test(elec) && /\["lock-screen", true\]/.test(elec));
 	check("页签隐藏也睡", /document\.addEventListener\("visibilitychange"[\s\S]{0,200}goSleep\(\)/.test(petJs));
 	check("WS 有 power 帧处理", /obj\.type === "power"[\s\S]{0,200}applyPowerFrame/.test(petJs));
 	// ④ 手动省电：落盘 + 菜单 + 只加不改的协议帧
 	check("省电模式落盘（换窗/重启还在）", /powerSave: false/.test(pathsSrc) && /case "power-save"/.test(hostSrc) && /setPower\(on\)/.test(busSrc));
 	check("窗接上来时补发 power 帧", /conn\.send\(powerFrame\(power\(\) === true\)\)/.test(busSrc));
-	check("菜单里有「省电模式」", /label: "省电模式[^\"]*"/.test(elec));
+check("省电接口暂时屏蔽（POWER_SAVE_ENABLED 总闸）", /POWER_SAVE_ENABLED = false/.test(hostSrc) && /!POWER_SAVE_ENABLED && \(action === "power-save"/.test(hostSrc));
+	check("右键菜单不再有「省电模式」", !/label: "省电模式/.test(elec));
 	// ⑤ 高频重活（SetWindowRgn / 全屏重合成）别打满：
 	//    主进程侧：同形状不重裁 + 60ms 节流 + 取最新的一份；窗侧：2px 量化后去重
 	check("setShape 有去重 + 节流（不动就别重裁全屏）", /SHAPE_GAP_MS = \d+/.test(elec) && /if \(key === shapeKey\) return;/.test(elec) && /shapePending = list;/.test(elec));

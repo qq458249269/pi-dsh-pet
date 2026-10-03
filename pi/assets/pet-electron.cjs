@@ -724,8 +724,7 @@ const res = await callHost("set-position", { id, rx, ry, w: Number(payload.w), h
     const ctrl = (st && st.ctrl) || {};
     const busStats = (st && st.bus) || {};
     const maxPets = Number(ctrl.maxPets) || 1;
-    const paused = ctrl.paused === true;
-    const powerSave = ctrl.powerSave === true;
+const paused = ctrl.paused === true;
     const currentSize = ctrl.size || "normal";
     const run = async (action, body) => {
       const res = await callHost(action, body, token);
@@ -754,16 +753,7 @@ const res = await callHost("set-position", { id, rx, ry, w: Number(payload.w), h
         // 暂停 = 宠物继续自己玩，但不再跟着 agent 状态变。服务与端口照旧。
         click: () => run(paused ? "resume" : "pause"),
       },
-      {
-        label: "省电模式（冻住动画，不占 CPU）",
-        type: "checkbox",
-        checked: powerSave,
-        // 省电 ≠ 暂停：暂停是「不理 agent 状态」，省电是「一帧都不产生」。
-        // 透明置顶窗每一帧都要让 DWM 重合成它底下那块桌面，冻住就不会抢别的窗口的
-        // 渲染预算；气泡文字照常更新（照旧能「说点什么」）。落盘 ctrl.json，重启后还是省电。
-        click: () => run("power-save", { on: !powerSave }),
-      },
-      {
+{
         label: "说点什么…",
         // ⚠️ 必须走 askSay（开输入模式 + 激活窗），不能自己 send：窗平时 focusable:false，
         //    只 send 的话渲染进程那句 input.focus() 会被系统丢掉 —— 框出来了却打不进字，

@@ -88,7 +88,8 @@
 - 窗接上来时补发一次（同上）；开关落盘在 `home/ctrl.json` 的 `powerSave`，
   换窗、重启都还保持着
 - 手动切：`POST /control {action:"power-save", on:true|false}`（等价于
-  `set-ctrl {powerSave}`），或右键菜单的「省电模式」
+  `set-ctrl {powerSave}`）。右键菜单里**没有**这一项；接口本身暂时屏蔽
+  （`app/host.cjs` 的 `POWER_SAVE_ENABLED = false`，调用直接回「已屏蔽」），改回 `true` 即恢复
 - 为什么需要它：这扇窗虽然只包住宠物，但仍是**透明置顶**的，每一帧都要 DWM 重合成它
   底下那块桌面，一直动就等于一直抢别的窗口的渲染预算（见 §9.17）
 - 窗**看不见**时（最小化 / 屏保锁屏 / 挂起）主进程另走 IPC `pet:power` 喊它睡，
@@ -114,7 +115,7 @@
 | `POST /event` | 是 | 单条上行（curl / 脚本用） |
 | `WS /ws` | 否 | 窗下行通道（`pet.js` 发不了自定义头，所以免鉴权） |
 | `WS /feed` | 是（`?token=`） | 生产者上行通道；`?source=` 决定会话归属 |
-| `POST /control` | 是 | `shutdown / restart-window / add-pet / drop-pets / say / pause / resume / power-save / hide-window / show-window / set-ctrl / set-position / check-update / do-update / state / release-lock`（**check-update / do-update 是 Promise**，见 §6.3） |
+| `POST /control` | 是 | `shutdown / restart-window / add-pet / drop-pets / say / pause / resume / hide-window / show-window / set-ctrl / set-position / check-update / do-update / state / release-lock`（**check-update / do-update 是 Promise**，见 §6.3）。`power-save` 与 `set-ctrl{powerSave}` 暂时屏蔽（§3.2.2） |
 
 token 存在 `%APPDATA%/pi-dsh-pet/token`，**只绑 127.0.0.1**。不开 LAN。
 
@@ -229,13 +230,13 @@ resolveTarget():
 ### 6.2 交互与省电
 
 - 右键菜单用 Electron 原生 `Menu`（透明穿透窗上 HTML 菜单会飘/穿），所有动作都走
-  `/control`：当前状态、事件来源、暂停响应、**省电模式**、说点什么、换一只、**检查更新**、
+  `/control`：当前状态、事件来源、暂停响应、说点什么、换一只、**检查更新**、
   添加一只、隐藏宠物（服务留着）、在浏览器打开、复制服务地址、打开数据文件夹、关于、退出。
   （换尺寸只在 `/control set-ctrl` 里，菜单不提供：换窗代价大过收益。）
-- **省电 / 空闲别硬烧**（这扇窗虽然小，但仍是透明置顶的，每一帧都要 DWM 重合成它底下
-  那块桌面，见 §9.17）：空闲 `timing.idleSleepMs`（默认 45s）就把动画冻在当前帧；窗最小化 /
-  锁屏 / 挂起时主进程用 `pet:power` 喊它睡；右键菜单「省电模式」是无条件省电（落盘
-  `ctrl.json`），气泡文字照常更新。核心原则：**没事的时候不产生帧**。
+- **省电 / 看不见别硬烧**（这扇窗虽然小，但仍是透明置顶的，每一帧都要 DWM 重合成它底下
+  那块桌面，见 §9.17）：**没有空闲自动休眠**（宠物就该一直动）；窗最小化 /
+  锁屏 / 挂起时主进程用 `pet:power` 喊它睡；手动省电走 `POST /control {action:"power-save"}`
+  （落盘 `ctrl.json`，菜单里不提供），气泡文字照常更新。核心原则：**画面没人看的时候不产生帧**。
 - 「说点什么」：菜单 → `pet:say-ask` → 渲染进程在气泡位置弹出输入框 → Enter 提交 →
 `preload.say` → 主进程带 token → `/control {action:"say"}`。
 - 「记住位置」（宠物在窗里的站位）：拖拽松手 → `preload.savePosition` → 主进程带 token →
@@ -336,10 +337,10 @@ pi-pet config           # 看/改 config.json
     重新合成一遍（连着下面的窗口一起）。待机链本来就在不停地抽动画，于是别的程序的后台
     窗口永远抢不到合成预算，症状是「桌宠一开，浏览器/IDE 就不刷新了」。
     治法有两个，**两个都要**：① 窗别开成全屏 —— 之前就是屏幕大小的透明置顶窗，等于整块
-    桌面每帧重合成一次（见 §6.1）；② **不产生帧** —— 空闲 `timing.idleSleepMs`（默认 45s）
-    就 `video.pause()` 冻在当前帧、停漫游 rAF、不再上报命中区；唤醒口子有 WS 事件 / 鼠标
-    碰到宠物 / 右键菜单 / 输入框 / resize / 页签可见性，以及主进程的最小化 / 锁屏 /
-    挂起（`pet:power`）。别再为了“手感平滑”把 sleep 关掉。
+    桌面每帧重合成一次（见 §6.1）；② **画面没人看时别产生帧** —— 窗最小化 / 锁屏 / 挂起
+    （`pet:power`）、页签隐藏，以及用户手动省电（`POST /control {action:"power-save"}`）
+    都 `video.pause()` 冻在当前帧、停漫游 rAF、不再上报命中区。
+    ⚠️ 「空闲 N 秒自动冻」（原 `timing.idleSleepMs`）已按用户意见拿掉：宠物就该一直动。
 18. **别拿这扇窗的“每次改形状/样式”当小事。** `setShape()`（SetWindowRgn）、
     漫游时 60fps 的 `style.left` 都落在同一条重合成路径上，而且主进程那次还是跨进程调用。
     所以两头都掐：主进程侧 2px 量化后去重 + `SHAPE_GAP_MS`（60ms）节流（被节流的那份要

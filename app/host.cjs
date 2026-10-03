@@ -21,6 +21,9 @@ const os = require("node:os");
 const path = require("node:path");
 const { spawn } = require("node:child_process");
 
+// 省电开关总闸（见 control() 开头）。false = 接口一律回「已屏蔽」。
+const POWER_SAVE_ENABLED = false;
+
 const { ENDPOINTS, ROLE, SIZES, MAX_PETS_CEILING, EVENTS } = require("./protocol.cjs");
 const {
 	PATHS,
@@ -344,9 +347,15 @@ busHooks.paused = () => readCtrl().paused === true;
 		log(`未捕获异常：${err && err.stack ? err.stack : err}`);
 	});
 
-	/* ---- 6. 控制动作 ---- */
+/* ---- 6. 控制动作 ---- */
 	function control(action, body = {}) {
 		const arg = body || {};
+		// ⚠️ 省电模式暂时屏蔽（2026-10，用户口径：宠物就该一直动，空闲也照常放）。
+		//   底下 power-save / set-ctrl{powerSave} 的实现都还在，改成 true 就原样回来；
+		//   窗侧的 applyPowerFrame、power 帧、ctrl.json 的 powerSave 也一并留着没删。
+		if (!POWER_SAVE_ENABLED && (action === "power-save" || typeof arg.powerSave === "boolean")) {
+			return { ok: false, error: "省电模式暂时屏蔽（宠物一直动）", hint: "窗最小化 / 锁屏 / 挂起仍会自动停" };
+		}
 		switch (action) {
 			case "shutdown":
 			case "stop":
@@ -448,10 +457,11 @@ const map = rememberPosition(id, arg.rx, arg.ry, arg.w, arg.h);
 			default:
 				return {
 					ok: false,
-					error: `未知 action：${action}`,
+error: `未知 action：${action}`,
 					hint:
 "可用：shutdown | restart-window | add-pet | drop-pets | say | pause | resume | " +
-						"power-save | hide-window | show-window | set-ctrl | set-position | check-update | do-update | " +
+						(POWER_SAVE_ENABLED ? "power-save | " : "") +
+						"hide-window | show-window | set-ctrl | set-position | check-update | do-update | " +
 						"state | release-lock",
 				};
 		}
