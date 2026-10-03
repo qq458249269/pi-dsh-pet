@@ -13,7 +13,7 @@
 
 一只住在 **pi 终端编程助手**里的大肥鱼：待机呼吸、随机动作（含打瞌睡）、偶尔转向、屏幕漫游、点击反应、可拖拽。
 
-> 现在它是一个**独立应用**：自己带一个 127.0.0.1 的 HTTP/WS 端口，pi、dsh、curl 都能驱动同一只宠物。
+> 现在它是一个**独立应用**：自己带一个 127.0.0.1 的 HTTP/WS 端口，pi、dsh、opencode、curl 都能驱动同一只宠物。
 > 下行协议完全没变，老版本窗照旧能跑。
 
 > Fork 自 [dsh-pet](https://github.com/PC2005-cloud/dsh-pet)（[npm](https://www.npmjs.com/package/dsh-pet)），本项目专为 pi 平台适配 —— 响应 pi agent 工作状态（思考/写代码/空闲），通过 Electron 透明置顶小浮窗渲染（原 dsh-pet 用户请使用 npm 原版）。
@@ -39,6 +39,17 @@ pi-pet start          # 起桌宠（自带服务 + 窗）
 /pet-say 摸鱼中  →  让它说句话
 /pet-status      →  宿主在哪、探活多少毫秒
 ```
+
+在 opencode 中用（插件会**自动**把宿主拉起来）：
+
+```sh
+# 拷到全局插件目录（opencode 启动时自动加载），项目内用 .opencode/plugins/ 也行
+node -e "require('fs').copyFileSync('node_modules/pi-dsh-pet/opencode/pi-pet.ts', require('os').homedir()+'/.config/opencode/plugins/pi-pet.ts')"
+```
+
+opencode 没有客户端 `/pet` 这类斜杠命令注册（命令是 markdown 模板，每按一次都烧一次模型调用），
+所以控制面是一个 `pet` 工具，让 agent 自己调：让它 `show` / `show large` / `hide` /
+`say 你今天摸鱼了吗` / `status`；直接跟它说「把桌宠藏起来」也行。
 
 不想装 pi 扩展也行，纯当本地服务用：
 
@@ -130,6 +141,7 @@ pi-dsh-pet/
 ├── bin/pi-pet.cjs      # 命令行入口（pi-pet = dsh-pet）
 ├── pi/extensions/      # pi 侧薄客户端（自动起宿主、事件 → 状态帧）
 ├── dsh/pi-pet.mjs      # dsh 侧适配（cordis 风格）
+├── opencode/pi-pet.ts  # opencode 侧适配（Bun 插件 + pet 工具）
 ├── pi/assets/          # Electron 窗口 UI（pet.html + pet.js + pet.css + preload + 主进程）
 ├── assets/preview/     # 91 个预览 GIF
 ├── assets/thumb/       # 91 个透明 WebM 动画

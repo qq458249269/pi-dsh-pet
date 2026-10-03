@@ -1,13 +1,15 @@
 {
   "name": "pi-dsh-pet",
   "version": "0.0.2",
-  "description": "Standalone desktop pet (transparent Electron window) that exposes a local HTTP/WS port so pi, dsh, or any script can drive it. Ships a pi extension and a dsh adapter as thin clients.",
+"description": "Standalone desktop pet (transparent Electron window) that exposes a local HTTP/WS port so pi, dsh, opencode, or any script can drive it. Ships pi / dsh / opencode adapters as thin clients.",
   "keywords": [
     "pi",
     "pi-plugin",
     "pi-extension",
     "pi-package",
     "dsh",
+    "opencode",
+    "opencode-plugin",
     "desktop-pet",
     "pet",
     "electron",
@@ -36,8 +38,9 @@
   "files": [
     "app",
     "bin",
-    "pi",
+"pi",
     "dsh",
+    "opencode",
     "assets/thumb",
     "assets/config.jsonc",
     "DESIGN.md"
@@ -47,7 +50,8 @@
     "serve": "node bin/pi-pet.cjs serve",
     "status": "node bin/pi-pet.cjs status",
     "doctor": "node bin/pi-pet.cjs doctor",
-"test": "node scripts/check-workflow.cjs && node test/smoke.mjs && node test/dsh.mjs",
+"test": "node scripts/check-workflow.cjs && node test/smoke.mjs && node test/dsh.mjs && node test/opencode.mjs",
+    "test:opencode": "node test/opencode.mjs",
     "test:workflow": "node scripts/check-workflow.cjs",
     "build": "npx --yes electron-builder --win --publish never --config electron-builder.yml",
     "build:dir": "npx --yes electron-builder --win --dir --publish never --config electron-builder.yml",

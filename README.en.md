@@ -34,6 +34,15 @@ In pi:
 /pet-stop        →  close all pet windows
 ```
 
+In opencode (the plugin starts the host by itself):
+
+```sh
+node -e "require('fs').copyFileSync('node_modules/pi-dsh-pet/opencode/pi-pet.ts', require('os').homedir()+'/.config/opencode/plugins/pi-pet.ts')"
+```
+
+opencode has no client-side slash-command registry (commands are markdown templates that cost an LLM turn),
+so control lives in a `pet` tool the agent calls: `show [small|normal|large]` / `hide` / `say <text>` / `status`.
+
 > 💡 First launch downloads Electron ~100MB; subsequent launches are instant.
 
 The pet reacts to pi's agent state:
