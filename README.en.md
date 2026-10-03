@@ -8,7 +8,7 @@
   <a href="https://github.com/qq458249269/pi-dsh-pet"><img alt="stars" src="https://img.shields.io/github/stars/qq458249269/pi-dsh-pet?style=social"></a>
   <a href="https://github.com/qq458249269/pi-dsh-pet/blob/main/LICENSE"><img alt="license" src="https://img.shields.io/github/license/qq458249269/pi-dsh-pet?color=orange"></a>
   <img alt="platform" src="https://img.shields.io/badge/platform-pi%20coding%20agent-8A2BE2">
-  <img alt="assets" src="https://img.shields.io/badge/assets-91%20animations-ff69b4">
+  <img alt="assets" src="https://img.shields.io/badge/assets-93%20animations-ff69b4">
 </p>
 
 A floating deepseek chan living in the **pi coding agent**: idle breathing, random actions, screen roaming, click reactions, and agent-state reactivity — thinking, coding, and idle each trigger matching animations.
@@ -63,8 +63,8 @@ The pet reacts to pi's agent state:
 pi-dsh-pet/
 ├── pi/extensions/       # pi extension entry (HTTP + WebSocket + Electron launcher)
 ├── pi/assets/           # Electron window UI (pet.html + pet.js + pet.css + preload)
-├── assets/preview/      # 91 preview GIFs
-├── assets/thumb/        # 91 transparent WebM animations
+├── assets/preview/      # 93 preview GIFs
+├── assets/thumb/        # 93 transparent WebM animations
 ├── assets/config.jsonc  # animation → event / tag mapping
 ├── package.json         # npm package manifest
 ├── DESIGN.md            # design & architecture doc
@@ -74,7 +74,15 @@ pi-dsh-pet/
 
 ## Animations Preview
 
-All 91 animations — see the [main README](./README.md) for the full gallery.
+All 93 animations — see the [main README](./README.md) for the full gallery.
+
+### Generating new animations
+
+`npm run gen:anim` draws them programmatically — pure Node rasterizer → PNG frames →
+ffmpeg (VP8 + alpha) → 640×360 transparent WebM. Needs only an ffmpeg binary on PATH
+or in `FFMPEG_PATH`; no npm packages. Add a preset in `scripts/gen-anim.cjs`, register the
+name in `assets/config.jsonc`, add a README gallery line, done. Details and pitfalls:
+[main README → 生成动画](./README.md#生成动画不想手绘素材的路线).
 
 ---
 

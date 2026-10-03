@@ -57,7 +57,8 @@
     "build:dir": "npx --yes electron-builder --win --dir --publish never --config electron-builder.yml",
     "slim:assets": "node scripts/slim-assets.cjs",
     "slim:assets:dry": "node scripts/slim-assets.cjs --dry",
-    "assets:restore": "node scripts/slim-assets.cjs --restore"
+"assets:restore": "node scripts/slim-assets.cjs --restore",
+    "gen:anim": "node scripts/gen-anim.cjs"
   },
   "engines": {
     "node": ">=18"

@@ -8,7 +8,7 @@
   <a href="https://github.com/qq458249269/pi-dsh-pet"><img alt="stars" src="https://img.shields.io/github/stars/qq458249269/pi-dsh-pet?style=social"></a>
   <a href="https://github.com/qq458249269/pi-dsh-pet/blob/main/LICENSE"><img alt="license" src="https://img.shields.io/github/license/qq458249269/pi-dsh-pet?color=orange"></a>
   <img alt="platform" src="https://img.shields.io/badge/platform-pi%20coding%20agent-8A2BE2">
-  <img alt="assets" src="https://img.shields.io/badge/assets-91%20animations-ff69b4">
+assets-93%20animations-ff69b4
 </p>
 
 一只住在 **pi 终端编程助手**里的大肥鱼：待机呼吸、随机动作（含打瞌睡）、偶尔转向、屏幕漫游、点击反应、可拖拽。
@@ -72,7 +72,7 @@ curl -X POST 127.0.0.1:47653/event -H "authorization: Bearer $(pi-pet token)" \
 | 块 | 大小 | 能动吗 |
 | --- | --- | --- |
 | Electron 运行时 | ≈74MB（压后） | 不能，去掉就不是 Electron 了 |
-| 91 个 webm 素材 | ≈46MB | 只能重编码降码率（`npm run slim:assets`） |
+| 93 个 webm 素材 |
 | locales 语言包 | ≈41MB → 2MB | 已砍：只留 `zh-CN` / `en-US` |
 
 默认产物 ~120MB 就是这个拆解的结果：locales 已砍、压缩已开到 `maximum`。
@@ -93,7 +93,7 @@ npm run build:dir      # 只出免安装目录版 dist/win-unpacked/，跑得快
 
 CI（推 main / 手动触发 `release` workflow）走同一条链，只是多两件事：
 先用 `win-unpacked/pi-dsh-pet.exe` 真跑一次冒烟（起服务、查 `/health`、确认 asar 里的
-页面与 91 个素材读得出来），再把 exe 与源码 zip 一起挂到 release。
+页面与 93 个素材读得出来）
 产物名里**没有版本号**（版本号 `YYYY.MM.DD.NNNN` 不是合法 semver，electron-builder 会
 把它规范化成 `2026.9.3-0.2` 这种鬼样子），版本认 tag / release 说明。
 发布链的约束（token 权限、跨 job 依赖）见 [DESIGN.md §10](./DESIGN.md)。
@@ -144,8 +144,8 @@ pi-dsh-pet/
 ├── dsh/pi-pet.mjs      # dsh 侧适配（cordis 风格）
 ├── opencode/pi-pet.ts  # opencode 侧适配（Bun 插件 + pet 工具）
 ├── pi/assets/          # Electron 窗口 UI（pet.html + pet.js + pet.css + preload + 主进程）
-├── assets/preview/     # 91 个预览 GIF
-├── assets/thumb/       # 91 个透明 WebM 动画
+assets/preview/     # 93 个预览 GIF
+assets/thumb/       # 93 个透明 WebM 动画
 ├── assets/config.jsonc # 动画到事件/标签的映射
 ├── electron-builder.yml# 打单文件 exe 用（日常开发不需要）
 ├── package.json        # npm 包清单
@@ -156,13 +156,17 @@ pi-dsh-pet/
 
 ## 动画预览
 
-全部 91 个动画（640×360 透明 WebM）：
+全部 93 个动画（640×360 透明 WebM）：
+
+> 💡 「原地漂浮摇尾巴」「原地翻肚皮打滚」是脚本画的（`npm run gen:anim`，纯 Node 光栅化 + ffmpeg 编码，
+> 见 `scripts/gen-anim.cjs`），其余为素材库里的手绘/AI 视频。
 
 **待机 / 转向**
 
 <p>
   <img src="https://raw.githubusercontent.com/qq458249269/pi-dsh-pet/main/assets/preview/daiji-huxi-xiuxian.gif" width="160" alt="待机呼吸休闲">
-  <img src="https://raw.githubusercontent.com/qq458249269/pi-dsh-pet/main/assets/preview/dongzhangxiwang.gif" width="160" alt="东张西望">
+<img src="https://raw.githubusercontent.com/qq458249269/pi-dsh-pet/main/assets/preview/dongzhangxiwang.gif" width="160" alt="东张西望">
+  <img src="https://raw.githubusercontent.com/qq458249269/pi-dsh-pet/main/assets/preview/yuandi-piaofu-yao-weiba.gif" width="160" alt="原地漂浮摇尾巴">
 </p>
 
 **移动**
@@ -193,7 +197,8 @@ pi-dsh-pet/
   <img src="https://raw.githubusercontent.com/qq458249269/pi-dsh-pet/main/assets/preview/qingkuai-jilu.gif" width="160" alt="轻快记录">
   <img src="https://raw.githubusercontent.com/qq458249269/pi-dsh-pet/main/assets/preview/xie-daima.gif" width="160" alt="写代码">
   <img src="https://raw.githubusercontent.com/qq458249269/pi-dsh-pet/main/assets/preview/yaoshan-naliang.gif" width="160" alt="摇扇纳凉">
-  <img src="https://raw.githubusercontent.com/qq458249269/pi-dsh-pet/main/assets/preview/chenjian-shuaya.gif" width="160" alt="晨间刷牙">
+assets/preview/chenjian-shuaya.gif" width="160" alt="晨间刷牙">
+  <img src="https://raw.githubusercontent.com/qq458249269/pi-dsh-pet/main/assets/preview/yuandi-fandupi-da-gun.gif" width="160" alt="原地翻肚皮打滚">
 </p>
 
 **玩耍**
@@ -296,6 +301,77 @@ pi-dsh-pet/
 
 ---
 
+## 生成动画（不想手绘素材的路线）
+
+`scripts/gen-anim.cjs` 能**程序化画出**新动画：纯 Node 光栅化（只用 `node:zlib`）→
+PNG 帧序列 → ffmpeg 编成 640×360 透明 WebM。**只依赖 ffmpeg 一个外部程序**，
+不装任何 npm 包；素材从零到可播，就下面这一条命令。
+
+```sh
+# 1) 准备 ffmpeg（本机没有就下 https://www.gyan.dev/ffmpeg/builds/ 那个 7z/zip）
+#    Windows 也可以 npm i --no-save ffmpeg-static（走 GitHub 下载，可能被墙）
+FFMPEG_PATH=/path/to/ffmpeg npm run gen:anim            # 生成全部预设
+FFMPEG_PATH=/path/to/ffmpeg npm run gen:anim -- --gif   # 顺带出 README 用的预览 GIF
+FFMPEG_PATH=/path/to/ffmpeg npm run gen:anim -- swim    # 只生成某一个预设
+```
+
+产物落 `assets/thumb/<名字>.webm`（窗按名字取 URL）和 `assets/preview/<拼音>.gif`（图库用）。
+在 README 图库补一行，否则 `npm test`
+的图库断言会直接失败（它盯着 preview 目录 ↔ README 链接 ↔ 「全部 N 个动画」三处一致）。
+
+### 加一段新动画
+
+编辑 `scripts/gen-anim.cjs` 的 `PRESETS`，加一条就行 —— 没有别的注册步骤：
+
+```js
+swim: {
+  file: "原地漂浮摇尾巴",          // = assets/thumb/ 里的文件名（config.jsonc 也用这个名）
+  slug: "yuandi-piaofu-yao-weiba", // = assets/preview/ 里的 GIF 名（仓库惯例用拼音）
+  frames: 48,                      // 帧数（48 帧 @24fps = 2s 一个循环，必须首尾相接）
+  pose: (t) => ({ ... })           // t ∈ [0,1)，返回这一帧的姿态
+}
+```
+
+`pose` 能拧的旋钮（`drawWhale` 读它们）：
+
+| 字段 | 管什么 |
+|------|--------|
+| `scale` | 整体大小。**角色实际宽度 ≈ stage × 0.375**，所以 `scale: 0.85` ≈ 画布宽的 32% |
+| `x` / `y` | 平移；`y: -10*Math.sin(TAU*t)` 就是上浮下沉 |
+| `spin` | 整体旋转（弧度），打滚 = `TAU * t` |
+| `sx` / `sy` | 挤压拉伸；`1 ± 0.03*sin()` = 呼吸感 |
+| `wag` / `fin` | 尾鳍 / 胸鳍摆动角度（弧度） |
+| `blink` | 眼睛开合，0 = 闭；想眨眼就用 `t > 0.58 && t < 0.66 ? 0.12 : 1` |
+| `mouth` | 嘴巴张开程度 0..1 |
+
+⚠️ **循环**：所有量都必须是 `t` 的周期函数（`sin/cos(TAU*t)`），否则播到接缝会跳一下。
+`swim` / `roll` 两条预设就是这么写的（`roll` 转满 360° 正好接回起点）。
+
+### 输出规格
+
+| 项 | 值 | 为什么 |
+|----|----|--------|
+| 尺寸 / 帧率 | 640×360 @ 24fps | 与现有 93 个素材一致；窗按 16:9 舞台排版 |
+| 编码 | **VP8 + `yuva420p`**（`-auto-alt-ref 0`） | 见下面的坑 |
+| 抠像 | 纯 alpha，背景 0 | 浮窗透明，多余的黑框会直接露馅 |
+| 自检 | 逐帧扫 alpha 外接框，贴边就报错 | 「切边」是静默故障：看着像角色被削平 |
+
+### 踩过的坑（都已在脚本里注释）
+
+- **别用 VP9**：ffmpeg 自带的 vp9 解码器**根本不读 alpha**（解出来全不透明，而 Chrome 读）——
+  也就是说你**没法自检**产物对不对。VP8 + libvpx 解码器能验，所以选 VP8，Chrome/Electron 一样放。
+- **alpha 必须关 altref**：`-auto-alt-ref 0`。开着直接报
+  `Transparency encoding with auto_alt_ref does not work`，编码器拒绝干活。
+- **量纲**：画布里 rgb 是 0..255、alpha 曾经是 0..1；写 PNG 时不统一，就会得到「整张全白」
+  或「整张全透明」的产物 —— 这两种都**不会报错**，只会让你以为宠物不见了。
+- 形状用 3×3 超采样求覆盖率做抗锯齿；描边是「沿质心放大 1.12 倍先画深色再画本色」的土办法，
+  比真描边便宜，640×360 够用。
+
+→ 跳过：骨骼绑定、Lottie/矢量插值、素材版本管理。要更像手绘质感就往 `drawWhale` 里加渐变、
+高光、腮红抖动，或者直接往 `pose` 里加曲线 —— 不需要引任何依赖。
+
+---
+
 ## 自定义大小
 
 > 菜单里已经**不提供**换尺寸的入口（小/中/大）。下面的映射仍在用：默认尺寸走
@@ -392,7 +468,8 @@ PI_PET_UPDATE_DELAY_MS=…  # 启动后等多久再查（默认 12s，别跟起�
   | `POST /control {"action":"set-ctrl","powerSave":true|false}` | 同上，set-ctrl 顺带改意图文件的那条路 |
   | `GET /state` 里的 `ctrl.powerSave` | 只读当前值 |
 
-  开着时：动画冻在当前帧（`video.pause()`、停漫游 rAF、不再上报命中区），气泡文字照常更新、
+  开着时：动画冻在当前帧（`video.pause()`、停漫游 rAF、不再上报命中区），气泡文字照常更新、
+
   能「说点什么」；关掉即从当前帧无缝接着放（不跳回第一帧）。宿主会向窗补发
   `{"type":"power","sleep":true|false}` 帧，窗侧 `applyPowerFrame` 认这个帧。
 - 漫游拖动时也掐着：窗内写样式/上报命中区封顶 30fps，主进程那次 `setShape` 有 2px 去重 +
