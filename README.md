@@ -69,14 +69,25 @@ curl -X POST 127.0.0.1:47653/event -H "authorization: Bearer $(pi-pet token)" \
 
 | 块 | 大小 | 能动吗 |
 | --- | --- | --- |
-| Electron 运行时 | ≈74MB（压后） | 不能，去掉就不是 Electron 了 |
-| 91 个 webm 素材 |
+| Electron 运行时 | ≈85MB（压后） | 不能，去掉就不是 Electron 了 |
+| 91 个 webm 素材 | 46MB → 21MB | 已压：448px/CRF 40（`npm run assets:restore` 还原） |
 | locales 语言包 | ≈41MB → 2MB | 已砍：只留 `zh-CN` / `en-US` |
+| `dxcompiler/dxil.dll` | 26MB → 0 | 已删：D3D12 后端用不上（`scripts/after-pack.cjs`） |
 
-默认产物 ~120MB 就是这个拆解的结果：locales 已砍、压缩已开到 `maximum`。
-还嫌大就在 CI 上勾 `slim_assets`（或本地 `npm run slim:assets`）把素材重编码到
-512px/CRF 34，能再省三四十 MB，代价是画质；`npm run assets:restore` 一键还原。
-`scripts/slim-assets.cjs` 需要本机有 `ffmpeg`，没有就报错退出、不动原文件。
+当前产物 **≈102MB**（portable 单文件）。地板就是上面第一行的 Electron：素材清零也过不去，
+再往下只能换壳子（WebView2 / Tauri）。
+
+想自己调素材档位（都是实测，`--dry` 先看能省多少）：
+
+| 档位 | 结果 | 代价 |
+| --- | --- | --- |
+| 512px / CRF 34 | 46MB → 39MB（-15%） | 几乎无 |
+| **448px / CRF 40** | 46MB → 21MB（-55%） | **默认，540px 档略软** |
+| 384px / CRF 42 | 46MB → 13.7MB（-70%） | 大档明显糊 |
+
+`node scripts/slim-assets.cjs --dry --width 448 --crf 40`；真压去掉 `--dry`，
+原件自动备份到 `assets/thumb.orig/`，`npm run assets:restore` 一键还原。
+需要本机有 `ffmpeg`，没有就报错退出、不动原文件。
 
 ### 不想用 CI？本地打包
 

@@ -56,12 +56,21 @@ function electronExe(distDir) {
  * 修法：cwd 只在 pkgRoot 真的是目录时给；否则退到它的上一层（打包版 = `resources`，
  * 实测可跑）；再不行就不给 cwd（子进程继承宿主当前目录），绝不把「不是目录的东西」传下去。
  *
- * pkgRoot 做成可注入的形参（默认真 PKG_ROOT），是为了让单测能在**不打包**的情况下
+* pkgRoot 做成可注入的形参（默认真 PKG_ROOT），是为了让单测能在**不打包**的情况下
  * 模拟「PKG_ROOT 是 app.asar 那个文件」的成品形态 —— 这正是当初漏网的场景：
  * 开发期一切正常，只有用户双击 exe 才炸，CI 里的 `--no-window` 冒烟照不到。
+ *
+ * ⚠️ 但上面那个 fs 判断在**打包态本身**里就是失效的（已实测）：Electron 给 fs 打了
+ * asar 补丁，`statSync("<exe>\resources\app.asar")` 返回 **isDirectory()===true、size 0**
+ * —— 那个 46MB 的文件被它报成目录。于是本函数在成品里总是把 app.asar 原样当 cwd 交出去，
+ * ENOENT 照旧，窗永远起不来（用户现场：exe 里 `cwd=…\resources\app.asar`）。
+ * **所以打包态不再问 fs，直接问 Electron 自己**：process.resourcesPath 就是那个
+ * 真目录（打包版 = `<exe目录>\resources`，实测存在）。只有纯 node（单测 / 宿主脚本）
+ * 才走 pkgRoot 那条链 —— 那条链的判断依据在这里是可信的。
  */
 function launchCwd(pkgRoot = PKG_ROOT) {
-	for (const c of [pkgRoot, path.dirname(pkgRoot)]) {
+	const candidates = process.resourcesPath ? [process.resourcesPath] : [pkgRoot, path.dirname(pkgRoot)];
+	for (const c of candidates) {
 		try {
 			if (fs.existsSync(c) && fs.statSync(c).isDirectory()) return c;
 		} catch {

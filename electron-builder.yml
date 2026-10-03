@@ -11,6 +11,10 @@ directories:
   # buildResources：图标等资源目录。没建也不会报错，只是用 Electron 默认图标。
   buildResources: build
 
+# 打包完删掉用不到的 Electron 自带文件（现在只有 D3D12 的 dxcompiler/dxil，白带 26MB）。
+# 为什么不写在 files 里：files 只管**打进去**什么，删 electron 自己的文件得走钩子。
+afterPack: scripts/after-pack.cjs
+
 # 只带运行时要的东西：宿主代码 + 窗代码 + 91 个 webm 素材。
 # ⚠️ 每一项都加引号：YAML 里裸的 * 会被当 alias，而且未加引号的通配写法
 # 在不同 glob 实现下对「零层子目录」（app/main.cjs 之于 app/**/*.cjs）匹配不一致，

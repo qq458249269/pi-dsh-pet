@@ -127,8 +127,21 @@ const { launchCwd } = await import(pathToFileURL(join(ROOT, "app", "window.cjs")
 	const fakeAsar = launchCwd(join(ROOT, "package.json"));
 	check("PKG_ROOT 是文件（打包版的 app.asar）→ 退到真目录", isDir(fakeAsar), String(fakeAsar));
 	check("退到的目录不是那个文件本身", fakeAsar !== join(ROOT, "package.json"));
-	// ③ 连上一层都不存在时，宁可不给 cwd（undefined）也不硬塞一个坏路径
+// ③ 连上一层都不存在时，宁可不给 cwd（undefined）也不硬塞一个坏路径
 	check("完全不存在 → 不给 cwd（undefined）", launchCwd(join(ROOT, "没有这个目录", "app.asar")) === undefined);
+// ④ 打包态（process.resourcesPath 存在 = 跑在 Electron 里）：**必须**用它，
+	// 因为 asar 补丁会把 app.asar 这个文件 stat 成目录（isDirectory()===true），
+	// fs 那条判断在成品里必然被骗 —— 纯 node 单测照不到，只有钉住这条分支才拦得住。
+	// pkgRoot 故意传一个「文件」（冒充 app.asar），返回的必须是 resourcesPath。
+	// 用赋值模拟「跑在 Electron 里」：纯 node 下这个字段是 undefined，设上去即可。
+	const realResources = process.resourcesPath;
+	try {
+		process.resourcesPath = join(ROOT, "app");
+		check("打包态用 process.resourcesPath，不问 pkgRoot（asar 被 stat 成目录）", launchCwd(join(ROOT, "package.json")) === join(ROOT, "app"));
+	} finally {
+		if (realResources === undefined) delete process.resourcesPath;
+		else process.resourcesPath = realResources;
+	}
 }
 
 // ---------------------------------------------------------------- 头顶的气泡
