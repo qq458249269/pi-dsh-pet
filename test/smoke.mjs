@@ -920,6 +920,9 @@ check("扫描不拖累正常播放（一次一段 + 段间让开 + 超时兜底�
 
 check("夹取范围 = 角色 ∪ 当前动画（三条路都得走 inkSafe，漏一条就有一路靠边时被切）", /function inkSafe\(\)[\s\S]{0,320}animInkBox\(self\.playing\)/.test(petSrc) && /clampPos\(inkLeft, top\)[\s\S]{0,220}var safe = inkSafe\(\)/.test(petSrc) && /function slideTo[\s\S]{0,900}var safe = inkSafe\(\)/.test(petSrc) && /function applyPosition\(\)[\s\S]{0,400}var safe = inkSafe\(\)/.test(petSrc) && /Math\.min\(Math\.max\(safeLeft, 0\), Math\.max\(0, window\.innerWidth - safe\.w\)\)/.test(petSrc));
 check("量出新框后重夹位置 + 重报形状（不然新量到的宽动画第一次播仍靠窗边）", /this\.refitInk = function \(\)[\s\S]{0,700}clampPos\(r\.left \+ inkOff, r\.top\)/.test(petSrc) && /function onInkBoxReady[\s\S]{0,300}refitInk\(\)[\s\S]{0,120}pushHitRegion\(\)/.test(petSrc));
+// ⚠️ refitInk 只挂在 onInkBoxReady 上不够（§9.31）：可见框进了 localStorage 缓存就不再量，
+// refitInk 永远不跑 ⇒ 缓存一热，思考动画宽出来的那截就顶出窗外被切（「右侧缺失」）。
+check("每次换手都重夹位置（宽动画靠窗边时右侧不被切）", /self\.playing = next;[\s\S]{0,900}self\.refitInk\(\)/.test(petSrc));
 check("窗宽按整个舞台算（宽动画的像素不会被窗边裁，加新动画也不用重算）", /var maxW = maxStage/.test(petSrc) && /var w = maxW \+ sidePad \* 2 \+ roamRoom\(sidePad\)/.test(petSrc));
 
 // ------------------------------------------------ 只镜像走位动画（§9.29）

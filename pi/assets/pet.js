@@ -1623,8 +1623,13 @@ inputOpen = true;
         old.classList.remove("is-front");
         self.frontIdx = self.frontIdx === 0 ? 1 : 0;
         self.pending = null;
-        self.playing = next;   // 屏幕上真正在放的（判定「演到哪了」只看它）
+self.playing = next;   // 屏幕上真正在放的（判定「演到哪了」只看它）
         // 命中区跟着「当前这段动画画了多大」变（见 animInkBox）；emitHitRegion 会按矩形去重
+        // ⚠️⚠️ 换手后必须**重夹一次位置**（§9.31）：形状会罩住宽动画，可窗不会跟着变大 ——
+        //   宠物停在窗的右半边时，宽出来那截（思考气泡 95..551）直接顶出窗外被切，
+        //   用户口径「右侧还是展示不全」。以前只有 refitInk（量完可见框时）会夹，
+        //   而框一旦进了缓存就不会再量 ⇒ refitInk 永远不跑 ⇒ 缓存一热就必现。
+        self.refitInk();
         pushHitRegion();
         // 这段还没量过可见框？插队量一下（量完 onInkBoxReady 会重夹位置 + 重报形状）
         queueInkMeasure(next);
