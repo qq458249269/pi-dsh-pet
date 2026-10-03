@@ -642,6 +642,14 @@ check("update-info 在 listen 之前就有（不然第一下请求吃到 TDZ）"
 check("control 可以是 Promise（server 那头 await）", /await ctx\.control\(/.test(serverSrc));
 check("宿主不会 spawnSync 卡死自己", !/spawnSync\s*\(/.test(hostSrc));
 check("菜单里有「检查更新」", /label: "检查更新…"/.test(elecSrc));
+// ⚠️ 症状：第一次点菜单里的「检查更新…」不弹窗，第二次才弹（DESIGN.md §9.30）。
+// 无父窗的 message box 是应用级模态，而窗平时 focusable:false ⇒ 弹不到前台；菜单收尾时
+// 创建的模态框还会被 Windows 吞掉。所以只认showDialog 这一个出口。
+check("所有弹窗都走 showDialog（不再直接 dialog.showMessageBox）", !/dialog\.showMessageBox\(/.test(elecSrc.replace(/dialog\.showMessageBox\(win, opts\)/, "")) && /function showDialog\(opts\)/.test(elecSrc));
+check("弹窗带父窗 win（模态到那扇窗，不靠进程在前台）", /dialog\.showMessageBox\(win, opts\)/.test(elecSrc));
+check("弹窗延后一拍再弹（等原生菜单收干净）", /showDialog[\s\S]{0,400}setTimeout\(r, 80\)/.test(elecSrc));
+check("弹窗期间临时给窗可聚焦 + 激活，弹完还原", /setFocusable\(true\)[\s\S]{0,600}setFocusable\(false\)/.test(elecSrc));
+check("连点两下只弹一个盒子（showDialog 排队）", /const prev = dialogBusy[\s\S]{0,80}dialogBusy = prev\.then/.test(elecSrc));
 check("菜单更新走宿主（check-update / do-update）", /callHost\("check-update"/.test(elecSrc) && /callHost\("do-update"/.test(elecSrc));
 check("菜单更新请求的超时给到分钟级（git fetch / npm i 很慢）", /callHost\("check-update", \{\}, token, 240000\)/.test(elecSrc));
 check("自动更新不需要用户点（宿主自己拉）", /PI_PET_NO_UPDATE=1 → 不自动检查更新/.test(updSrc));

@@ -687,10 +687,10 @@ const cs = { w: num(windowDrag.w, 0), h: num(windowDrag.h, 0) };
     if (!t) return;
     const { token, home } = readTokenAndHome();
     const res = await callHost("say", { text: t }, token);
-    if (!res || res.ok !== true) {
-      dialog.showMessageBox({
-        type: "warning",
-        message: "没能说出来",
+if (!res || res.ok !== true) {
+        await showDialog({
+          type: "warning",
+          message: "没能说出来",
         detail: failureDetail(home, res, "宿主没应答"),
         buttons: ["好"],
       });
@@ -728,8 +728,8 @@ const paused = ctrl.paused === true;
     const currentSize = ctrl.size || "normal";
     const run = async (action, body) => {
       const res = await callHost(action, body, token);
-      if (!res || res.ok !== true) {
-        dialog.showMessageBox({
+if (!res || res.ok !== true) {
+        await showDialog({
           type: "warning",
           message: "操作没成功",
           detail: failureDetail(home, res, `宿主（127.0.0.1:${port}）没应答或拒绝了`),
@@ -799,8 +799,8 @@ const paused = ctrl.paused === true;
           ]
             .filter(Boolean)
             .join("\n");
-          try {
-            dialog.showMessageBox({ type: "info", message: "桌面宠物", detail, buttons: ["好"] });
+try {
+            await showDialog({ type: "info", message: "桌面宠物", detail, buttons: ["好"] });
           } catch {
             clipboard.writeText(detail);
           }
@@ -813,6 +813,50 @@ const paused = ctrl.paused === true;
 
     menu.popup({ window: win });
   });
+
+// ---- 所有弹窗的唯一出口 ----
+  //
+  // 直接调 dialog.showMessageBox 会出「第一次点菜单里的「检查更新…」什么都没出来，
+  // 第二次点才弹」这种症状（同一族的坑下面 setInputMode 也写着：从原生菜单里叫出来，
+  // 菜单刚收起、系统还没把激活交回来，第一下常被吞掉）。三件事一起做才稳：
+  //   ① 延后一拍再弹：原生菜单正在收尾时创建的模态框，Windows 有时直接吞掉它。
+  //   ② **带父窗 win**：无父窗的是「应用级」模态，窗平时 focusable:false → 本进程不是
+  //      前台进程，那盒子就弹不到你眼前（压在别的程序底下，看着像没弹）。
+  //   ③ 弹窗期间把这扇窗临时变成可聚焦并激活，弹完还原（借 setInputMode 的那套手法）。
+  // 排队：连点两下不会叠出两个盒子（第二个等第一个关掉）。
+  let dialogBusy = null;
+  function showDialog(opts) {
+    const mine = async () => {
+      await new Promise((r) => setTimeout(r, 80)); // ① 等菜单收干净
+      if (win.isDestroyed()) return { response: -1, checkboxChecked: false };
+      const held = dialogBusy; // ②③ 期间借一下可聚焦
+      if (!inputMode) {
+        try {
+          if (process.platform === "darwin") win.setFocusableOnMac(true);
+          else win.setFocusable(true);
+        } catch {
+          /* 拿不到就算了，盒子照样能弹 */
+        }
+        try { win.focus(); } catch { /* 同上 */ }
+      }
+      try {
+        return await dialog.showMessageBox(win, opts);
+      } finally {
+        if (!inputMode && dialogBusy === held && !win.isDestroyed()) {
+          try {
+            if (process.platform === "darwin") win.setFocusableOnMac(false);
+            else win.setFocusable(false);
+            win.blur();
+          } catch {
+            /* 同上 */
+          }
+        }
+      }
+    };
+    const prev = dialogBusy || Promise.resolve();
+    dialogBusy = prev.then(mine, mine);
+    return dialogBusy;
+  }
 
   // ---- 检查更新（菜单项 → 宿主 check-update / do-update） ----
   //
@@ -834,7 +878,7 @@ const paused = ctrl.paused === true;
         .filter(Boolean)
         .join("\n");
     };
-    let res = null;
+let res = null;
     try {
       res = await callHost("check-update", {}, token, 240000);
     } catch (err) {
@@ -842,7 +886,7 @@ const paused = ctrl.paused === true;
     }
     const u = (res && res.update) || {};
     if (!res || res.ok !== true) {
-      dialog.showMessageBox({
+      await showDialog({
         type: "warning",
         message: "检查更新失败",
         detail: failureDetail(home, res, "宿主没应答或查不了更新") + (u.note ? `\n\n${u.note}` : ""),
@@ -850,13 +894,13 @@ const paused = ctrl.paused === true;
       });
       return;
     }
-    if (!u.hasUpdate) {
-      dialog.showMessageBox({ type: "info", message: "已经是最新", detail: lines(u), buttons: ["好"] });
+if (!u.hasUpdate) {
+      await showDialog({ type: "info", message: "已经是最新", detail: lines(u), buttons: ["好"] });
       return;
     }
     const canApply = (u.mode === "git") || (u.mode === "npm" && u.global === true);
     const buttons = canApply ? ["现在更新", "以后再说"] : ["好"];
-    const { response } = await dialog.showMessageBox({
+    const { response } = await showDialog({
       type: canApply ? "question" : "info",
       message: "有新版本",
       detail: `${lines(u)}\n\n更新完会自动换一扇窗（渲染层立刻用上新代码）。\n宿主自己的代码要下次 \`pi-pet restart\` 才换。`,
@@ -865,9 +909,9 @@ const paused = ctrl.paused === true;
       cancelId: buttons.length - 1,
     });
     if (buttons[response] !== "现在更新") return;
-    const ap = await callHost("do-update", {}, token, 300000);
+const ap = await callHost("do-update", {}, token, 300000);
     const au = (ap && ap.update) || {};
-    dialog.showMessageBox({
+    await showDialog({
       type: ap && ap.ok === true ? "info" : "warning",
       message: ap && ap.ok === true ? "更新完成" : "没更成",
       detail: (ap && ap.detail) || (au.note || "宿主没应答"),
