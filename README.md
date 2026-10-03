@@ -1,14 +1,12 @@
 # pi-dsh-pet 🐾
 
-[English](./README.en.md)
-
 <p align="center">
   <a href="https://www.npmjs.com/package/pi-dsh-pet"><img alt="npm version" src="https://img.shields.io/npm/v/pi-dsh-pet?label=npm&color=blue"></a>
   <a href="https://www.npmjs.com/package/pi-dsh-pet"><img alt="npm monthly downloads" src="https://img.shields.io/npm/dm/pi-dsh-pet?label=下载&color=brightgreen"></a>
   <a href="https://github.com/qq458249269/pi-dsh-pet"><img alt="stars" src="https://img.shields.io/github/stars/qq458249269/pi-dsh-pet?style=social"></a>
   <a href="https://github.com/qq458249269/pi-dsh-pet/blob/main/LICENSE"><img alt="license" src="https://img.shields.io/github/license/qq458249269/pi-dsh-pet?color=orange"></a>
   <img alt="platform" src="https://img.shields.io/badge/platform-pi%20coding%20agent-8A2BE2">
-assets-93%20animations-ff69b4
+assets-91%20animations-ff69b4
 </p>
 
 一只住在 **pi 终端编程助手**里的大肥鱼：待机呼吸、随机动作（含打瞌睡）、偶尔转向、屏幕漫游、点击反应、可拖拽。
@@ -72,7 +70,7 @@ curl -X POST 127.0.0.1:47653/event -H "authorization: Bearer $(pi-pet token)" \
 | 块 | 大小 | 能动吗 |
 | --- | --- | --- |
 | Electron 运行时 | ≈74MB（压后） | 不能，去掉就不是 Electron 了 |
-| 93 个 webm 素材 |
+| 91 个 webm 素材 |
 | locales 语言包 | ≈41MB → 2MB | 已砍：只留 `zh-CN` / `en-US` |
 
 默认产物 ~120MB 就是这个拆解的结果：locales 已砍、压缩已开到 `maximum`。
@@ -93,7 +91,7 @@ npm run build:dir      # 只出免安装目录版 dist/win-unpacked/，跑得快
 
 CI（推 main / 手动触发 `release` workflow）走同一条链，只是多两件事：
 先用 `win-unpacked/pi-dsh-pet.exe` 真跑一次冒烟（起服务、查 `/health`、确认 asar 里的
-页面与 93 个素材读得出来）
+页面与 91 个素材读得出来）
 产物名里**没有版本号**（版本号 `YYYY.MM.DD.NNNN` 不是合法 semver，electron-builder 会
 把它规范化成 `2026.9.3-0.2` 这种鬼样子），版本认 tag / release 说明。
 发布链的约束（token 权限、跨 job 依赖）见 [DESIGN.md §10](./DESIGN.md)。
@@ -144,8 +142,8 @@ pi-dsh-pet/
 ├── dsh/pi-pet.mjs      # dsh 侧适配（cordis 风格）
 ├── opencode/pi-pet.ts  # opencode 侧适配（Bun 插件 + pet 工具）
 ├── pi/assets/          # Electron 窗口 UI（pet.html + pet.js + pet.css + preload + 主进程）
-assets/preview/     # 93 个预览 GIF
-assets/thumb/       # 93 个透明 WebM 动画
+assets/preview/     # 91 个预览 GIF
+assets/thumb/       # 91 个透明 WebM 动画
 ├── assets/config.jsonc # 动画到事件/标签的映射
 ├── electron-builder.yml# 打单文件 exe 用（日常开发不需要）
 ├── package.json        # npm 包清单
@@ -156,17 +154,13 @@ assets/thumb/       # 93 个透明 WebM 动画
 
 ## 动画预览
 
-全部 93 个动画（640×360 透明 WebM）：
-
-> 💡 「原地漂浮摇尾巴」「原地翻肚皮打滚」是脚本画的（`npm run gen:anim`，纯 Node 光栅化 + ffmpeg 编码，
-> 见 `scripts/gen-anim.cjs`），其余为素材库里的手绘/AI 视频。
+全部 91 个动画（640×360 透明 WebM）：
 
 **待机 / 转向**
 
 <p>
   <img src="https://raw.githubusercontent.com/qq458249269/pi-dsh-pet/main/assets/preview/daiji-huxi-xiuxian.gif" width="160" alt="待机呼吸休闲">
 <img src="https://raw.githubusercontent.com/qq458249269/pi-dsh-pet/main/assets/preview/dongzhangxiwang.gif" width="160" alt="东张西望">
-  <img src="https://raw.githubusercontent.com/qq458249269/pi-dsh-pet/main/assets/preview/yuandi-piaofu-yao-weiba.gif" width="160" alt="原地漂浮摇尾巴">
 </p>
 
 **移动**
@@ -198,7 +192,6 @@ assets/thumb/       # 93 个透明 WebM 动画
   <img src="https://raw.githubusercontent.com/qq458249269/pi-dsh-pet/main/assets/preview/xie-daima.gif" width="160" alt="写代码">
   <img src="https://raw.githubusercontent.com/qq458249269/pi-dsh-pet/main/assets/preview/yaoshan-naliang.gif" width="160" alt="摇扇纳凉">
 assets/preview/chenjian-shuaya.gif" width="160" alt="晨间刷牙">
-  <img src="https://raw.githubusercontent.com/qq458249269/pi-dsh-pet/main/assets/preview/yuandi-fandupi-da-gun.gif" width="160" alt="原地翻肚皮打滚">
 </p>
 
 **玩耍**
@@ -307,12 +300,14 @@ assets/preview/chenjian-shuaya.gif" width="160" alt="晨间刷牙">
 PNG 帧序列 → ffmpeg 编成 640×360 透明 WebM。**只依赖 ffmpeg 一个外部程序**，
 不装任何 npm 包；素材从零到可播，就下面这一条命令。
 
+> `PRESETS` 目前是空的 —— 先按下一节的形状加一条预设，才有东西可生成。
+
 ```sh
 # 1) 准备 ffmpeg（本机没有就下 https://www.gyan.dev/ffmpeg/builds/ 那个 7z/zip）
 #    Windows 也可以 npm i --no-save ffmpeg-static（走 GitHub 下载，可能被墙）
 FFMPEG_PATH=/path/to/ffmpeg npm run gen:anim            # 生成全部预设
 FFMPEG_PATH=/path/to/ffmpeg npm run gen:anim -- --gif   # 顺带出 README 用的预览 GIF
-FFMPEG_PATH=/path/to/ffmpeg npm run gen:anim -- swim    # 只生成某一个预设
+npm run gen:anim -- my-anim # 只生成某一个预设
 ```
 
 产物落 `assets/thumb/<名字>.webm`（窗按名字取 URL）和 `assets/preview/<拼音>.gif`（图库用）。
@@ -324,7 +319,7 @@ FFMPEG_PATH=/path/to/ffmpeg npm run gen:anim -- swim    # 只生成某一个预�
 编辑 `scripts/gen-anim.cjs` 的 `PRESETS`，加一条就行 —— 没有别的注册步骤：
 
 ```js
-swim: {
+my-anim: {
   file: "原地漂浮摇尾巴",          // = assets/thumb/ 里的文件名（config.jsonc 也用这个名）
   slug: "yuandi-piaofu-yao-weiba", // = assets/preview/ 里的 GIF 名（仓库惯例用拼音）
   frames: 48,                      // 帧数（48 帧 @24fps = 2s 一个循环，必须首尾相接）
@@ -345,13 +340,13 @@ swim: {
 | `mouth` | 嘴巴张开程度 0..1 |
 
 ⚠️ **循环**：所有量都必须是 `t` 的周期函数（`sin/cos(TAU*t)`），否则播到接缝会跳一下。
-`swim` / `roll` 两条预设就是这么写的（`roll` 转满 360° 正好接回起点）。
+打滚这类表演就是 `spin: TAU * t` —— 转满 360° 正好接回起点。
 
 ### 输出规格
 
 | 项 | 值 | 为什么 |
 |----|----|--------|
-| 尺寸 / 帧率 | 640×360 @ 24fps | 与现有 93 个素材一致；窗按 16:9 舞台排版 |
+| 与现有 91 个素材一致；窗按 16:9 舞台排版 |
 | 编码 | **VP8 + `yuva420p`**（`-auto-alt-ref 0`） | 见下面的坑 |
 | 抠像 | 纯 alpha，背景 0 | 浮窗透明，多余的黑框会直接露馅 |
 | 自检 | 逐帧扫 alpha 外接框，贴边就报错 | 「切边」是静默故障：看着像角色被削平 |

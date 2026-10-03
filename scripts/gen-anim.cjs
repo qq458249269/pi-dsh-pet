@@ -1,11 +1,13 @@
 #!/usr/bin/env node
 /**
- * 素材生成器：程序化画大肥鱼 → 640x360 透明 WebM（VP9 alpha）。
+ * 素材生成器：程序化画大肥鱼 → 640x360 透明 WebM（VP8 + yuva420p）。
  * 零运行时依赖（只用 node:zlib）；需要 ffmpeg（读 FFMPEG_PATH 或 PATH 上的 ffmpeg）。
  *
- *   node scripts/gen-anim.cjs                 # 生成全部预设
- *   node scripts/gen-anim.cjs swim            # 只生成某个预设
- *   node scripts/gen-anim.cjs swim roll --gif # 顺便出 README 预览 GIF
+ *   node scripts/gen-anim.cjs                 # 生成 PRESETS 里全部
+ *   node scripts/gen-anim.cjs my-anim          # 只生成某个预设
+ *   node scripts/gen-anim.cjs my-anim --gif    # 顺便出 README 预览 GIF
+ *
+ * PRESETS 是空的 —— 按下面 PRESETS 注释里的形状加一条才有东西可生成。
  *
  * ponytail: 纯 2D 矢量骨架（椭圆+多边形），没有骨骼/绑定系统。
  *           要更复杂的表演就往 PRESETS 里加一条 keyframe 函数，别引动画库。
@@ -144,42 +146,13 @@ poly(cv, pl(rotAll(fat(pec, 1.12), fin, [24, 42])), OUTLINE);
 // ---------- 预设（t ∈ [0,1)，必须首尾相接才能循环） ----------
 const TAU = Math.PI * 2;
 const PRESETS = {
-  // 原地漂浮摇尾巴
-swim: {
-    file: "原地漂浮摇尾巴",
-    slug: "yuandi-piaofu-yao-weiba", // preview GIF 用拼音（仓库惯例）
-    frames: 48,
-    pose: (t) => ({
-      scale: 0.85, // 角色宽度对齐现有素材（约 640 的 40%）
-      y: -10 * Math.sin(TAU * t),
-      sx: 1 + 0.03 * Math.sin(TAU * t),
-      sy: 1 - 0.03 * Math.sin(TAU * t),
-      wag: 0.38 * Math.sin(TAU * 2 * t),
-      fin: 0.3 * Math.sin(TAU * 2 * t + 1.2),
-      blink: t > 0.58 && t < 0.66 ? 0.12 : 1,
-      mouth: 0.15 + 0.1 * Math.sin(TAU * t),
-    }),
-  },
-  // 原地翻肚皮打滚
-roll: {
-    file: "原地翻肚皮打滚",
-    slug: "yuandi-fandupi-da-gun",
-    frames: 60,
-    pose: (t) => {
-const squash = 1 + 0.12 * Math.sin(TAU * 2 * t);
-      return {
-        scale: 0.72, // 旋转后的外接框要留在 640x360 里，不然切边
-        spin: TAU * t,
-        y: -8 - 6 * Math.sin(TAU * t),
-        sx: 1 / squash,
-        sy: squash,
-        wag: 0.42 * Math.sin(TAU * 2 * t + 0.6),
-        fin: 0.5 * Math.sin(TAU * 2 * t),
-        blink: t > 0.05 && t < 0.16 ? 0.1 : 1,
-        mouth: Math.max(0, 0.7 * Math.sin(TAU * t)),
-      };
-    },
-  },
+  // 加一条这样形状的预设：
+  // swim: {
+  //   file: "原地漂浮摇尾巴",           // = assets/thumb/ 里的文件名（config.jsonc 也用这个名）
+  //   slug: "yuandi-piaofu-yao-weiba",  // = assets/preview/ 里的 GIF 名（仓库惯例用拼音）
+  //   frames: 48,                       // 帧数（48 帧 @24fps = 2s 一个循环，必须首尾相接）
+  //   pose: (t) => ({ wag: 0.38 * Math.sin(TAU * 2 * t), blink: 1 }), // t ∈ [0,1)，返回这一帧的姿态
+  // },
 };
 
 // ---------- PNG（RGBA8，filter 0） ----------
