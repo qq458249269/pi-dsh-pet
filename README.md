@@ -125,7 +125,7 @@ npm run build:dir      # 只出免安装目录版 dist/win-unpacked/，跑得快
 
 CI（推 main / 手动触发 `release` workflow）走同一条链，只是多两件事：
 先用 `win-unpacked/pi-dsh-pet.exe` 真跑一次冒烟（起服务、查 `/health`、确认 asar 里的
-页面与 91 个素材读得出来）
+页面与 92 个素材读得出来）
 产物名里**没有版本号**（版本号 `YYYY.MM.DD.NNNN` 不是合法 semver，electron-builder 会
 把它规范化成 `2026.9.3-0.2` 这种鬼样子），版本认 tag / release 说明。
 发布链的约束（token 权限、跨 job 依赖）见 [DESIGN.md §10](./DESIGN.md)。
@@ -188,7 +188,7 @@ assets/thumb/       # 91 个透明 WebM 动画
 
 ## 动画预览
 
-全部 91 个动画（640×360 透明 WebM）：
+全部 92 个动画（640×360 WebM）：
 
 **待机 / 转向**
 
@@ -226,6 +226,7 @@ assets/thumb/       # 91 个透明 WebM 动画
   <img src="https://raw.githubusercontent.com/qq458249269/pi-dsh-pet/main/assets/preview/xie-daima.gif" width="160" alt="写代码">
   <img src="https://raw.githubusercontent.com/qq458249269/pi-dsh-pet/main/assets/preview/yaoshan-naliang.gif" width="160" alt="摇扇纳凉">
 assets/preview/chenjian-shuaya.gif" width="160" alt="晨间刷牙">
+  <img src="https://raw.githubusercontent.com/qq458249269/pi-dsh-pet/main/assets/preview/ye-wan-tang-chuang-shang-shui-jiao.gif" width="160" alt="夜晚躺在床上睡觉">
 </p>
 
 **玩耍**
@@ -380,7 +381,7 @@ my-anim: {
 
 | 项 | 值 | 为什么 |
 |----|----|--------|
-| 与现有 91 个素材一致；窗按 16:9 舞台排版 |
+| 与现有 92 个素材一致；窗按 16:9 舞台排版 |
 | 编码 | **VP8 + `yuva420p`**（`-auto-alt-ref 0`） | 见下面的坑 |
 | 抠像 | 纯 alpha，背景 0 | 浮窗透明，多余的黑框会直接露馅 |
 | 自检 | 逐帧扫 alpha 外接框，贴边就报错 | 「切边」是静默故障：看着像角色被削平 |
@@ -398,6 +399,59 @@ my-anim: {
 
 → 跳过：骨骼绑定、Lottie/矢量插值、素材版本管理。要更像手绘质感就往 `drawWhale` 里加渐变、
 高光、腮红抖动，或者直接往 `pose` 里加曲线 —— 不需要引任何依赖。
+
+## 视频转素材（现成 mp4 → assets/thumb/*.webm）
+
+已经有视频/动图的时候，别去手写骨架 —— `scripts/mp4-to-webm.cjs` 一条命令搬进桌宠：
+
+```sh
+node scripts/mp4-to-webm.cjs 生成图片.mp4 夜晚躺在床上睡觉   # → assets/thumb/夜晚躺在床上睡觉.webm
+node scripts/mp4-to-webm.cjs a.mp4 名字 --fps 24 --size 640x360 --keep-aspect
+FFMPEG_PATH=/path/to/ffmpeg node scripts/mp4-to-webm.cjs …    # ffmmpeg 不在 PATH 时
+```
+
+脚本替人做的三件事（手敲 ffmpeg 十有八九会漏）：
+
+1. **`setsar=1`** —— 不复位的话产物带 `SAR 9:16`，播放器按竖幅显示，人物被拉长。
+2. **`-auto-alt-ref 0`** —— 带 alpha 时开着它，编码器直接拒绝干活。
+3. **产物自检** —— 尺寸、空文件都是**静默**故障（窗里只表现为这段动画不播），所以编完
+   抽一帧验 alpha、验尺寸，不合格当场报错。
+
+| 选项 | 默认 | 说明 |
+|------|------|------|
+| `--fps` | 24 | 与其余 92 个素材一致 |
+| `--size` | 640x360 | **必须** 640×360：窗的 ink box / 命中区拿 640×360 当基准 |
+| `--keep-aspect` | 关 | 等比缩放 + 四周补透明（走 pad 滤镜，需全功能 ffmpeg）；默认是**拉伸铺满** |
+
+⚠️ 两条现实限制（ffmpeg 那边的事）：
+
+- 精简版 ffmpeg（Steam 自带那份 `--disable-everything` 就是）**常编不出 alpha**，
+  `yuva420p` 被静默忽略 ⇒ 产物不透明，桌面上是一块方块。脚本会抽帧提示。
+- 没有 `pad` / `colorkey` 滤镜时，非 16:9 的源只能拉伸（会变形）；mp4 本身也没 alpha，
+  要抠底得另走「逐帧 node 解码 → 去背 → 编码」。
+
+### 素材放进去了，怎么才会被播？
+
+**光有文件不会被播。** 窗只按 `assets/config.jsonc` 里写到的名字去取
+`assets/thumb/<名字>.webm`，没被引用的素材就是躺在仓库里的一张图：
+
+| config 字段 | 什么时候播 |
+|-------------|-----------|
+| `animations.idle[]` | 待机呼吸（会一直循环） |
+| `animations.turn[]` | 走到边缘掉头 |
+| `animations.clicks[]` | 单击随机回一个（5 个一循环） |
+| `animations.hover[]` | 鼠标悬停 |
+| `animations.categories[].actions[]` | 按 `weight` 抽小动作（`小动作`/`玩耍`/`吃什么`/`时节`/`文字`） |
+
+所以加一段素材 = **两步**：`mp4-to-webm.cjs` 落文件 → 在 config 里把名字挂到上面某一栏。
+挂好后还要做两件收尾（否则 CI 会红）：`node scripts/check-assets.cjs --write` 更新
+`assets/thumb.sha256` 清单，以及在下面「动画预览」图库里补一行。
+
+### 动画预览（图库 = 调用说明）
+
+下面这张图库同时是**清单**：每行一个 `<img>` 指向 `assets/preview/<拼音>.gif`，
+`npm test` 会盯着「preview 目录 ↔ README 图库 ↔「全部 N 个动画」三处一致」，
+所以新素材漏了图库行，测试直接失败。
 
 ---
 
