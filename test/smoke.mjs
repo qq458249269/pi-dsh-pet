@@ -1003,6 +1003,10 @@ check("PI_PET_SOFTWARE_COMPOSITE=1 可切软件合成（残影排查用）", /PI
 // 本体在动、周围别的软件的画面被锁住 ⇒ 窗里内容变了而那片区域从没被判脏
 check("宠物在窗里一动（命中区上报）就并一次整窗重画", /ipcMain\.on\("pet:hit-region"[\s\S]{0,700}nudgeRepaint\(\);/.test(petMain));
 check("兼底重画可调（PI_PET_REPAINT_MS）", /PI_PET_REPAINT_MS/.test(petMain) && /setInterval\(/.test(petMain));
+// TOPMODE：重画类修法全试过仍复现后，最后要动的是合成路径本身
+check("TOPMODE 1 = alwaysOnTop 走 screen-saver 层级", /TOPMODE === 1[\s\S]{0,200}setAlwaysOnTop\(true, "screen-saver"\)/.test(petMain));
+check("TOPMODE 2 = 不置顶，定时 showInactive 顶上来", /TOPMODE === 2[\s\S]{0,400}showInactive\(\)/.test(petMain) && /alwaysOnTop: TOPMODE !== 2/.test(petMain));
+check("TOPMODE 3 = 放弃透明，用实底色（最难看但没有透明层留快照）", /transparent: TOPMODE !== 3/.test(petMain) && /backgroundColor: TOPMODE === 3 \? "#0e0e12"/.test(petMain));
 // 打包必须走 scripts/build.cjs：它把 electron / electron-builder 工具链的下载源
 // 指到国内镜像（GitHub 直连 ETIMEDOUT，build 会整片红）。npm 脚本与 CI 都得用它。
 const pkgJson = JSON.parse(readFileSync(join(ROOT, "package.json"), "utf8"));

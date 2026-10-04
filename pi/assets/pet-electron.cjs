@@ -234,16 +234,25 @@ app.whenReady().then(() => {
       })()
     : { x: wa0.x + wa0.width - STAGE.w - 24, y: wa0.y + wa0.height - STAGE.h - 8 };
 
-  // 透明置顶浮层：**只有宠物这么点大**，不是全屏（见文件头「别改回全屏」）。
+// 透明置顶浮层：**只有宠物这么点大**，不是全屏（见文件头「别改回全屏」）。
   // setIgnoreMouseEvents 让点击穿透到下面的窗口；命中框由渲染进程动态开/关。
+  //
+  // ⚠️ PI_PET_TOPMODE：置顶/透明路径的三种排法（都是为治「窗周围一片别的软件的画面
+  //   被锁住、鼠标点一下才刷新」）。前面的重画类修法全试过仍复现后，才轮到动**合成路径**。
+  //   0 = 默认（transparent + alwaysOnTop）
+  //   1 = alwaysOnTop 走 'screen-saver' 层级（DWM 另一条合成路径）
+  //   2 = 干脆不置顶，每 1.5s showInactive() 把自己顶上来一次
+  //   3 = **不透明**：窗用实底色，放弃逐像素透明（最难看，但 DWM 没有透明层可留快照）
+  const TOPMODE = Number(process.env.PI_PET_TOPMODE || 0) || 0;
   const win = new BrowserWindow({
     width: STAGE.w,
     height: STAGE.h,
     x: start.x,
     y: start.y,
     frame: false,
-    transparent: true,
-    alwaysOnTop: true,
+    transparent: TOPMODE !== 3,
+    backgroundColor: TOPMODE === 3 ? "#0e0e12" : undefined,
+    alwaysOnTop: TOPMODE !== 2,
     resizable: false,
     skipTaskbar: true,
     hasShadow: false,
@@ -292,7 +301,26 @@ webPreferences: {
     }
   }
 // 窗被别人搬了/改了大小（用户拖、多屏变化、系统贴靠）也同步过来
-  win.on("move", (_e, b) => rememberPos(b));
+win.on("move", (_e, b) => rememberPos(b));
+
+  // ---- PI_PET_TOPMODE 1/2：换一条置顶路径（见上面 TOPMODE 的说明）----
+  if (TOPMODE === 1) {
+    win.setAlwaysOnTop(true, "screen-saver");
+    console.error("[pi-dsh-pet] TOPMODE=1：alwaysOnTop 走 screen-saver 层级");
+  }
+  if (TOPMODE === 2) {
+    // 不置顶 = 不占置顶通道；靠定时把自己顶上来。showInactive 不抢焦点，
+    // 代价：别的窗盖上来时会有最多 1.5s 的延迟才被顶回去（用户能看见）。
+    setInterval(() => {
+      if (win.isDestroyed() || !win.isVisible()) return;
+      try {
+        win.showInactive();
+      } catch {
+        /* 窗刚关/正在关，忽略 */
+      }
+    }, 1500).unref?.();
+    console.error("[pi-dsh-pet] TOPMODE=2：不置顶，每 1.5s showInactive 顶一次");
+  }
   // ⚠️ resize 除了记落点，还得把形状**重新裁一遍**（§9.21）：形状是 Win32 的窗口区域，
   //   窗一变（启动时按配置长大、往上长、显示器/DPI 变化）Chromium 可能按旧尺寸重建它，
   //   甚至丢掉 —— 形状一丢 = 整窗点得动，下面软件的点击全被透明区吃掉，
