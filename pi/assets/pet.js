@@ -1030,14 +1030,28 @@ var api = window.__petElectron__;
   // 只是没有新帧而已。
   // ========================================================================
 
-  var asleep = false;    // 冻住了吗（= 一帧都不再产生）
+var asleep = false;    // 冻住了吗（= 一帧都不再产生）
   var powerSave = false; // 用户手动开的省电模式：除了关掉它，谁都叫不醒
+
+  /**
+   * ⚠️ 省电“冻住/隐藏”总闸（2026-10 屏蔽）：**关掉就永远不冻**。
+   *
+   * 四个触发源全都汇进 goSleep（窗 hide/minimize、powerMonitor 锁屏/挂起、
+   *  document.visibilitychange、powerSave 帧），所以一道闸就够：
+   *   · visibilitychange：这扇是透明置顶常驻窗，Chromium 判不判 hidden 很看
+   *     遮挡情况 —— 判成 hidden 就冻住，而「唤醒」只能等下一次可见，偶发就
+   *     再也醒不过来（用户看到的「宠物自己不见了」）；
+   *   · lock-screen / suspend 同理：事件不来或对不上就永久冻着。
+   * 代价是看不见时仍在解码 WebM（见 4.7 的说明）。改回 true 即恢复。
+   */
+  var SLEEP_ENABLED = false;
 
   /** 睡：所有宠物冻在当前帧。
    *  ⚠️ 不因为「已经 asleep」就早退：省电模式下新加一只宠物时，它照样得冻住
    *  （PetCard.sleep/wake 自己幂等，这里只是多走一遍）。
    */
   function goSleep() {
+    if (!SLEEP_ENABLED) return;
     asleep = true;
     for (var i = 0; i < pets.length; i++) {
       if (pets[i] && typeof pets[i].sleep === "function") pets[i].sleep();

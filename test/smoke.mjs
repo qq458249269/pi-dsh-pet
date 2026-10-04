@@ -260,6 +260,10 @@ check("最小化/锁屏/挂起 → 睡（pet:power）", /onPower: \(cb\) => ipcR
 	check("省电模式落盘（换窗/重启还在）", /powerSave: false/.test(pathsSrc) && /case "power-save"/.test(hostSrc) && /setPower\(on\)/.test(busSrc));
 	check("窗接上来时补发 power 帧", /conn\.send\(powerFrame\(power\(\) === true\)\)/.test(busSrc));
 check("省电接口暂时屏蔽（POWER_SAVE_ENABLED 总闸）", /POWER_SAVE_ENABLED = false/.test(hostSrc) && /!POWER_SAVE_ENABLED && \(action === "power-save"/.test(hostSrc));
+	// ⚠️ 渲染侧总闸：四个触发源（窗 hide/minimize、锁屏/挂起、visibilitychange、
+	//   powerSave 帧）全都汇进 goSleep，所以一道 SLEEP_ENABLED=false 就全屏蔽。
+	//   恢复的话把这行删掉 —— 「看不见时自动冻住」曾经偶发再也醒不过来（宠物自己不见了）。
+	check("窗侧冻住/隐藏已屏蔽（SLEEP_ENABLED 总闸）", /var SLEEP_ENABLED = false/.test(petJs) && /function goSleep\(\) \{\s*if \(!SLEEP_ENABLED\) return;/.test(petJs));
 	check("右键菜单不再有「省电模式」", !/label: "省电模式/.test(elec));
 	// ⑤ 高频重活（SetWindowRgn / 全屏重合成）别打满：
 	//    主进程侧：同形状不重裁 + 60ms 节流 + 取最新的一份；窗侧：2px 量化后去重
