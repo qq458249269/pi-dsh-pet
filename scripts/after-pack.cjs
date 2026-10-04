@@ -12,7 +12,6 @@
 
 "use strict";
 
-const cp = require("node:child_process");
 const fs = require("node:fs");
 const path = require("node:path");
 
@@ -20,26 +19,30 @@ const path = require("node:path");
 const TRIM = ["dxcompiler.dll", "dxil.dll"];
 
 /**
- * 打包身份校验：asar 里带着的 stamp 必须就是**此刻的 HEAD**。
- * 过了时的 stamp 意味着 exe 里是旧代码 —— 用户双击后看到的是老行为，
- * 却以为改动没生效（本次就踩过：exe 里还留着已删掉的 idleSleepMs）。
- * 宁可打包失败，也不给一个「看着是新的、其实不是」的 exe。
+ * 打包身份：确保 asar 里带着一份**此刻的** build.cjs。
+ *
+ * 之前这里是「不匹配就抛错拦打包」，结果把 CI 打挂了：exe job 直接调
+ * `npx electron-builder`，不走 npm 脚本 → prebuild 不跑 → build.cjs 根本不存在。
+ * 拦的是「没人绕过脚本」这种自己造成的小失误，坏的是自动发布 —— 方向反了。
+ *
+ * 正确分工：
+ *   · 这里 —— **缺/旧就当场重生成**（幂等），保证包里的身份戳是真的；
+ *   · `pi-pet doctor` 与 /health —— 报出 sha 与素材数，这才是发现
+ *     「我跑的是旧 exe」的地方（对着旧 exe 调试，界面完全看不出来）。
  */
 function assertFreshStamp() {
 	const ROOT = path.join(__dirname, "..");
-	let stamp;
+	const out = path.join(ROOT, "app", "build.cjs");
+	let prev = null;
 	try {
-		stamp = require(path.join(ROOT, "app", "build.cjs"));
+		prev = require(out);
 	} catch {
-		throw new Error("app/build.cjs 不存在：先跑 node scripts/stamp.cjs（或 npm run build，它会先跑）");
+		/* 没有就重建，下面会写 */
 	}
-	const head = cp
-		.execFileSync("git", ["rev-parse", "--short", "HEAD"], { cwd: ROOT, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] })
-		.trim();
-	if (head && stamp.sha !== head) {
-		throw new Error(`app/build.cjs 是 ${stamp.sha}，HEAD 已经是 ${head} —— 这个包会带着旧代码，先跑 node scripts/stamp.cjs`);
-	}
-	console.log(`  • 校验通过：包身份 = ${stamp.sha}${stamp.dirty ? " (dirty)" : ""}，素材 ${stamp.thumbs} 段`);
+	const s = require("./stamp.cjs").stamp();
+	if (!prev) console.log(`  • 生成包身份戳 ${s.sha}（之前没有 app/build.cjs）`);
+	else if (prev.sha !== s.sha || prev.builtAt !== s.builtAt) console.log(`  • 包身份戳重生成 ${prev.sha} → ${s.sha}`);
+	console.log(`  • 包身份 = ${s.sha}${s.dirty ? " (dirty)" : ""}，素材 ${s.thumbs} 段`);
 }
 
 exports.default = async function afterPack(context) {

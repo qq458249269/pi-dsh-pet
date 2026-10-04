@@ -968,17 +968,21 @@ check("turn 动画放完仍翻 facing（不然转身动画永远朝一个方向�
 
 // ---------------------------------------------------------------- 收尾
 console.log("\n收尾…");
-// 打包身份戳：stamp 与 HEAD 不一致 ⇒ afterPack 会拒打包（防「打个旧 exe 却以为是新的」）
-const afterPack = (await import("node:module")).createRequire(import.meta.url)("../scripts/after-pack.cjs").default;
-let stampGuardOk = true;
+// 打包身份戳：CI 的 exe job 直接调 npx electron-builder（不走 npm 脚本 → prebuild 不跑），
+// 所以 afterPack 必须自己把 build.cjs 补出来，而不是因为缺文件就把自动发布打红。
+const req = (await import("node:module")).createRequire(import.meta.url);
+rmSync(join(ROOT, "app", "build.cjs"), { force: true });
 try {
-	await afterPack({ appOutDir: "" }); // appOutDir 为空 → 只跑校验，不动文件
+	await req("../scripts/after-pack.cjs").default({ appOutDir: "" }); // appOutDir 空 → 只补戳，不动文件
 } catch (e) {
-	stampGuardOk = false;
-	check("app/build.cjs 与 HEAD 一致（否则 afterPack 拒打包）", false, e.message);
+	check("afterPack 自己补出 app/build.cjs（CI 不走 npm 脚本）", false, e.message);
 }
-if (stampGuardOk) check("app/build.cjs 与 HEAD 一致（否则 afterPack 拒打包）", true);
-check("/health 报出包身份（一眼看出在跑哪次提交）", /build: BUILD\.sha/.test(readFileSync(new URL("../app/server.cjs", import.meta.url), "utf8")));
+const rebuilt = existsSync(join(ROOT, "app", "build.cjs"))
+	? req("../app/build.cjs")
+	: null;
+check("afterPack 自己补出 app/build.cjs（CI 不走 npm 脚本）", !!rebuilt && /^\w{7,}$/.test(rebuilt.sha || ""));
+check("补出来的戳带素材段数（少素材一眼看出来）", !!rebuilt && rebuilt.thumbs > 0, `thumbs=${rebuilt && rebuilt.thumbs}`);
+check("/health 报出包身份（一眼看出在跑哪次提交）", /build: BUILD\.sha/.test(readFileSync(join(ROOT, "app", "server.cjs"), "utf8")));
 check("stop 返回成功", (await post(PORT, "/control", { action: "shutdown" }, token)).body.ok === true);
 const exitCode = await new Promise((res) => host.on("exit", res));
 check("宿主干净退出", exitCode === 0, `exit=${exitCode}`);

@@ -9,13 +9,15 @@
  *     （打成旧 exe 比不打更坏：它看起来是新的）
  *   · 素材条数一起记下，config 引用的 webm 少了也能一眼看出来
  *
- * 跑：node scripts/stamp.cjs（npm run build / build:dir 会自动先跑）
+ * 跑：node scripts/stamp.cjs（npm run build / build:dir 会自动先跑；
+ *     直接调 electron-builder 时由 after-pack.cjs 代跑，所以两边都不会缺）
  */
 
 "use strict";
 
 const fs = require("node:fs");
 const path = require("node:path");
+const cp = require("node:child_process");
 
 const ROOT = path.join(__dirname, "..");
 const OUT = path.join(ROOT, "app", "build.cjs");
@@ -23,7 +25,7 @@ const OUT = path.join(ROOT, "app", "build.cjs");
 /** git 问不到就写 "unknown" —— 不因为没装 git 就打包失败。 */
 function git(args) {
 	try {
-		return require("node:child_process").execFileSync("git", args, {
+		return cp.execFileSync("git", args, {
 			cwd: ROOT,
 			encoding: "utf8",
 			stdio: ["ignore", "pipe", "ignore"],
@@ -41,14 +43,24 @@ function thumbCount() {
 	}
 }
 
-const sha = git(["rev-parse", "--short", "HEAD"]) || "unknown";
-const stamp = {
-	sha,
-	// 有未提交改动就标出来：这时 exe 和仓库 HEAD 本来就不等价，别拿 HEAD 冒充身份
-	dirty: Boolean(git(["status", "--porcelain"])),
-	builtAt: new Date().toISOString(),
-	thumbs: thumbCount(),
-};
+/** 生成（或重生成）app/build.cjs，返回戳本身。幂等，谁调都行。 */
+function stamp() {
+	const sha = git(["rev-parse", "--short", "HEAD"]) || "unknown";
+	const s = {
+		sha,
+		// 有未提交改动就标出来：这时 exe 和仓库 HEAD 本来就不等价，别拿 HEAD 冒充身份
+		dirty: Boolean(git(["status", "--porcelain"])),
+		builtAt: new Date().toISOString(),
+		thumbs: thumbCount(),
+	};
+	fs.writeFileSync(OUT, `"use strict";\n\n// 本文件由 scripts/stamp.cjs 生成，勿手改（每次 build 覆盖）。\nmodule.exports = ${JSON.stringify(s, null, "\t")};\n`, "utf8");
+	return s;
+}
 
-fs.writeFileSync(OUT, `"use strict";\n\n// 本文件由 scripts/stamp.cjs 生成，勿手改（每次 build 覆盖）。\nmodule.exports = ${JSON.stringify(stamp, null, "\t")};\n`, "utf8");
-console.log(`  • build.cjs: ${stamp.sha}${stamp.dirty ? " (dirty)" : ""} @ ${stamp.builtAt}, ${stamp.thumbs} 个 webm`);
+if (require.main === module) {
+	const s = stamp();
+	console.log(`  • build.cjs: ${s.sha}${s.dirty ? " (dirty)" : ""} @ ${s.builtAt}, ${s.thumbs} 个 webm`);
+}
+
+module.exports = { stamp };
+
