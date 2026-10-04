@@ -358,6 +358,11 @@ async function cmdStatus(flags) {
 		for (const [k, v] of Object.entries(health.feedsBySource)) out(`    - ${k} × ${v}`);
 	}
 	out(`  意图：${JSON.stringify(readCtrl())}`);
+	if (health && health.pkg && path.resolve(String(health.pkg)) !== path.resolve(PKG_ROOT)) {
+		// 两份 checkout（开发用的那份 vs pi 装在 ~/.pi/agent/git/… 的那份）：改错份 = 改了没反应。
+		out(`  ⚠ 宿主跑的是另一份代码：${health.pkg}`);
+		out(`    你在 ${PKG_ROOT} —— 改这里不生效；改完 npm run sync，再 pi-pet restart`);
+	}
 	out(`  状态文件：${file}`);
 	if (!alive) out("  ⚠ 状态文件里的 pid 已经不在了（陈旧状态），直接 pi-pet start 会重新拉起");
 	if (alive && !health) out("  ⚠ 进程在但 /health 探不通：窗可能活着却收不到事件，建议 pi-pet restart");

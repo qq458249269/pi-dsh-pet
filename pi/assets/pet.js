@@ -754,10 +754,11 @@ function topOffsetOf(cfg) {
   /**
      * 夹取时宠物在**窗里**能站的范围。
      *
-     * ⚠️ 纵向 **0 起夹**（§9.28）：和拖拽同一个口径 —— 上下都能贴到屏边。
-     *   以前下界是 topOffsetOf（150），实测把那条把宠物钉在窗顶的记录（ry 正好 0）套上后
-     *   头顶 0 留白，气泡被压成 846x24 的一条、字全裁没了（§9.23）。
-     *   现在头顶空间不够时气泡改盖在头顶上（见 clampBubble），不必再靠留台子换。
+     * 纵向 **从 STAGE_PAD_TOP（150）起夹**（§9.35）：头顶那截留给气泡栈。
+     *   中间试过 0 起夹（§9.28），想让宠物能贴到屏顶、气泡改盖头顶 ——
+     *   实测头顶 0 留白时 fitCount() 只给 1 条，多条气泡根本长不起来（用户口径
+     *   「气泡要多个、依次向上滚」）。窗高本来就是 topOff + 宠物 + 脚下留白算的
+     *   （见 stageSize），下界放回 150 不额外占窗内空间。
      *
      * ⚠️ 横向的下界是 **0**（§9.25）：贴边是**屏幕**上的概念，
      *   而窗和宠物的偏移是两个自由度。夹在 32 就等于「永远不许宠物贴到窗边」——
@@ -777,7 +778,10 @@ function stageKeepIn(left, top, inkW, stageH) {
     var loX = 0;
     var hiX = W - inkW;
     if (hiX < loX) loX = hiX = Math.max(0, (W - inkW) / 2);
-    var loY = 0;
+    // §9.35：下界回到 STAGE_PAD_TOP —— 头顶那截是气泡的台子。
+    //   改成 0（§9.28）以后记住的落点把宠物钉在窗顶，头顶空间 0 ⇒ fitCount() 只给 1 条，
+    //   多条气泡根本长不起来（用户口径「气泡要多个、依次向上滚」）。
+    var loY = STAGE_PAD_TOP;
     var hiY = H - stageH;
     if (hiY < loY) loY = hiY = Math.max(0, (H - stageH) / 2);
     return {
@@ -1486,7 +1490,7 @@ if (el.parentNode) el.parentNode.removeChild(el);
 
     /** 越老越退后（§9.34）：最新的满亮，老的一条按档位变淡（文字 + 底色一起）。
         淡的是 `--fade`，不动 opacity —— opacity 是入场动画用的（.show），抢它就闪。 */
-    var AGE_FADE = [1, 0.62, 0.34];
+    var AGE_FADE = [1, 0.72, 0.5, 0.34, 0.22] // 5 档对上 BUBBLE_MAX;
     function ageAll() {
       for (var i = 0; i < bubbles.length; i++) {
         var slot = bubbles.length - 1 - i; // 0 = 最新
@@ -1652,6 +1656,13 @@ b.appendChild(span);
       for (var t = 0; t < bubbles.length; t++) tops.push(bubbles[t].getBoundingClientRect().top);
       stack.insertBefore(b, inputOpen ? inputRow : null);
       bubbles.push(b);
+      // ⚠️⚠️ .pet-bubble 基础样式就是 opacity:0，**只有 .show 才可见**（pet.css）。
+      //   成栈那版（3573710）漏了这行 ⇒ 每条消息气泡全透明（用户口径「气泡还是没有」）。
+      //   放下一帧补，入场过渡（opacity/transform 0.2s）也才跑得起来；
+      //   补之前已经被收掉的（gone）就别再点亮，否则淡出到一半又亮了。
+      requestAnimationFrame(function () {
+        if (b.parentNode === stack && !b.classList.contains("gone")) b.classList.add("show");
+      });
 markTail();
       ageAll();
       trim(); // 头顶放不下的先收掉（宁可少几条，也不要裁半行字）

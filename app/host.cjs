@@ -330,6 +330,8 @@ busHooks.paused = () => readCtrl().paused === true;
 	process.on("SIGTERM", () => shutdown(0));
 	// 硬退出（被 taskkill / 崩溃）时至少把锁还回去，别让下个宿主等 TTL
 	process.on("exit", () => {
+		// 硬退出（taskkill / 崩溃）也要留痕。finish() 走过的话 state 已是 stopped，不重复记。
+		if (state.windowState !== "stopped") log(`宿主退出（code ${process.exitCode || 0}）`);
 		releaseLock();
 		clearPortFile(port);
 		try {

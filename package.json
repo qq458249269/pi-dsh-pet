@@ -58,7 +58,8 @@
     "prebuild:dir": "node scripts/stamp.cjs",
     "build:dir": "node scripts/build.cjs --win --dir --publish never --config electron-builder.yml",
 
-"gen:anim": "node scripts/gen-anim.cjs"
+"gen:anim": "node scripts/gen-anim.cjs",
+    "sync": "node scripts/sync-running.cjs"
   },
   "engines": {
     "node": ">=18"

@@ -186,6 +186,20 @@ assets/thumb/       # 91 个透明 WebM 动画
 └── README.md
 ```
 
+## 这机器上有两份 checkout（改完记得同步）
+
+pi 装的是 git clone（在 `~/.pi/agent/git/github.com/qq458249269/pi-dsh-pet`），
+人改代码的是另一份（比如 `D:\AI\pi-dsh-pet`）。**宿主从它自己那份起、也从它那份发 pet.js** ——
+改错份的症状就是「改了没反应」，连 `restart` 也没用（窗拿到的还是旧 JS）。
+
+```bash
+node bin/pi-pet.cjs status   # ⚠ 会直接告诉你宿主跑的是哪一份、你在哪一份
+npm run sync                 # 把当前这份的 app/bin/pi/assets 推到宿主在用的那份
+node bin/pi-pet.cjs restart  # 换一扇窗，pet.js 才重新加载
+```
+
+`npm run sync` 宿主没在跑、或两边本来就是同一份时，什么都不做（退出码 0）。
+
 ## 动画预览
 
 全部 92 个动画（640×360 WebM）：

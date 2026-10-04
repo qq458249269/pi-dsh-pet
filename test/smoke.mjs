@@ -791,8 +791,12 @@ check("收栈：淡出 200ms 后摘节点，计时器跟节点走（不泄）", 
 check("同文案不重堆（宿主 10s 续帧）、sticky 全局只留一条", /getAttribute\("data-text"\) === t/.test(petSrc) && /classList\.contains\("sticky"\)\) dropBubble/.test(petSrc));
 check("尾巴只给最底下那条（否则三泡三支箭）", /function markTail\(\)[\s\S]{0,200}classList\.toggle\("has-tail", i === last && !inputOpen\)/.test(petSrc) && /\.pet-bubble\.has-tail::after/.test(petCss));
 // §9.34 追加：老者退后（--fade 三档）+ 新的一条进来时老的**滑**上去（FLIP，不是跳）
-check("越老越退后（--fade 三档，只淡字与底色不碰 opacity）", /var AGE_FADE = \[1, 0\.62, 0\.34\]/.test(petSrc) && /setProperty\("--fade"/.test(petSrc) && /color: rgba\(238, 241, 246, var\(--fade, 1\)\)/.test(petCss) && /calc\(0\.96 \* var\(--fade, 1\)\)/.test(petCss) && !/opacity: var\(--fade/.test(petCss));
-check("上推用 FLIP（只动 transform，插完撤掉让它自己补动画）", /function flipFrom\(tops\)[\s\S]{0,1200}el\.style\.transition = "none"[\s\S]{0,400}el\.style\.transform = "translateY\(" \+ dy \+ "px\)"/.test(petSrc) && /e2\.style\.removeProperty\("transform"\)/.test(petSrc) && /e2\.addEventListener\("transitionend", done, \{ once: true \}\)/.test(petSrc));
+check("越老越退后（--fade 5 档对上 BUBBLE_MAX，只淡字与底色不碰 opacity）",
+	/var AGE_FADE = \[1, 0\.72, 0\.5, 0\.34, 0\.22\]/.test(petSrc) &&
+	/setProperty\("--fade"/.test(petSrc) &&
+	/color: rgba\(238, 241, 246, var\(--fade, 1\)\)/.test(petCss) &&
+	/calc\(0\.96 \* var\(--fade, 1\)\)/.test(petCss) &&
+	! /opacity: var\(--fade/.test(petCss));
 check("上推时长随距离缩放（顶得越高走得越久，封 420ms）", /var ms = Math\.min\(420, 120 \+ Math\.round\(Math\.abs\(dist\) \* 3\)\)/.test(petSrc) && /"transform " \+ \(ms \/ 1000\) \+ "s cubic-bezier\(0\.22, 0\.78, 0\.26, 1\)"/.test(petSrc) && /setTimeout\(done, ms \+ 120\)/.test(petSrc));
 check("上推曲线与入场分开（入场快、上推慢而稳）", /\.pet-bubble \{[\s\S]{0,3000}transform 0\.2s cubic-bezier\(0\.16, 0\.84, 0\.44, 1\)/.test(petCss) && !/transition: opacity 0\.18s ease, transform 0\.18s ease;/.test(petCss));
 check("档位变淡能过渡（底色用 background-color，渐变另层）", /background-color: rgba\(26, 28, 36, calc\(0\.96 \* var\(--fade, 1\)\)\)/.test(petCss) && /background-image: linear-gradient\(180deg, rgba\(255, 255, 255, 0\.05\)/.test(petCss) && /background-color 0\.2s ease/.test(petCss));
@@ -876,7 +880,7 @@ check("窗宽基数是整个舞台（maxStage → w），气泡宽度只按窗�
 // 横向区间走 inkSafe（角色 ∪ 当前动画），不然老落点靠边时宽动画仍被窗边切。
 check("站位比例仍存中心（可见框居中，老位置记忆继续可用）+ 横向按 art 框夹", /stageKeepIn\(cp\.rx \* window\.innerWidth - inkHalf \+ over, cp\.ry \* window\.innerHeight - halfH, safe\.w, halfH \* 2\)/.test(petSrc) && /container\.style\.left = keep\.left - over - inkOff \+ "px"/.test(petSrc) && /var over = inkOff - safe\.off/.test(petSrc) && /self\.customPos\.rx = \(keep\.left \+ inkHalf\) \/ window\.innerWidth/.test(petSrc) && /stageKeepIn\(left, top, inkW, stageH\)/.test(petSrc));
 // 纵向按舞台高算区间（量过，纵向没这问题），但**上下界都是 0**（§9.28）：能贴到屏边。
-check("纵向按舞台高算区间（不改成 inkH），上下界 0 起夹", /var hiY = H - stageH/.test(petSrc) && !/var hiY = H - inkH/.test(petSrc) && /var loY = 0/.test(petSrc));
+check("纵向按舞台高算区间（不改成 inkH），下界给头顶留气泡台子", /var hiY = H - stageH/.test(petSrc) && !/var hiY = H - inkH/.test(petSrc) && /var loY = STAGE_PAD_TOP/.test(petSrc));
 // 纵向的**上下界**：§9.28 起四边全 0 起夹 —— 宠物能真的贴到屏幕上/下边。
 //   头顶没有空间时不再封高（那会是一条 24px 的东西，字全裁没），改让气泡盖在头顶上。
 //   底下不用再减 bottomPad：stage 有 translateY(bottomPad)，容器底本来就是脚底。
