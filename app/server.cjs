@@ -25,7 +25,8 @@ const { ASSETS_DIR, CONFIG_JSONC, THUMB_DIR, log } = require("./paths.cjs");
 /** 打包身份（git sha / 素材数）。源码目录跑时这个文件也在（npm run build 会先生成）。 */
 let BUILD = {};
 try {
-	BUILD = require("./build.cjs");
+	// 每次宿主启动都核一遍当前 HEAD：拉了新提交却还报旧 sha，比不报更坏
+	BUILD = require("./stamp.cjs").current({ persist: true });
 } catch {
 	/* 没 stamp 就不报这个字段，不影响功能 */
 }

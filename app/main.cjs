@@ -626,9 +626,9 @@ async function cmdDoctor() {
 	};
 
 	ok("版本", `pi-pet ${VERSION}`);
-	// 包身份：报出 sha，用户才能确认自己跑的不是旧 exe
+// 包身份：报出 sha，用户才能确认自己跑的不是旧 exe（当前 HEAD，落盘给 doctor 读）
 	try {
-		const b = require("./build.cjs");
+		const b = require("./stamp.cjs").current({ persist: true });
 		const head = (() => {
 			try {
 				return require("node:child_process").execFileSync("git", ["rev-parse", "--short", "HEAD"], { cwd: PKG_ROOT, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();

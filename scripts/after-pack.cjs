@@ -39,7 +39,7 @@ function assertFreshStamp() {
 	} catch {
 		/* 没有就重建，下面会写 */
 	}
-	const s = require("./stamp.cjs").stamp();
+const s = require("./stamp.cjs").stamp();
 	if (!prev) console.log(`  • 生成包身份戳 ${s.sha}（之前没有 app/build.cjs）`);
 	else if (prev.sha !== s.sha || prev.builtAt !== s.builtAt) console.log(`  • 包身份戳重生成 ${prev.sha} → ${s.sha}`);
 	console.log(`  • 包身份 = ${s.sha}${s.dirty ? " (dirty)" : ""}，素材 ${s.thumbs} 段`);
