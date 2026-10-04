@@ -70,24 +70,36 @@ curl -X POST 127.0.0.1:47653/event -H "authorization: Bearer $(pi-pet token)" \
 | 块 | 大小 | 能动吗 |
 | --- | --- | --- |
 | Electron 运行时 | ≈85MB（压后） | 不能，去掉就不是 Electron 了 |
-| 91 个 webm 素材 | 46MB → 21MB | 已压：448px/CRF 40（`npm run assets:restore` 还原） |
+| 91 个 webm 素材 | 46MB | **不能动**：禁止重编码/降分辨率（见下面的规则） |
 | locales 语言包 | ≈41MB → 2MB | 已砍：只留 `zh-CN` / `en-US` |
 | `dxcompiler/dxil.dll` | 26MB → 0 | 已删：D3D12 后端用不上（`scripts/after-pack.cjs`） |
 
-当前产物 **≈102MB**（portable 单文件）。地板就是上面第一行的 Electron：素材清零也过不去，
-再往下只能换壳子（WebView2 / Tauri）。
+当前产物 **≈125MB**（portable 单文件）。地板是上面第一行的 Electron，再往下只能换壳子
+（WebView2 / Tauri）。
 
-想自己调素材档位（都是实测，`--dry` 先看能省多少）：
+### 🚫 硬规则：素材不许降画质
 
-| 档位 | 结果 | 代价 |
-| --- | --- | --- |
-| 512px / CRF 34 | 46MB → 39MB（-15%） | 几乎无 |
-| **448px / CRF 40** | 46MB → 21MB（-55%） | **默认，540px 档略软** |
-| 384px / CRF 42 | 46MB → 13.7MB（-70%） | 大档明显糊 |
+**`assets/thumb/*.webm` 一律按原分辨率（640×360）、原码率打包，任何打包/发布流程都不得
+重编码、缩放、抽帧、改 CRF。**
 
-`node scripts/slim-assets.cjs --dry --width 448 --crf 40`；真压去掉 `--dry`，
-原件自动备份到 `assets/thumb.orig/`，`npm run assets:restore` 一键还原。
-需要本机有 `ffmpeg`，没有就报错退出、不动原文件。
+理由（实测，非推测）：VP9 已经是熵编码，再用 7z/zip 压只掉 1~2%
+（brotli-11 实测 98.2%），而 ffmpeg 一重编码就掉 20~70% —— 省下的体积全是画质。
+所以「压素材」这条省钱路已被删除，不是默认关闭。
+
+| 想改 exe 大小 | 允许？ |
+| --- | --- |
+| 砍 locales / 删用不到的 dll（`scripts/after-pack.cjs`） | ✅ 不碰像素 |
+| 调 `compression: maximum`（7z -mx=9） | ✅ 不碰像素 |
+| ffmpeg 重编码 webm / 降分辨率 / 提 CRF | ❌ **禁止** |
+
+真要再小，只剩两条不损画质的路：① 素材挪出 exe 改成同目录旁挂文件（单 exe 变 exe+目录，
+UX 变了）；② 换 WebView2 / Tauri 壳（工作量另一个量级）。两条都不做的话，
+**exe ≈125MB 就是本项目的地板**。
+
+规则不是嘴上说说：`assets/thumb.sha256` 是入库的 sha256 清单，`npm test` 第一步就是
+`node scripts/check-assets.cjs` —— 任何一个 webm 被重编码/缩放/改 CRF（哪怕分辨率没变），
+字节一变就红，CI 的 `npm test` 也就跟着红，打不出 exe。要换素材就明着来：
+换完跑 `node scripts/check-assets.cjs --write`，把清单一起提交（review 时看得见）。
 
 ### 不想用 CI？本地打包
 
@@ -115,8 +127,6 @@ npm run build
 ```
 
 PowerShell 用 `$env:ELECTRON_MIRROR="..."` 设同一个变量。
-`slim:assets` 还要本机有 `ffmpeg`；`npm i --no-save ffmpeg-static` 装完记得手动补一下
-postinstall（npm 11 默认拦 install script）：`node node_modules/ffmpeg-static/install.js`。
 
 CI（推 main / 手动触发 `release` workflow）走同一条链，只是多两件事：
 先用 `win-unpacked/pi-dsh-pet.exe` 真跑一次冒烟（起服务、查 `/health`、确认 asar 里的

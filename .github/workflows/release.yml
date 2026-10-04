@@ -19,10 +19,7 @@ on:
         description: "只算版本号、跑测试、传源码，不打 exe、不建 tag、不发 release"
         type: boolean
         default: false
-      slim_assets:
-        description: "打包前用 ffmpeg 把 91 个 webm 降分辨率重编码（exe 瘦 ~25MB，动画略糊）"
-        type: boolean
-        default: false
+# 🚫 以后**不许**再加 slim_assets
 
 # ⚠️ 这一段是 release 能跑通的前提，不是可选的装饰。
 # 少了 contents:write，GITHUB_TOKEN 会被削成一个只能读的 token，发布那一步拿到的就是
@@ -358,16 +355,8 @@ jobs:
             Write-Error "窗没拉起来（多半又是 cwd/app.asar 那类 spawn 失败），见上面日志"
           }
 
-      # windows-latest runner 自带 ffmpeg。默认**不跑**：不偷摸降画质给所有人。
-      # ⚠️ 别在上一行留一个只有 name、没有 run/uses 的「半截 step」：那是合法的 YAML
-      # （解析成 {name: ...}），但对 schema 来说它哪个分支都不属于，报错只有一句
-      #   There's not enough info to determine what you meant. Add one of these properties:
-      #   cancel, run, shell, uses, wait, wait-all, with, working-directory
-      # 看着像「少写了 run」，实际是**多了一个 step 头**。
-      - name: 瘦身素材（手动触发 + 勾了 slim_assets 才跑）
-        if: ${{ github.event_name == 'workflow_dispatch' && inputs.slim_assets == true }}
-        shell: pwsh
-        run: node scripts/slim-assets.cjs
+# 🚫 这里**曾经**有一个「瘦身素材」的 step（ffmpeg 把 91 个 webm 降分辨率重编码，省 ~25MB）。
+#    已删除：素材不许降画质（README「🚫 硬规则」）。exe 体积的地板 = Electron 运行时 + 原片素材。
 
       - name: 打 exe（portable 单文件）
         run: npx electron-builder --win --publish never --config electron-builder.ci.json

@@ -38,9 +38,6 @@ electron-builder.ci.json
 # ── 临时/备份目录 ──
 temp/
 
-# scripts/slim-assets.cjs 压素材时留的原件备份（npm run assets:restore 靠它还原）
-assets/thumb.orig/
-
 # ── IDE / 编辑器 ──
 .idea/
 .vscode/
