@@ -57,6 +57,16 @@ if (process.platform === "win32") {
   app.commandLine.appendSwitch("disable-renderer-backgrounding");
 }
 
+// PI_PET_SOFTWARE_COMPOSITE=1：关 GPU 合成走软件合成。透明置顶窗的「残留旧画面」
+// 如果来自合成器（而不是没人重绘），软件合成往往就没有它。
+// 代价：VP9 视频转软解 + 每帧 CPU 填充 —— 这扇窗小，实测影响有限。
+// 先当排查开关用（能稳定就不开；真的省不下来再定）。
+if (process.env.PI_PET_SOFTWARE_COMPOSITE === "1") {
+  app.commandLine.appendSwitch("disable-gpu");
+  app.commandLine.appendSwitch("disable-gpu-compositing");
+  console.error("[pi-dsh-pet] 软件合成（PI_PET_SOFTWARE_COMPOSITE=1）");
+}
+
 /** 数据目录（拿不到 token 时用它报错）：优先 paths.cjs，再按平台惯例算一遍。 */
 function homeDir() {
   try {

@@ -998,6 +998,8 @@ check("窗关掉 backgroundThrottling（窗变小后空出的侧边不锁帧）"
 // 改形状/尺寸/位置后必须排一次全窗重画，否则空出来的侧边锁帧
 check("setShape / setBounds / setPosition 后都调 nudgeRepaint", (petMain.match(/nudgeRepaint\(\)/g) || []).length >= 4 && /webContents\.invalidate\(\)/.test(petMain));
 check("重画请求 16ms 内合并（漫游 20fps 不变成 20 次全窗填充）", /repaintPending/.test(petMain));
+// 排查开关：透明置顶窗的残影若来自合成器，软件合成往往就没有它
+check("PI_PET_SOFTWARE_COMPOSITE=1 可切软件合成（残影排查用）", /PI_PET_SOFTWARE_COMPOSITE === "1"/.test(petMain) && /appendSwitch\("disable-gpu-compositing"\)/.test(petMain));
 // 打包必须走 scripts/build.cjs：它把 electron / electron-builder 工具链的下载源
 // 指到国内镜像（GitHub 直连 ETIMEDOUT，build 会整片红）。npm 脚本与 CI 都得用它。
 const pkgJson = JSON.parse(readFileSync(join(ROOT, "package.json"), "utf8"));
