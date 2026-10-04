@@ -45,6 +45,18 @@ if (!port || isNaN(port)) {
 const url = `http://127.0.0.1:${port}`;
 const PKG_ROOT = path.resolve(__dirname, "..", "..");
 
+// ---- 别让 Windows 把「被遮住了」当成「不用画了」 ----
+// 症状：宠物走过的地方留下旧画面（残影/脏区），鼠标点一下或把窗口激活到前台就好了。
+// 病根：Chromium 按 Windows 的遮挡判定做节流 —— 这扇窗 focusable:false + 置顶 + 每帧搬，
+//   经常被判成 occluded，于是**不再产生帧**；屏幕上的像素就一直停在上一次合成。
+//   （注意：这是「不刷新」，不是 pet.js 的冻住开关 —— 那个已在 pet.js 里关掉。）
+// disable-features 里多个项用逗号连着写，分两次 appendSwitch 会互相覆盖掉。
+if (process.platform === "win32") {
+  app.commandLine.appendSwitch("disable-features", "CalculateNativeWinOcclusion,WinUseBrowserSpellChecker");
+  app.commandLine.appendSwitch("disable-backgrounding-occluded-windows");
+  app.commandLine.appendSwitch("disable-renderer-backgrounding");
+}
+
 /** 数据目录（拿不到 token 时用它报错）：优先 paths.cjs，再按平台惯例算一遍。 */
 function homeDir() {
   try {

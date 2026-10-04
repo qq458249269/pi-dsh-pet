@@ -983,6 +983,10 @@ const rebuilt = existsSync(join(ROOT, "app", "build.cjs"))
 check("afterPack 自己补出 app/build.cjs（CI 不走 npm 脚本）", !!rebuilt && /^\w{7,}$/.test(rebuilt.sha || ""));
 check("补出来的戳带素材段数（少素材一眼看出来）", !!rebuilt && rebuilt.thumbs > 0, `thumbs=${rebuilt && rebuilt.thumbs}`);
 check("/health 报出包身份（一眼看出在跑哪次提交）", /build: BUILD\.sha/.test(readFileSync(join(ROOT, "app", "server.cjs"), "utf8")));
+// 残影/脏区：窗被 Windows 判成 occluded 就不再产生帧（激活到前台才恢复）
+const petMain = readFileSync(join(ROOT, "pi", "assets", "pet-electron.cjs"), "utf8");
+check("窗不被判 occluded 就停画（CalculateNativeWinOcclusion 关掉）", /appendSwitch\("disable-features", "CalculateNativeWinOcclusion/.test(petMain));
+check("遮挡/后台节流两个开关都在（残影=不刷新，不是冻住）", /disable-backgrounding-occluded-windows/.test(petMain) && /disable-renderer-backgrounding/.test(petMain));
 check("stop 返回成功", (await post(PORT, "/control", { action: "shutdown" }, token)).body.ok === true);
 const exitCode = await new Promise((res) => host.on("exit", res));
 check("宿主干净退出", exitCode === 0, `exit=${exitCode}`);
