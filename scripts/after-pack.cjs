@@ -12,13 +12,38 @@
 
 "use strict";
 
+const cp = require("node:child_process");
 const fs = require("node:fs");
 const path = require("node:path");
 
 /** 白名单式：只列确证没人用的。要删别的先在这里加一行，别写通配。 */
 const TRIM = ["dxcompiler.dll", "dxil.dll"];
 
+/**
+ * 打包身份校验：asar 里带着的 stamp 必须就是**此刻的 HEAD**。
+ * 过了时的 stamp 意味着 exe 里是旧代码 —— 用户双击后看到的是老行为，
+ * 却以为改动没生效（本次就踩过：exe 里还留着已删掉的 idleSleepMs）。
+ * 宁可打包失败，也不给一个「看着是新的、其实不是」的 exe。
+ */
+function assertFreshStamp() {
+	const ROOT = path.join(__dirname, "..");
+	let stamp;
+	try {
+		stamp = require(path.join(ROOT, "app", "build.cjs"));
+	} catch {
+		throw new Error("app/build.cjs 不存在：先跑 node scripts/stamp.cjs（或 npm run build，它会先跑）");
+	}
+	const head = cp
+		.execFileSync("git", ["rev-parse", "--short", "HEAD"], { cwd: ROOT, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] })
+		.trim();
+	if (head && stamp.sha !== head) {
+		throw new Error(`app/build.cjs 是 ${stamp.sha}，HEAD 已经是 ${head} —— 这个包会带着旧代码，先跑 node scripts/stamp.cjs`);
+	}
+	console.log(`  • 校验通过：包身份 = ${stamp.sha}${stamp.dirty ? " (dirty)" : ""}，素材 ${stamp.thumbs} 段`);
+}
+
 exports.default = async function afterPack(context) {
+	assertFreshStamp();
 	// context.appOutDir 是打包输出目录（win-unpacked 之类）；Linux/Mac 布局不同就跳过。
 	const dir = context && context.appOutDir;
 	if (!dir || process.platform !== "win32") return;

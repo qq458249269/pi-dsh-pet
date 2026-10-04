@@ -53,7 +53,9 @@
 "test": "node scripts/check-assets.cjs && node scripts/check-workflow.cjs && node test/smoke.mjs && node test/dsh.mjs && node test/opencode.mjs",
     "test:opencode": "node test/opencode.mjs",
     "test:workflow": "node scripts/check-workflow.cjs",
+    "prebuild": "node scripts/stamp.cjs",
     "build": "npx --yes electron-builder --win --publish never --config electron-builder.yml",
+    "prebuild:dir": "node scripts/stamp.cjs",
     "build:dir": "npx --yes electron-builder --win --dir --publish never --config electron-builder.yml",
 
 "gen:anim": "node scripts/gen-anim.cjs"

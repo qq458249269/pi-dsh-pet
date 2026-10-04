@@ -626,6 +626,21 @@ async function cmdDoctor() {
 	};
 
 	ok("版本", `pi-pet ${VERSION}`);
+	// 包身份：报出 sha，用户才能确认自己跑的不是旧 exe
+	try {
+		const b = require("./build.cjs");
+		const head = (() => {
+			try {
+				return require("node:child_process").execFileSync("git", ["rev-parse", "--short", "HEAD"], { cwd: PKG_ROOT, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
+			} catch {
+				return "";
+			}
+		})();
+		const stale = head && b.sha !== head;
+		ok("包身份", `${b.sha}${b.dirty ? " (dirty)" : ""} · ${b.thumbs} 段素材 @ ${b.builtAt}` + (stale ? ` —— 比仓库 HEAD(${head}) 旧，重跑 npm run build` : ""), !stale);
+	} catch {
+		lines.push("· 包身份：无 build.cjs（源码目录直跑，或跑一次 npm run build 生成）");
+	}
 	ok("包根目录", PKG_ROOT, fs.existsSync(PKG_ROOT));
 	const assets = path.join(PKG_ROOT, "pi", "assets");
 	ok("窗脚本", path.join(assets, "pet-electron.cjs"), fs.existsSync(path.join(assets, "pet-electron.cjs")));

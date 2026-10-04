@@ -22,6 +22,13 @@ const path = require("node:path");
 
 const { ENDPOINTS, ROLE, VERSION, SIZES, MAX_PETS_CEILING } = require("./protocol.cjs");
 const { ASSETS_DIR, CONFIG_JSONC, THUMB_DIR, log } = require("./paths.cjs");
+/** 打包身份（git sha / 素材数）。源码目录跑时这个文件也在（npm run build 会先生成）。 */
+let BUILD = {};
+try {
+	BUILD = require("./build.cjs");
+} catch {
+	/* 没 stamp 就不报这个字段，不影响功能 */
+}
 const { tokenMatches } = require("./single.cjs");
 const { attachWebSocket } = require("./wsserver.cjs");
 
@@ -151,6 +158,8 @@ function createServer(ctx) {
 				ok: true,
 				role: ROLE,
 				version: VERSION,
+				// 谁在问都能看到「我连的是哪个包」：跑旧 exe 而不自知的头号原因
+				build: BUILD.sha ? `${BUILD.sha}${BUILD.dirty ? " (dirty)" : ""} · ${BUILD.thumbs} 段素材` : "unknown",
 				heartbeatAt: Date.now(),
 				...bus,
 				windowConnected: bus.clients > 0,

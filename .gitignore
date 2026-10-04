@@ -29,6 +29,9 @@ npm-debug.log*
 *.tgz
 dist/
 
+# 打包身份戳（scripts/stamp.cjs 生成，每次 build 覆盖）
+app/build.cjs
+
 # electron-builder 的构建资源目录（图标等；空目录，electron-builder 用默认图标）
 build/
 
