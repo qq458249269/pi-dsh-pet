@@ -1673,8 +1673,11 @@ self.playing = next;   // 屏幕上真正在放的（判定「演到哪了」只
         //   宠物停在窗的右半边时，宽出来那截（思考气泡 95..551）直接顶出窗外被切，
         //   用户口径「右侧还是展示不全」。以前只有 refitInk（量完可见框时）会夹，
         //   而框一旦进了缓存就不会再量 ⇒ refitInk 永远不跑 ⇒ 缓存一热就必现。
-        self.refitInk();
+self.refitInk();
         pushHitRegion();
+        // 窗宽跟着当前动画走（§9.32）：窄动画时把两侧那块透明区收掉，
+        //   否则屏幕上留着上一段宽动画的旧画面（见 stageSize 里的说明）。
+        reportWindowSize();
         // 这段还没量过可见框？插队量一下（量完 onInkBoxReady 会重夹位置 + 重报形状）
         queueInkMeasure(next);
         self.playedAt = Date.now();
@@ -2401,11 +2404,15 @@ self.customPos = { rx: (rc.left + halfW) / W1, ry: (rc.top + halfH) / H1, w: W1,
    *   高度差里只有一部分来自头顶偏移，按高度差去挪窗会把宠物挪走 40px，
    *   窗还挂到屏幕外头去了。见 §9.21。）
    */
-  function reportWindowSize() {
+function reportWindowSize() {
     var s = stageSize();
     applyBubbleMaxWidth(s.w, s.petW);
     var api = window.__petElectron__;
     if (!api || !api.setWindowSize || !config) return;
+    // 宽度跟着**当前动画**变（§9.32）：变化小于滞回阈值就不报 ——
+    //   漫游/夹取会反复微调，不滞回就是每秒十几次 SetWindowPos + 全窗重绘。
+    if (lastWinW && Math.abs(s.w - lastWinW) < WIN_W_HYSTERESIS) return;
+    lastWinW = s.w;
     try {
       // 宽度按内容自适应（§9.24）：stageSize 算的宽是 max(动画宽, 气泡基准宽) + 余量，
       // 这里不再自己加 padding —— 加两遍就是白留（§9.22 就是这么白留的）。
@@ -2414,6 +2421,10 @@ self.customPos = { rx: (rc.left + halfW) / W1, ry: (rc.top + halfH) / H1, w: W1,
       /* 主进程还没 ready：那就用它的默认尺寸，窗也不会因此坏掉 */
     }
   }
+
+/** 窗宽滞回阈值（px）：小于它的变化不报给主进程。 */
+  var WIN_W_HYSTERESIS = 24;
+  var lastWinW = 0;
 
   /**
    * 舞台窗该多大（纯计算，不碰 DOM）：报尺寸、摆位置、气泡封顶三处共用一份。
@@ -2464,8 +2475,23 @@ if (!maxStage) maxStage = 400;
     //   舞台本来就是「这段动画可能画到的全部」：窗装得下舞台 + inkSafe() 又保证宽动画
     //   往窗里挪，任何动画的像素都不会被窗边裁掉。以前按角色框算窗，宠物靠边时宽动画
     //   （思考 93..551、蝴蝶蜜蜂 4..629）的右侧必被切 —— 用户口径「右侧还是展示不全」。
-    var maxW = maxStage;
+var maxW = maxStage;
     var w = maxW + sidePad * 2 + roamRoom(sidePad);
+    // §9.32：窗宽跟着**当前在放的那段动画的可见框**走。
+    //   为什么：§9.28 为了不裁宽动画，窗宽按整个舞台算 ⇒ 窄动画时左右各空着一大块
+    //   透明区，而那片区域既不在视频的绘制范围内、脏区也算不到它 —— 屏幕上就留着
+    //   上一段宽动画的旧画面（鼠标激活才恢复）。把空区收掉，症状的来源就没了。
+    //   量不到可见框（还在量 / 缓存没热）就退回角色框占比，行为与旧版一致。
+    var dynFrac = 0;
+    for (var i = 0; i < pets.length; i++) {
+      var pc = pets[i];
+      if (!pc) continue;
+      var bx = animInkBox(pc.playing);
+      var frac = bx ? (bx.x1 - bx.x0) / 640 : 0;
+      if (frac > dynFrac) dynFrac = frac;
+    }
+    var dynW = dynFrac > 0 ? Math.round(dynFrac * maxStage) : inkWidth(maxStage);
+    if (dynW > 0) w = Math.max(MIN_PET_SIZE, dynW + sidePad * 2 + roamRoom(sidePad));
     return {
       petW: inkWidth(maxStage),
       w: w,

@@ -966,6 +966,12 @@ check("只有 turn + moves.actions 镜像，其余按素材原样", /function is
 check("镜像方向与走位方向同一口径（moveDir 一处算，两处用）", /function moveDir\(\)/.test(petSrc) && /var dir = moveDir\(\)/.test(petSrc) && /return \(self\.facingRef === "right"\) !== turnAnim \? 1 : -1/.test(petSrc));
 check("turn 动画放完仍翻 facing（不然转身动画永远朝一个方向）", /anims\.turn\.indexOf\(endedAnim\) >= 0[\s\S]{0,200}self\.facingRef = nextF/.test(petSrc));
 
+// §9.32：窗宽按**当前动画的可见框**，不是按整个舞台（否则两侧长期空一大块透明区，
+//   屏幕上留着上一段宽动画的旧画面）。滞回 + 换手时报，两者一起断言。
+check("窗宽按当前动画可见框（两侧不再长期空一大块）", /dynFrac > 0 \? Math\.round\(dynFrac \* maxStage\)/.test(petSrc) && /animInkBox\(pc\.playing\)/.test(petSrc));
+check("换手时报一次窗宽（宽动画↔窄动画切换才改）", /self\.refitInk\(\);\s*pushHitRegion\(\);[\s\S]{0,200}reportWindowSize\(\);/.test(petSrc));
+check("窗宽变化有滞回（漫游微调不变成每秒十几次搬窗）", /WIN_W_HYSTERESIS/.test(petSrc) && /Math\.abs\(s\.w - lastWinW\) < WIN_W_HYSTERESIS/.test(petSrc));
+
 // ---------------------------------------------------------------- 收尾
 console.log("\n收尾…");
 // 打包身份戳：CI 的 exe job 直接调 npx electron-builder（不走 npm 脚本 → prebuild 不跑），
