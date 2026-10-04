@@ -332,7 +332,17 @@ win.on("move", (_e, b) => rememberPos(b));
   });
 
 // ---- 命中区：把整窗的鼠标命中裁到宠物身上 ----
-  const SHAPE_OK = typeof win.setShape === "function" && process.env.PI_PET_NO_SHAPE !== "1";
+// ⚠️⚠️ 形状裁剪**默认关闭**（PI_PET_SHAPE=1 才开）。
+  //   实测定案（PI_PET_NO_SHAPE=1 不锁，开着就锁）：病根就是 Win32 的 SetWindowRgn ——
+  //   窗口区域一收窄，窗就**不再覆盖**那块屏幕，Win32 不会因为「这块不再被覆盖」去让
+  //   DWM 重新合成底下的窗口，没人给脏区，屏幕上就留着**其他软件当时的画面**
+  //   （宠物本体照常动、周围一圈被锁住，鼠标点一下才恢复）。
+  //   让出前先盖满整窗逼它重合成（见 applyShape 里的 SHAPE_DIRTY_FIX）实测**无效**，
+  //   收窄就是收窄。所以默认走**开关式穿透**：setIgnoreMouseEvents 动态开关（早就实现着，
+  //   见 pet:passthrough），不用窗口区域，就没有那片没人合成的像素。
+  //   代价：光标不在宠物/气泡上时，整窗都穿透不了 —— 也就是宠物旁边的透明区会吃掉点击。
+  //   想要精确命中区（宁可容忍锁帧）的人可以 PI_PET_SHAPE=1 切回去。
+  const SHAPE_OK = process.env.PI_PET_SHAPE === "1" && typeof win.setShape === "function";
   let shapeBroken = false;
   let gotRegion = false;
 

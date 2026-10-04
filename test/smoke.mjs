@@ -1010,6 +1010,9 @@ check("TOPMODE 3 = 放弃透明，用实底色（最难看但没有透明层留�
 // 实测定案：PI_PET_NO_SHAPE=1 不锁 ⇒ 病根是 SetWindowRgn（窗不再覆盖那块屏，DWM 不重合成）
 check("形状变小时先盖满整窗再收回（逼 DWM 重合成让出的像素）", /prevShapeArea > area\(list\)/.test(petMain) && /win\.setShape\(\[\{ x: 0, y: 0, width: b\.width, height: b\.height \}\]\)/.test(petMain));
 check("兼底可关（PI_PET_SHAPE_DIRTY=0 做 A/B）", /SHAPE_DIRTY_FIX = process\.env\.PI_PET_SHAPE_DIRTY !== "0"/.test(petMain));
+// 定案后：形状裁剪默认关（PI_PET_SHAPE=1 才开），默认走开关式穿透
+check("setShape 默认关（Windows 上收窄区域会留别的软件的画面）", /SHAPE_OK = process\.env\.PI_PET_SHAPE === "1"/.test(petMain));
+check("关掉形状时默认整窗穿透（pet:passthrough 动态开关接管）", /if \(on\) win\.setIgnoreMouseEvents\(true, \{ forward: true \}\);\s*else win\.setIgnoreMouseEvents\(false\);/.test(petMain));
 // 打包必须走 scripts/build.cjs：它把 electron / electron-builder 工具链的下载源
 // 指到国内镜像（GitHub 直连 ETIMEDOUT，build 会整片红）。npm 脚本与 CI 都得用它。
 const pkgJson = JSON.parse(readFileSync(join(ROOT, "package.json"), "utf8"));
