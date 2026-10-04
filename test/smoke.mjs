@@ -666,7 +666,17 @@ check("连点两下只弹一个盒子（showDialog 排队）", /const prev = dia
 check("菜单更新走宿主（check-update / do-update）", /callHost\("check-update"/.test(elecSrc) && /callHost\("do-update"/.test(elecSrc));
 check("菜单更新请求的超时给到分钟级（git fetch / npm i 很慢）", /callHost\("check-update", \{\}, token, 240000\)/.test(elecSrc));
 check("自动更新不需要用户点（宿主自己拉）", /PI_PET_NO_UPDATE=1 → 不自动检查更新/.test(updSrc));
-// ⚠️ 这里不真调 do-update：测试跑在这棵真仓库上，pull 会动工作区。
+// 单文件 exe：认 env、问 Releases、退出后覆盖（正在跑的 exe 是锁着的，直接 move 必失败）
+check("认得 portable 单文件（PORTABLE_EXECUTABLE_FILE）", /PORTABLE_EXECUTABLE_FILE/.test(updSrc));
+check("portable 查 GitHub Releases 的 latest tag", /api\.github\.com\/repos\/\$\{REPO\}\/releases\/latest/.test(updSrc));
+check("portable 覆盖要等进程退出（不能直接 move 正在跑的 exe）", /tasklist \/fi "PID eq/.test(updSrc) && /if not errorlevel 1 goto wait/.test(updSrc));
+check("portable 不在启动时偷着下 125MB", /自动检查更新：portable 单文件不自动下载/.test(updSrc));
+// 版本号比较：字符串比会把 2026.9.3 判成比 2026.09.30 小 → 反复骗人“假有更新”
+const upd = await import(pathToFileURL(join(ROOT, "app", "updater.cjs")).href);
+check("版本号逐段按数字比（不是字符串比）", upd.cmpVersion("2026.09.30.0002", "2026.9.30.0001") === 1);
+check("版本号相等时没有更新（含 v 前缀）", upd.cmpVersion("v2026.09.30.0002", "2026.09.30.0002") === 0);
+check("版本号短的那个不比长的新", upd.cmpVersion("2026.9.3", "2026.09.30.0002") === -1);
+
 check("do-update 不会用空串盖掉刚查到的版本/提交", /if \(!s\[k\]\) delete s\[k\]/.test(hostSrc));
 
 // ---------------------------------------------------------------- 舞台窗（小窗，别改回全屏）

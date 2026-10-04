@@ -10,7 +10,11 @@
  *   ② npm 装机（`npm i -g pi-dsh-pet`）：没有 .git，只能问 npm registry 有没有新版。
  *      全局装的话自动 `npm i -g <包名>@latest`；不是全局装（本地 npx / 自己 clone 完
  *      link 进来的）就**只报告、不代劳** —— 替别人跑 npm install 说不定改的是别处的依赖。
- *   ③ 其它（解压即用的 zip / asar 打包版）：没有 .git 也没有 npm 装机信息，
+ *   ③ portable 单文件 exe：问 GitHub Releases 的 latest tag 比版本号，有新版就把
+ *      新的 exe 下到同一个目录，**等本进程退出后**再覆盖上去（正在跑的 exe 是锁着的，
+ *      覆盖不了）。顺手用 env 认：electron-builder 的 portable 启动器会给子进程塞
+ *      `PORTABLE_EXECUTABLE_FILE`（原始 exe 的真实路径，不在临时解压目录里）。
+ *   ④ 其它（解压即用的 zip / asar 打包版）：没有 .git 也没有 npm 装机信息，
  *      一律只报告当前版本 + 该去哪儿手动更。
  *
  * 两条硬规矩：
@@ -27,10 +31,14 @@
 "use strict";
 
 const fs = require("node:fs");
+const os = require("node:os");
+const https = require("node:https");
 const path = require("node:path");
 const { spawn } = require("node:child_process");
 
 const PKG_ROOT = path.resolve(__dirname, "..");
+/** portable 那一档问的仓库（跟 package.json 的 repository 同一家，不另配） */
+const REPO = "qq458249269/pi-dsh-pet";
 
 /** 跑一条命令。**永不抛**：找不到 git / 超时 / 非零退出都变成返回值，
  *  更新失败只是「没更成」，绝不能把宿主带崩（它是那个 HTTP 服务）。 */
@@ -97,6 +105,113 @@ async function globalNodeModules() {
 	return npmRoot;
 }
 
+/**
+ * 版本号比大小。**不能直接拿字符串比**：`2026.9.3` 会小于 `2026.09.30`，
+ * 这种「假有更新」最气人（用户被反复骗着下同一个版本）。逐段按数字比，
+ * 段数不够的当 0；非数字段（比如 pre-release 尾巴）退回字符串比。
+ */
+function cmpVersion(a, b) {
+	const pa = String(a || "").replace(/^v/i, "").split(/[.\-+]/);
+	const pb = String(b || "").replace(/^v/i, "").split(/[.\-+]/);
+	for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+		const sa = pa[i] || "0";
+		const sb = pb[i] || "0";
+		const na = Number(sa);
+		const nb = Number(sb);
+		if (Number.isFinite(na) && Number.isFinite(nb)) {
+			if (na !== nb) return na < nb ? -1 : 1;
+		} else if (sa !== sb) {
+			return sa < sb ? -1 : 1;
+		}
+	}
+	return 0;
+}
+
+/** GET 一个 URL（跟进重定向）。**永不抛**：更新查不到只是「没查到」。 */
+function get(url, { timeoutMs = 20000, redirects = 0 } = {}) {
+	return new Promise((resolve) => {
+		let settled = false;
+		const done = (v) => { if (!settled) { settled = true; resolve(v); } };
+		const req = https.get(url, { headers: { "user-agent": "pi-dsh-pet" } }, (res) => {
+			const loc = res.headers.location;
+			if ([301, 302, 303, 307, 308].includes(res.statusCode) && loc && redirects < 5) {
+				res.resume();
+				resolve(get(new URL(loc, url).href, { timeoutMs, redirects: redirects + 1 }));
+				return;
+			}
+			const chunks = [];
+			let n = 0;
+			res.on("data", (d) => { if (n < 4 << 20) { chunks.push(d); n += d.length; } });
+			res.on("end", () => done({ status: res.statusCode, body: Buffer.concat(chunks) }));
+			res.on("error", () => done(null));
+		});
+		req.setTimeout(timeoutMs, () => { req.destroy(); done(null); });
+		req.on("error", () => done(null));
+	});
+}
+
+/** 下载到文件（先写 .part 再改名，避免中途断网留下半个 exe 当新版）。永不抛。 */
+function download(url, dest, { timeoutMs = 20 * 60 * 1000, redirects = 0 } = {}) {
+	return new Promise((resolve) => {
+		let settled = false;
+		const done = (v) => { if (!settled) { settled = true; resolve(v); } };
+		const req = https.get(url, { headers: { "user-agent": "pi-dsh-pet" } }, (res) => {
+			const loc = res.headers.location;
+			if ([301, 302, 303, 307, 308].includes(res.statusCode) && loc && redirects < 5) {
+				res.resume();
+				resolve(download(new URL(loc, url).href, dest, { timeoutMs, redirects: redirects + 1 }));
+				return;
+			}
+			if (res.statusCode !== 200) {
+				res.resume();
+				done({ ok: false, note: `下载失败：HTTP ${res.statusCode}` });
+				return;
+			}
+			const tmp = `${dest}.part`;
+			const out = fs.createWriteStream(tmp);
+			res.on("error", () => done({ ok: false, note: "下载中断了（多半是网断），没动原来的 exe" }));
+			out.on("error", (err) => done({ ok: false, note: `写不进 ${path.dirname(dest)}：${err.message}` }));
+			out.on("finish", () => {
+				try {
+					fs.renameSync(tmp, dest);
+					done({ ok: true, mb: Math.round(Number(res.headers["content-length"] || 0) / 1048576) });
+				} catch (err) {
+					done({ ok: false, note: `下完了但存不进 ${path.dirname(dest)}：${err.message}` });
+				}
+			});
+			res.pipe(out);
+		});
+		req.setTimeout(timeoutMs, () => { req.destroy(); done({ ok: false, note: "下载超时（网太慢？）" }); });
+		req.on("error", (err) => done({ ok: false, note: `下载失败：${err.message}` }));
+	});
+}
+
+/**
+ * 等本进程（+ portable 启动器）退出后把新 exe 覆盖上去。
+ * 写一个 .cmd 文件再跑，而不是拼命令行字符串：路径里有空格 / & / % 时字符串拼法太脆。
+ * 覆盖失败不声张（弹窗早关了），只留文件在原地，用户自己挪也行。
+ */
+function swapAfterExit(src, dest, pids) {
+	const script = [
+		"@echo off",
+		":wait",
+		...pids.filter(Boolean).map((pid) => `tasklist /fi "PID eq ${pid}" | find "${pid}" >nul`),
+		...pids.filter(Boolean).map(() => "if not errorlevel 1 goto wait"),
+		"ping -n 2 127.0.0.1 >nul",
+		`move /y "${src}" "${dest}" >nul`,
+		'del "%~f0"',
+		"",
+	].join("\r\n");
+	try {
+		const f = path.join(os.tmpdir(), `pi-pet-swap-${process.pid}.cmd`);
+		fs.writeFileSync(f, script, "utf8");
+		const child = spawn("cmd.exe", ["/c", f], { detached: true, stdio: "ignore", windowsHide: true });
+		child.unref();
+	} catch {
+		/* 起不来拉倒：.new.exe 还在目录里，用户自己改名覆盖 */
+	}
+}
+
 /** 这是什么装机？给菜单和 dialog 看的「当前版本」也从这儿出。 */
 async function detect() {
 	const pkg = readPkg();
@@ -104,6 +219,12 @@ async function detect() {
 	if (fs.existsSync(path.join(PKG_ROOT, ".git"))) {
 		if (!(await gitUsable())) return { ...base, mode: "unknown", reason: "这是个 git 检出，但系统里没有 git 命令" };
 		return { ...base, mode: "git" };
+	}
+	// portable 单文件：electron-builder 的启动器会把这个 env 传下来，指向磁盘上那个 exe。
+	// ⚠️ 必须排在 node_modules 之前：asar 里也可能有依赖目录，靠前才不会认错。
+	const portableExe = process.env.PORTABLE_EXECUTABLE_FILE;
+	if (portableExe && fs.existsSync(portableExe)) {
+		return { ...base, mode: "portable", exe: portableExe, exeDir: path.dirname(path.resolve(portableExe)) };
 	}
 	if (PKG_ROOT.includes(`${path.sep}node_modules${path.sep}`)) {
 		const g = await globalNodeModules();
@@ -196,6 +317,30 @@ async function check({ fetch = process.env.PI_PET_UPDATE_NO_FETCH !== "1" } = {}
 			note: info.global ? "" : "这个包不是全局装的，只报告不代劳（你自己在哪儿装的就在哪儿 npm i）",
 		};
 	}
+	if (info.mode === "portable") {
+		const r = await get(`https://api.github.com/repos/${REPO}/releases/latest`);
+		if (!r || r.status !== 200) {
+			return { ...info, ok: false, hasUpdate: false, note: "问不到 GitHub Releases（没网，或匿名 API 被限流了），先按当前版本继续跑" };
+		}
+		let j;
+		try {
+			j = JSON.parse(r.body.toString("utf8"));
+		} catch {
+			return { ...info, ok: false, hasUpdate: false, note: "GitHub 回的不是 JSON（多半是被限流了），先按当前版本继续跑" };
+		}
+		const latest = String(j.tag_name || "").replace(/^v/i, "");
+		const asset = (Array.isArray(j.assets) ? j.assets : []).find((a) => /\.exe$/i.test(String(a.name || "")));
+		return {
+			...info,
+			ok: true,
+			// current 用版本号（不是提交号）：portable 只有一个 exe，没有 git 历史可言
+			current: info.version,
+			latest,
+			hasUpdate: !!latest && cmpVersion(latest, info.version) > 0,
+			url: asset ? String(asset.browser_download_url || "") : "",
+			note: asset ? "" : "这个 release 里没有 exe 附件，去 GitHub 手动下",
+		};
+	}
 	return { ...info, ok: false, hasUpdate: false, note: info.reason || "这种装法没法自动更新（打包版 / 解压即用）" };
 }
 
@@ -225,6 +370,26 @@ async function apply() {
 			mode: "git",
 			note: after && before && after !== before ? `已更新：${before} → ${after}` : "已经是最新",
 			changed: !!(after && before && after !== before),
+		};
+	}
+	if (info.mode === "portable") {
+		const chk = await check({ fetch: false });
+		if (!chk.ok) return { ok: false, mode: "portable", note: chk.note };
+		if (!chk.hasUpdate) return { ok: true, mode: "portable", note: "已经是最新", changed: false };
+		if (!chk.url) return { ok: false, mode: "portable", note: "这个 release 里没有 exe 附件，去 GitHub 手动下" };
+		// 下到 exe 旁边（同目录才有权限写）。原来那个正在跑、被锁着，只能等退出后再换。
+		const dest = path.resolve(info.exe);
+		const staged = `${dest}.new`;
+		const d = await download(chk.url, staged);
+		if (!d.ok) return { ok: false, mode: "portable", note: d.note };
+		swapAfterExit(staged, dest, [process.pid, process.ppid]);
+		return {
+			ok: true,
+			mode: "portable",
+			changed: true,
+			note:
+				`新版本 ${chk.latest}${d.mb ? `（约 ${d.mb}MB）` : ""} 已下到 ${staged}\n` +
+				"退出本程序后会自动覆盖原来的 exe，下次双击就是新版",
 		};
 	}
 	if (info.mode === "npm" && info.global) {
@@ -317,6 +482,12 @@ if (!res.hasUpdate) {
 				resolve(res);
 				return;
 			}
+			// portable：125MB 的 exe 没人想在开机 12s 后偷偷下。查、要，就走菜单。
+			if (res.mode === "portable") {
+				note(`自动检查更新：portable 单文件不自动下载，有新版（${res.latest}）请走菜单「检查更新…」`);
+				resolve(res);
+				return;
+			}
 			// 「只查不装」档：手动启动时想看「有没有新版」但别让它动工作区
 			if (process.env.PI_PET_UPDATE === "check") {
 				note(`PI_PET_UPDATE=check → 只查不装：${res.note || `有更新（落后 ${res.behind || 0} 个提交）`}`);
@@ -360,4 +531,4 @@ function readUpdateInfo(home) {
 	};
 }
 
-module.exports = { detect, check, apply, autoUpdate, readUpdateInfo, PKG_ROOT };
+module.exports = { detect, check, apply, autoUpdate, readUpdateInfo, cmpVersion, PKG_ROOT };

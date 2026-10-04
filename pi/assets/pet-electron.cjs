@@ -868,7 +868,13 @@ try {
     const note = (u) => (u && u.note ? `\n\n${u.note}` : "");
     const lines = (u) => {
       const modeText =
-        u.mode === "git" ? "git 检出（可自动更新）" : u.mode === "npm" ? "npm" : "打包版 / 解压即用（不能自动更新）";
+        u.mode === "git"
+          ? "git 检出（可自动更新）"
+          : u.mode === "npm"
+            ? "npm"
+            : u.mode === "portable"
+              ? "单文件 exe（可自动下载替换）"
+              : "打包版 / 解压即用（不能自动更新）";
       return [
         `当前：${u.version || "?"}${u.current ? `（提交 ${u.current}）` : ""}`,
         u.latest ? `最新：${u.latest}${u.behind ? `（落后 ${u.behind} 个提交）` : ""}` : "",
@@ -898,18 +904,20 @@ if (!u.hasUpdate) {
       await showDialog({ type: "info", message: "已经是最新", detail: lines(u), buttons: ["好"] });
       return;
     }
-    const canApply = (u.mode === "git") || (u.mode === "npm" && u.global === true);
+    const canApply = u.mode === "git" || u.mode === "portable" || (u.mode === "npm" && u.global === true);
     const buttons = canApply ? ["现在更新", "以后再说"] : ["好"];
     const { response } = await showDialog({
       type: canApply ? "question" : "info",
       message: "有新版本",
-      detail: `${lines(u)}\n\n更新完会自动换一扇窗（渲染层立刻用上新代码）。\n宿主自己的代码要下次 \`pi-pet restart\` 才换。`,
+      detail: `${lines(u)}\n\n更新完会自动换一扇窗（渲染层立刻用上新代码）。\n宿主自己的代码要下次 \`pi-pet restart\` 才换。${
+        u.mode === "portable" ? "\n\n单文件版会重新下载 exe，退出后自动覆盖，下次双击生效。" : ""
+      }`,
       buttons,
       defaultId: 0,
       cancelId: buttons.length - 1,
     });
     if (buttons[response] !== "现在更新") return;
-const ap = await callHost("do-update", {}, token, 300000);
+    const ap = await callHost("do-update", {}, token, u.mode === "portable" ? 1500000 : 300000);
     const au = (ap && ap.update) || {};
     await showDialog({
       type: ap && ap.ok === true ? "info" : "warning",

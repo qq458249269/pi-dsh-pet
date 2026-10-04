@@ -452,6 +452,7 @@ var SIZE_MAP = { small: 380, normal: 400, large: 540 };
 |------|--------|------|
 | git 检出（pi 扩展装法、`git clone`） | `git fetch` 比远端 → `git pull --ff-only` | ✅ 全自动 |
 | npm 全局装 | 查 registry → `npm i -g pi-dsh-pet@latest` | ✅ 全自动 |
+| **单文件 exe（portable）** | 问 GitHub Releases 的 latest tag → 把新 exe 下到同目录，**退出后自动覆盖**（正在跑的 exe 是锁着的）。认法：env `PORTABLE_EXECUTABLE_FILE`（electron-builder 的启动器塞的）。自动更新只查不下载，125MB 不偷着下 | ⚠️ 只查 |
 | npm 非全局装 / 解压即用 / asar 打包版 | **只报告当前版本和该去哪儿手动更**，不代劳 | ❌ |
 
 几条硬规矩：**工作区脏（有本地改动）就拒绝自动更**（别让更新盖掉你的代码）、
