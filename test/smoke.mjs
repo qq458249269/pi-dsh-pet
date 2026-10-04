@@ -987,6 +987,8 @@ check("/health 报出包身份（一眼看出在跑哪次提交）", /build: BUI
 const petMain = readFileSync(join(ROOT, "pi", "assets", "pet-electron.cjs"), "utf8");
 check("窗不被判 occluded 就停画（CalculateNativeWinOcclusion 关掉）", /appendSwitch\("disable-features", "CalculateNativeWinOcclusion/.test(petMain));
 check("遮挡/后台节流两个开关都在（残影=不刷新，不是冻住）", /disable-backgrounding-occluded-windows/.test(petMain) && /disable-renderer-backgrounding/.test(petMain));
+// 窗缩小后空出来的侧边锁住不重画 = 渲染进程自己的后台节流，得单独关
+check("窗关掉 backgroundThrottling（窗变小后空出的侧边不锁帧）", /backgroundThrottling: false/.test(petMain));
 // 打包必须走 scripts/build.cjs：它把 electron / electron-builder 工具链的下载源
 // 指到国内镜像（GitHub 直连 ETIMEDOUT，build 会整片红）。npm 脚本与 CI 都得用它。
 const pkgJson = JSON.parse(readFileSync(join(ROOT, "package.json"), "utf8"));

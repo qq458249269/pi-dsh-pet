@@ -238,9 +238,17 @@ app.whenReady().then(() => {
     skipTaskbar: true,
     hasShadow: false,
     focusable: false,
-    webPreferences: {
+webPreferences: {
       nodeIntegration: false,
       contextIsolation: true,
+      // ⚠️⚠️ 后台节流得关（症状：宽动画换成窄动画后，窗口空出来的那两条侧边会**锁住**
+      //   不重画**，屏幕上留着上一段的旧画面；鼠标点一下/把窗激活到前台才恢复）。
+      //   病根：这扇窗 focusable:false + 置顶，Chromium 常判它「看不见/在后台」，
+      //   于是不再驱动重绘 —— 而窗口缩小后新空出来的那块区域**没人去清**，
+      //   旧像素就一直停在那里。进程级的三个开关（disable-backgrounding-occluded-windows /
+      //   disable-renderer-backgrounding / CalculateNativeWinOcclusion，见文件上方）
+      // 压的是浏览器进程那一层，这一条是**渲染进程自己的**节流开关，两边都得关。
+      backgroundThrottling: false,
       preload: path.join(__dirname, "preload.cjs"),
     },
   });
