@@ -116,17 +116,12 @@ npm run build:dir      # 只出免安装目录版 dist/win-unpacked/，跑得快
 
 | 坑 | 症状 | 怎么办 |
 |----|------|--------|
-| 没设镜像 | `connect ETIMEDOUT 20.205.243.166:443`（GitHub 的 IP），而且**炸在打包中途**，看着像随机挂 | 两个都得设：`ELECTRON_MIRROR` 管 electron 运行时 zip，`ELECTRON_BUILDER_BINARIES_MIRROR` 管 nsis / nsis-resources / 7zip。少设一个就卡那一个 |
+| 没设镜像 | `connect ETIMEDOUT 20.205.243.166:443`（GitHub 的 IP），而且**炸在打包中途**，看着像随机挂 | `npm run build` 走 `scripts/build.cjs`，它已经把 `ELECTRON_MIRROR`（electron 运行时 zip）与 `ELECTRON_BUILDER_BINARIES_MIRROR`（nsis / 7zip 等）指到 npmmirror。外层自己设过这两个变量就不动它（CI 有自己的代理） |
 | `--no-save` 分两次装 | 第二次 `npm i` 装完，electron 没了 → `Cannot compute electron version from installed node modules` | `--no-save` 装的包不进 package.json，**后一次 install 会把前一次的 prune 掉**。要装的写进同一条命令 |
 
-```sh
-# Git Bash / zsh
-ELECTRON_MIRROR=https://npmmirror.com/mirrors/electron/ \
-ELECTRON_BUILDER_BINARIES_MIRROR=https://npmmirror.com/mirrors/electron-builder-binaries/ \
-npm run build
-```
-
-PowerShell 用 `$env:ELECTRON_MIRROR="..."` 设同一个变量。
+打包前会自动写一份「包身份戳」`app/build.cjs`（git sha / dirty / 素材段数），
+`GET /health` 与 `pi-pet doctor` 都会报它 —— **对着旧 exe 调试时，界面上完全看不出来**，
+那两行是唯一能看出「我跑的到底是哪次提交」的地方。
 
 CI（推 main / 手动触发 `release` workflow）走同一条链，只是多两件事：
 先用 `win-unpacked/pi-dsh-pet.exe` 真跑一次冒烟（起服务、查 `/health`、确认 asar 里的
@@ -437,6 +432,46 @@ var SIZE_MAP = { small: 380, normal: 400, large: 540 };
 
 窗位置记忆文件：`%APPDATA%/pi-dsh-pet/stage.json`（`{x, y}`，屏幕像素）。
 删掉它就回到默认的右下角。
+
+## 窗口残影（宠物周围一圈别的软件画面被锁住）—— 已定案
+
+**现象**：拖动宠物时，它**身体周围的屏幕上留着一片别的东西当时的画面**，
+宠物本体照常动，只有周围那一圈不动；鼠标点一下 / 把窗激活到前台才恢复。
+
+**病根**（`PI_PET_SHAPE=0` 对照实测）：**Win32 的 `SetWindowRgn`**。
+窗口区域一收窄，这扇窗就**不再覆盖**那块屏幕 —— 但 Win32 不会因为「这块不再被覆盖」
+去让 DWM 重新合成底下的窗口，没人给它脏区，DWM 的合成缓存里就留着上一次的内容。
+所以那片像素**根本不是这扇窗的**，`invalidate()` 对它无效。
+
+**修法**（`995963f` + `a0c3f83`）：默认**不用窗口区域**，改用开关式穿透 ——
+每 50ms 读一次 `screen.getCursorScreenPoint()`，光标进了宠物/气泡的矩形就
+`setIgnoreMouseEvents(false)`，出去就开回来。判定在**主进程**做：
+穿透开着时窗收不到鼠标事件，渲染进程那份判定靠转发过来的 move 消息，实测靠不住
+（会变成「压在别的窗口上时拖不动、右键也弹不出来」）。
+
+代价：光标进出宠物范围最多 50ms 延迟；`PI_PET_HOVER_POLL_MS` 可调。
+
+### 这一路上试过但**没用**的（别再走一遍）
+
+| 试法 | 结果 |
+|------|------|
+| `disable-features=CalculateNativeWinOcclusion` + `disable-backgrounding-occluded-windows` + `disable-renderer-backgrounding` | 无 |
+| `webPreferences.backgroundThrottling: false` | 无 |
+| `win.webContents.invalidate()`（形状/尺寸/位置变时、命中区每次上报时、400ms 兼底一次） | 无 —— 因为那片像素不属于本窗 |
+| 窗宽按当前动画可见框收窄（`02fb97d`） | 无（但这条本身有用，保留） |
+| 形状变小时先 `setShape` 成整窗再收回，逼 DWM 重合成（`e9f8f43`） | 无 —— 收窄就是收窄 |
+| `PI_PET_SOFTWARE_COMPOSITE=1`（软件合成）、`PI_PET_TOPMODE=1/2/3`（screen-saver 层级 / 不置顶定时顶 / 不透明实底） | 没用上，留着当排查开关 |
+
+开关一览（都只给窗进程，正常跑不用设）：
+
+```sh
+PI_PET_SHAPE=1               # 回到窗口区域精确命中区（Windows 上会复现残影）
+PI_PET_HOVER_POLL_MS=50      # 光标判定间隔（延迟 = 这个值）
+PI_PET_REPAINT_MS=400        # 整窗重画的兼底间隔（0 关掉）
+PI_PET_SHAPE_DIRTY=0         # 关掉「先盖满整窗再收回」的兼底（已知无效，留着 A/B）
+PI_PET_SOFTWARE_COMPOSITE=1  # 走软件合成
+PI_PET_TOPMODE=1|2|3         # screen-saver 层级 / 不置顶定时顶 / 不透明实底色
+```
 
 ## 检查更新 / 自动更新
 
