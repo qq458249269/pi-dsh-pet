@@ -987,6 +987,11 @@ check("/health 报出包身份（一眼看出在跑哪次提交）", /build: BUI
 const petMain = readFileSync(join(ROOT, "pi", "assets", "pet-electron.cjs"), "utf8");
 check("窗不被判 occluded 就停画（CalculateNativeWinOcclusion 关掉）", /appendSwitch\("disable-features", "CalculateNativeWinOcclusion/.test(petMain));
 check("遮挡/后台节流两个开关都在（残影=不刷新，不是冻住）", /disable-backgrounding-occluded-windows/.test(petMain) && /disable-renderer-backgrounding/.test(petMain));
+// 打包必须走 scripts/build.cjs：它把 electron / electron-builder 工具链的下载源
+// 指到国内镜像（GitHub 直连 ETIMEDOUT，build 会整片红）。npm 脚本与 CI 都得用它。
+const pkgJson = JSON.parse(readFileSync(join(ROOT, "package.json"), "utf8"));
+check("build / build:dir 都走 scripts/build.cjs（镜像源）", /scripts\/build\.cjs/.test(pkgJson.scripts.build) && /scripts\/build\.cjs/.test(pkgJson.scripts["build:dir"]));
+check("build.cjs 不覆盖外层已设的镜像（CI 有自己的代理）", /if \(!env\[k\]\) env\[k\] = v/.test(readFileSync(join(ROOT, "scripts", "build.cjs"), "utf8")));
 check("stop 返回成功", (await post(PORT, "/control", { action: "shutdown" }, token)).body.ok === true);
 const exitCode = await new Promise((res) => host.on("exit", res));
 check("宿主干净退出", exitCode === 0, `exit=${exitCode}`);

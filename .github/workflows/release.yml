@@ -214,7 +214,7 @@ jobs:
       # --dir：先出「免安装目录版」。它是 portable / nsis 的中间产物，
       # 也是唯一能**当场真跑一次**的产物（便携单文件会自解压到临时目录，不好验证）。
       - name: 打目录版（中间产物，冒烟用）
-        run: npx electron-builder --win --dir --publish never --config electron-builder.ci.json
+        run: node scripts/build.cjs --win --dir --publish never --config electron-builder.ci.json
 
       # 冒烟：确认打出来的东西真的能独立跑（不需要 Node / 全局安装 / 仓库源码）。
       # 只起服务不起窗（窗要开 GUI，runner 上没必要），用临时 home 免得碰到任何真实状态，
