@@ -2793,15 +2793,21 @@ if (asleep) pet.sleep();
 
   var chatTimer = null;
 
-  /**
+/**
    * 排下一次碎碎念（随机时刻，避免每只宠物 / 每次重连都齐步走）。
    * 自己排自己：到点了先看闲不闲，闲就冒一句，然后重新排。config 里没 chatter = 不排。
+   *
+   * ⚠️ 头一句给 12s 封顶（FIRST_CHATTER_SEC）：idleSec 配的是 1~3 分钟，那是“常态节奏”。
+   *   冷启动后干等一分半钟，用户看到的就是「气泡没了」——功能其实在，只是没证据（实测坑）。
    */
+var FIRST_CHATTER_SEC = 12;
+  var chatterWarmed = false; // 只快一次：后面都按 idleSec 的常态节奏
   function startChatter() {
     if (chatTimer) { clearTimeout(chatTimer); chatTimer = null; }
     var c = config && config.chatter;
     if (!c || c.enabled === false || !c.idle.length) return;
     var sec = c.idleSec[0] + Math.random() * Math.max(1, c.idleSec[1] - c.idleSec[0]);
+    if (!chatterWarmed) { chatterWarmed = true; sec = Math.min(sec, FIRST_CHATTER_SEC); }
     chatTimer = setTimeout(function () {
       chatTimer = null;
       if (!chatBusy()) chatSay(pick(c.idle));
