@@ -1000,6 +1000,9 @@ check("setShape / setBounds / setPosition 后都调 nudgeRepaint", (petMain.matc
 check("重画请求 16ms 内合并（漫游 20fps 不变成 20 次全窗填充）", /repaintPending/.test(petMain));
 // 排查开关：透明置顶窗的残影若来自合成器，软件合成往往就没有它
 check("PI_PET_SOFTWARE_COMPOSITE=1 可切软件合成（残影排查用）", /PI_PET_SOFTWARE_COMPOSITE === "1"/.test(petMain) && /appendSwitch\("disable-gpu-compositing"\)/.test(petMain));
+// 本体在动、周围别的软件的画面被锁住 ⇒ 窗里内容变了而那片区域从没被判脏
+check("宠物在窗里一动（命中区上报）就并一次整窗重画", /ipcMain\.on\("pet:hit-region"[\s\S]{0,700}nudgeRepaint\(\);/.test(petMain));
+check("兼底重画可调（PI_PET_REPAINT_MS）", /PI_PET_REPAINT_MS/.test(petMain) && /setInterval\(/.test(petMain));
 // 打包必须走 scripts/build.cjs：它把 electron / electron-builder 工具链的下载源
 // 指到国内镜像（GitHub 直连 ETIMEDOUT，build 会整片红）。npm 脚本与 CI 都得用它。
 const pkgJson = JSON.parse(readFileSync(join(ROOT, "package.json"), "utf8"));

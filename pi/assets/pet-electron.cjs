@@ -321,7 +321,7 @@ webPreferences: {
    *   16ms 内的请求攒成一次就够 —— 反正这一帧内本来也只画一次。
    */
   let repaintPending = false;
-  function nudgeRepaint() {
+function nudgeRepaint() {
     if (repaintPending || win.isDestroyed()) return;
     repaintPending = true;
     setTimeout(() => {
@@ -332,8 +332,22 @@ webPreferences: {
       } catch (err) {
         // 老内核没这 API：静默回落（那时的行为就是今天的样子，不是新问题）
       }
-    }, 16);
+}, 16);
   }
+
+  /**
+   * 兼底：每 400ms 一次整窗重画（仅当窗可见）。
+   * 为什么要兼底：命中区上报会把**同一块矩形**去重（SHAPE_EPS 量化），宠物在原地
+   * 眨眼/播待机动画时压根不上报 —— 可那些帧一样会把窗里的像素重新画一遍，
+   * 周围那片区域该擦还是得擦。400ms 一次 = 620×560 约 1.4MB 的拷贝，可以忽略。
+   * ponytail: 若证实「只有内容变脏时才需要」就把这个兼底去掉（拿事件驱动换这点开销）；
+   *   升级路径 = 主进程统计 invalidate 实际次数，超过 ~10/s 就收掉计时器。
+   */
+  const REPINT_TICK_MS = Number(process.env.PI_PET_REPAINT_MS) || 400;
+  setInterval(() => {
+    if (win.isDestroyed() || !win.isVisible()) return;
+    nudgeRepaint();
+  }, REPINT_TICK_MS).unref?.();
   /** SetWindowRgn 是重活：改一次形状就要让 DWM 把这扇窗这块地方重新合成一遍
    *  （也就是又一次跟别的窗口抢合成预算）。所以两头都掐着：
    *    ① 量化到 2px —— 亚像素抖动不重画（不动的宠物不该一直重画）；
@@ -400,10 +414,16 @@ win.setShape(list);
   }
 
   // 渲染进程：新的命中包围盒（窗口坐标）
-  ipcMain.on("pet:hit-region", (_event, rects) => {
+ipcMain.on("pet:hit-region", (_event, rects) => {
     if (process.env.PI_PET_DEBUG === "1") {
       console.error(`[pi-dsh-pet] hit-region 收到 ${JSON.stringify(rects)}（shape=${SHAPE_OK} broken=${shapeBroken}）`);
     }
+    // ⚠️ 宠物在窗**里面**动（漫游/拖/冒气泡，每帧都报）时，窗外没变、形状多半也没变，
+    //   但窗里宠物原来占的那块像素刚变成透明 —— 那片区域必须被重画，
+    //   否则屏幕上留着的是**窗移动前下面那些软件的画面**（本体照常动，周围的桌面被锁住，
+    //   鼠标点一下才刷新）。命中区上报就是「窗里内容动了」的最廉价信号。
+    // 16ms 内合并（见 nudgeRepaint），漫游 20fps 不会变成 20 次全窗填充。
+    nudgeRepaint();
 if (!SHAPE_OK || shapeBroken || win.isDestroyed()) return;
     // ⚠️ 夹进窗内（§9.21）：不能只 Math.max(0, x) —— 那样只是把左上角推回 0 而宽高不变，
     //   整块形状会「平移」到窗角上（宠物贴边/漫游出界时报的就是这种），透明区就点不动了。
