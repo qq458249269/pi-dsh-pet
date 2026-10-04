@@ -293,10 +293,37 @@ webPreferences: {
     resyncShape();
   });
 
-  // ---- 命中区：把整窗的鼠标命中裁到宠物身上 ----
+// ---- 命中区：把整窗的鼠标命中裁到宠物身上 ----
   const SHAPE_OK = typeof win.setShape === "function" && process.env.PI_PET_NO_SHAPE !== "1";
   let shapeBroken = false;
   let gotRegion = false;
+
+  /**
+   * 改完窗/形状后叫它整窗重画一次（`webContents.invalidate()` = 排一次全窗重绘）。
+   *
+   * 症状：窗两侧空出来的透明长方形**锁住不重画**，屏幕上留着上一段动画的旧画面，
+   *   鼠标点一下或把窗激活到前台才恢复。病根与 backgroundThrottling 无关（那个已关）：
+   *   改形状/改尺寸只让 Win32 那边的窗口区域变，**Chromium 不认为内容脏**，
+   *   于是没有重绘指令 → 空区新内容没机会写上去，旧像素就一直停着。
+   *
+   * 为什么要合并（repaintPending）：漫游时形状 20fps、搬窗也是每次都来，
+   *   每次都排一次全窗重绘 = 每帧整窗填充，白白跟别的窗口抢合成预算。
+   *   16ms 内的请求攒成一次就够 —— 反正这一帧内本来也只画一次。
+   */
+  let repaintPending = false;
+  function nudgeRepaint() {
+    if (repaintPending || win.isDestroyed()) return;
+    repaintPending = true;
+    setTimeout(() => {
+      repaintPending = false;
+      if (win.isDestroyed()) return;
+      try {
+        win.webContents.invalidate();
+      } catch (err) {
+        // 老内核没这 API：静默回落（那时的行为就是今天的样子，不是新问题）
+      }
+    }, 16);
+  }
   /** SetWindowRgn 是重活：改一次形状就要让 DWM 把这扇窗这块地方重新合成一遍
    *  （也就是又一次跟别的窗口抢合成预算）。所以两头都掐着：
    *    ① 量化到 2px —— 亚像素抖动不重画（不动的宠物不该一直重画）；
@@ -336,10 +363,11 @@ function applyShape(list) {
     //   而上面已经记下 shapeKey，同一份形状会被去重掉，永远补不回来。
     if (shapeApplied && !win.isVisible()) return;
 try {
-      win.setShape(list);
+win.setShape(list);
       shapeAt = Date.now();
       shapeApplied = true;
       lastShape = list; // 窗变尺寸后要重放的就是它（见 resyncShape）
+      nudgeRepaint(); // 形状变了 → 整窗重画一次，别让空出来的侧边锁住（见 nudgeRepaint）
     } catch (err) {
       shapeBroken = true;
       console.error("[pi-dsh-pet] setShape 失败，退回开关式穿透：", err && err.message);
@@ -492,9 +520,10 @@ function applyBounds(width, height) {
       console.error(`[pi-dsh-pet] 落点算不出来（${bounds.x},${bounds.y}），放弃改窗`);
       return false;
     }
-    try {
+try {
       win.setBounds(bounds);
       rememberPos(at);
+      nudgeRepaint(); // 尺寸变了 → 空出来的那圈必须重画（见 nudgeRepaint）
     } catch (err) {
       console.error("[pi-dsh-pet] setBounds 失败：", err && err.message);
       return false;
@@ -580,8 +609,9 @@ const cs = { w: num(windowDrag.w, 0), h: num(windowDrag.h, 0) };
     // 不丢也不会错，但是白白的 SetWindowPos + DWM 重合成，而且在边上会跟系统的
     // 窗口动画抢位置 —— 看上去就是拖着宠物在屏幕边上「哆嗦」。
     if (pos.x === stagePos.x && pos.y === stagePos.y) return;
-    win.setPosition(pos.x, pos.y);
+win.setPosition(pos.x, pos.y);
     rememberPos(pos);
+    nudgeRepaint(); // 搬完家重画一次（见 nudgeRepaint）
   });
 
   // 松手：记下窗的落点，下次启动还在这儿
