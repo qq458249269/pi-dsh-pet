@@ -1007,6 +1007,9 @@ check("兼底重画可调（PI_PET_REPAINT_MS）", /PI_PET_REPAINT_MS/.test(petM
 check("TOPMODE 1 = alwaysOnTop 走 screen-saver 层级", /TOPMODE === 1[\s\S]{0,200}setAlwaysOnTop\(true, "screen-saver"\)/.test(petMain));
 check("TOPMODE 2 = 不置顶，定时 showInactive 顶上来", /TOPMODE === 2[\s\S]{0,400}showInactive\(\)/.test(petMain) && /alwaysOnTop: TOPMODE !== 2/.test(petMain));
 check("TOPMODE 3 = 放弃透明，用实底色（最难看但没有透明层留快照）", /transparent: TOPMODE !== 3/.test(petMain) && /backgroundColor: TOPMODE === 3 \? "#0e0e12"/.test(petMain));
+// 实测定案：PI_PET_NO_SHAPE=1 不锁 ⇒ 病根是 SetWindowRgn（窗不再覆盖那块屏，DWM 不重合成）
+check("形状变小时先盖满整窗再收回（逼 DWM 重合成让出的像素）", /prevShapeArea > area\(list\)/.test(petMain) && /win\.setShape\(\[\{ x: 0, y: 0, width: b\.width, height: b\.height \}\]\)/.test(petMain));
+check("兼底可关（PI_PET_SHAPE_DIRTY=0 做 A/B）", /SHAPE_DIRTY_FIX = process\.env\.PI_PET_SHAPE_DIRTY !== "0"/.test(petMain));
 // 打包必须走 scripts/build.cjs：它把 electron / electron-builder 工具链的下载源
 // 指到国内镜像（GitHub 直连 ETIMEDOUT，build 会整片红）。npm 脚本与 CI 都得用它。
 const pkgJson = JSON.parse(readFileSync(join(ROOT, "package.json"), "utf8"));

@@ -376,7 +376,7 @@ function nudgeRepaint() {
     if (win.isDestroyed() || !win.isVisible()) return;
     nudgeRepaint();
   }, REPINT_TICK_MS).unref?.();
-  /** SetWindowRgn 是重活：改一次形状就要让 DWM 把这扇窗这块地方重新合成一遍
+/** SetWindowRgn 是重活：改一次形状就要让 DWM 把这扇窗这块地方重新合成一遍
    *  （也就是又一次跟别的窗口抢合成预算）。所以两头都掐着：
    *    ① 量化到 2px —— 亚像素抖动不重画（不动的宠物不该一直重画）；
    *    ② 两次之间至少隔 SHAPE_GAP_MS —— 漫游时渲染进程 20fps 的上报不能变成
@@ -385,6 +385,10 @@ function nudgeRepaint() {
   const SHAPE_GAP_MS = 60;
 let shapeKey = "";
   let lastShape = null;
+  /** 上一次形状的总面积（px²）：变小 = 这次让出了像素，得先盖满整窗逼 DWM 重合成。 */
+  let prevShapeArea = 0;
+  // PI_PET_SHAPE_DIRTY=0 可关掉这个兼底（只用来 A/B：确认锁帧确实来自 SetWindowRgn）
+  const SHAPE_DIRTY_FIX = process.env.PI_PET_SHAPE_DIRTY !== "0";
   /**
    * 窗变过之后把上一次的形状原样重裁一遍（窗变尺寸时形状本身不用改，
    *   但 Win32 那边的窗口区域得重新盖到新窗上）。
@@ -415,7 +419,25 @@ function applyShape(list) {
     //   而上面已经记下 shapeKey，同一份形状会被去重掉，永远补不回来。
     if (shapeApplied && !win.isVisible()) return;
 try {
-win.setShape(list);
+// ⚠️⚠️ 让出像素时必须**先把整窗盖满、再收回去**（已实测：病根就在 SetWindowRgn）。
+      //   症状：宠物走过的地方，屏幕上留着**其他软件当时的画面**（宠物本体照常动，
+      //   周围一圈被锁住，鼠标点一下才恢复）。PI_PET_NO_SHAPE=1 时完全不锁 —— 定案。
+      //   原因：窗口区域一旦收窄，窗就**不再覆盖**那块屏幕，但 Win32 不会因为
+      //   「这块不再被覆盖」去让 DWM 重新合成底下的窗口 —— 没人给它脏区，
+      //   合成缓存里就留着上一次的内容。而 invalidate() 对这片无用（它已经不属于本窗）。
+      //   先盖满整窗（SetWindowRgn 变更本身会把整窗标脏）再收回去，那片就重新合成了。
+      //   只在「面积变小」时多做一次：漫游中形状基本只增不减，别白付两次 SetWindowRgn。
+      const area = (list) => list.reduce((s, r) => s + Math.max(0, r.width) * Math.max(0, r.height), 0);
+      if (SHAPE_DIRTY_FIX && prevShapeArea > area(list)) {
+        try {
+          const b = win.getBounds();
+          win.setShape([{ x: 0, y: 0, width: b.width, height: b.height }]);
+        } catch {
+          /* 拿不到 bounds 就跳过这一步，退回原来的单次设置 */
+        }
+      }
+      prevShapeArea = area(list);
+      win.setShape(list);
       shapeAt = Date.now();
       shapeApplied = true;
       lastShape = list; // 窗变尺寸后要重放的就是它（见 resyncShape）
