@@ -395,6 +395,8 @@ function nudgeRepaint() {
   const SHAPE_GAP_MS = 60;
 let shapeKey = "";
   let lastShape = null;
+  /** 最近一次命中矩形（窗坐标）：形状模式给SetWindowRgn 用，开关式模式给光标判定用。 */
+  let hitRects = [];
   /** 上一次形状的总面积（px²）：变小 = 这次让出了像素，得先盖满整窗逼 DWM 重合成。 */
   let prevShapeArea = 0;
   // PI_PET_SHAPE_DIRTY=0 可关掉这个兼底（只用来 A/B：确认锁帧确实来自 SetWindowRgn）
@@ -483,8 +485,8 @@ ipcMain.on("pet:hit-region", (_event, rects) => {
     //   否则屏幕上留着的是**窗移动前下面那些软件的画面**（本体照常动，周围的桌面被锁住，
     //   鼠标点一下才刷新）。命中区上报就是「窗里内容动了」的最廉价信号。
     // 16ms 内合并（见 nudgeRepaint），漫游 20fps 不会变成 20 次全窗填充。
-    nudgeRepaint();
-if (!SHAPE_OK || shapeBroken || win.isDestroyed()) return;
+nudgeRepaint();
+    if (win.isDestroyed()) return;
     // ⚠️ 夹进窗内（§9.21）：不能只 Math.max(0, x) —— 那样只是把左上角推回 0 而宽高不变，
     //   整块形状会「平移」到窗角上（宠物贴边/漫游出界时报的就是这种），透明区就点不动了。
     let winW = 0;
@@ -512,8 +514,11 @@ if (!SHAPE_OK || shapeBroken || win.isDestroyed()) return;
         height: Math.max(SHAPE_EPS, Math.round(r.height / SHAPE_EPS) * SHAPE_EPS),
       }))
       .filter((r) => r.width > 0 && r.height > 0);
-    if (!list.length) return; // 没算出来就保持上一次，别把窗弄没了
+if (!list.length) return; // 没算出来就保持上一次，别把窗弄没了
     gotRegion = true;
+    // 开关式穿透下也要留着这份矩形：主进程要靠它判光标在不在宠物上（见 pollHover）
+    hitRects = list;
+    if (!SHAPE_OK || shapeBroken) return;
     const key = list.map((r) => `${r.x},${r.y},${r.width},${r.height}`).join("|");
     if (key === shapeKey) return; // 与上一次量化后一样：省掉一次跨进程 + 一次 SetWindowRgn
     shapeKey = key;
@@ -538,12 +543,45 @@ if (!SHAPE_OK || shapeBroken || win.isDestroyed()) return;
     }, wait);
   });
 
-  // 兜底：没有 setShape（或它坏了）时，渲染进程仍用老协议开关穿透
-  ipcMain.on("pet:passthrough", (_event, on) => {
+// 兜底：没有 setShape（或它坏了）时，渲染进程仍用老协议开关穿透
+ipcMain.on("pet:passthrough", (_event, on) => {
     if ((SHAPE_OK && !shapeBroken) || win.isDestroyed()) return; // 命中由 shape 管，别再开关
-    if (on) win.setIgnoreMouseEvents(true, { forward: true });
-    else win.setIgnoreMouseEvents(false);
+    // 开关式模式下**不再听渲染进程的**（它靠转发过来的鼠标事件判定，穿透开着时收不到，
+    // 实测穿透永远关不掉 → 拖不动/右键失效）。改由 pollHover 自己判，见下。
+    void on;
   });
+
+  /**
+   * 开关式穿透的**主进程侧**判定：每 50ms 看一次光标在不在宠物/气泡的矩形里。
+   *
+   * ⚠️ 为什么不用渲染进程报的 passthrough（实测不能用）：穿透开着的时候窗收不到
+   *   鼠标事件，只有 { forward: true } 会转发一部分 move 消息 —— 实测不可靠，
+   *   转发过来的事件到不了渲染进程的命中判定，于是**穿透永远关不掉**：
+   *   宠物压在别的窗口上时拖不动、右键也弹不出来（用户口径）。
+   *   主进程直接读屏幕光标位置，自己和矩形比，不依赖任何转发。
+   *
+   * 代价：最多 50ms 的感知延迟（光标进/出宠物范围）。人眼察觉不到。
+   * ponytail: 若要零延迟就改回 setShape 精确命中区 —— 代价是 Windows 上那片锁帧。
+   */
+  const HOVER_POLL_MS = Number(process.env.PI_PET_HOVER_POLL_MS) || 50;
+  let hovering = false;
+  if (!SHAPE_OK) {
+    setInterval(() => {
+      if (win.isDestroyed() || !win.isVisible() || !hitRects.length) return;
+      const c = screen.getCursorScreenPoint();
+      const p = currentPos();
+      const inside = hitRects.some(
+        (r) => c.x >= p.x + r.x && c.x < p.x + r.x + r.width && c.y >= p.y + r.y && c.y < p.y + r.y + r.height,
+      );
+      if (inside === hovering) return;
+      hovering = inside;
+      try {
+        win.setIgnoreMouseEvents(!inside, { forward: true });
+      } catch {
+        /* 窗正在关，忽略 */
+      }
+    }, HOVER_POLL_MS).unref?.();
+  }
 
   // ---- 舞台窗：尺寸 / 搬动 / 收工 ----
   //
