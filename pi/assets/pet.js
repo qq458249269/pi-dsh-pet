@@ -81,13 +81,35 @@ var HIT_BOX = { x0: 200, y0: 50, x1: 440, y1: 335 };
 
   /** 量一段动画要取多少帧（640 画布坐标下的扫描分辨率是 320×180 ⇒ 2px 一格）。
       32 帧均匀铺满整段 ≈ 1~2s 一段动画，够快也不至于把起动卡住。 */
-  var INK_FRAMES = 32;
+var INK_FRAMES = 32;
   /** 采样漏掉的余量（640 画布坐标，size 462 时 ≈6px）：只给**形状**用（collectHitRects）——
       实测 32 帧采样比逐帧真值少 4~11px（思考气泡真值右边界 551，采样 547）。 */
   var INK_MARGIN = 8;
-  var INK_QUEUE = [];
+var INK_QUEUE = [];
   var INK_PENDING = {};
   var INK_BUSY = false;
+  /** 扫描用的全局唯一 video+canvas（懒建）。理由见 scanInkBox 里的注释。 */
+  var INK_STAGE = null;
+
+  function ensureScanStage() {
+    if (INK_STAGE) return INK_STAGE;
+    var video = document.createElement("video");
+    video.muted = true;
+    video.playsInline = true;
+    video.preload = "auto";
+    // ⚠️⚠️ 必须挂进 DOM：不挂的 <video> 不走渲染管线，seek 完了 drawImage 拿到的还是**首帧**
+    //   （实测：量出来 15 段全是 202..436 的「只有角色」的框 = 整段都画成了第 0 帧，
+    //   后半段才长出来的气泡一个没量到，而看着还「量过了」—— 最坏的一种错）。
+    //   1px + opacity 0：不占地方、不被点到，也看不见。挂着不动，别扫完就拔。
+    video.style.cssText =
+      "position:fixed;left:0;top:0;width:1px;height:1px;opacity:0;pointer-events:none";
+    var canvas = document.createElement("canvas");
+    canvas.width = 320;
+    canvas.height = 180;
+    INK_STAGE = { video: video, canvas: canvas, g: canvas.getContext("2d", { willReadFrequently: true }) };
+    (document.body || document.documentElement).appendChild(video);
+    return INK_STAGE;
+  }
 
   function rememberInkBox(name, box) {
     INK_BOXES[name] = [box.x0, box.x1, box.y0, box.y1];
@@ -126,39 +148,43 @@ var HIT_BOX = { x0: 200, y0: 50, x1: 440, y1: 335 };
    *   Chromium 会按「看不见」节流它的媒体播放（实测：这种窗里 play() 根本不动，seeked 照常来）。
    * ⚠️ <video> 必须挂在 DOM 上：不挂的 video 不走渲染管线，drawImage 拿到的还是首帧。
    */
-  function scanInkBox(name, src) {
+function scanInkBox(name, src) {
     return new Promise(function (resolve) {
-      var video = document.createElement("video");
-      video.muted = true;
-      video.playsInline = true;
-      video.preload = "auto";
-      var canvas = document.createElement("canvas");
-      canvas.width = 320;
-      canvas.height = 180;
-      var g = canvas.getContext("2d", { willReadFrequently: true });
+      // ⚠️⚠️ **全局只有一个**扫描 video + canvas，全程复用，扫完不回收。
+      //   每段动画现建现毁一个 <video>（load + removeChild）看着「干净」，实际是
+      //   解码器/GPU 纹理反复重建：全量扫 91 段 → GPU 进程 94MB 涨到 **5090MB**，
+      //   扫完不降（实测），渲染进程也卡在 600MB 不回落。扫描是串行的
+      //   （INK_BUSY 一把锁），所以一个就够；上一个动画扫完了直接换 src 接着量。
+      var sc = ensureScanStage();
+      var video = sc.video;
+      var canvas = sc.canvas;
+      var g = sc.g;
       var minX = 1e9, maxX = -1, minY = 1e9, maxY = -1, i = 0;
       var step = 1 / 24; // loadedmetadata 后改成「时长 / 帧数」：必须铺满整段
       var ended = false;
-      var finish = function (box) {
+var finish = function (box) {
         if (ended) return;
         ended = true;
         clearTimeout(guard);
-        if (video.parentNode) video.parentNode.removeChild(video);
-        video.removeAttribute("src");
+        if (finish.off) finish.off();
         try { URL.revokeObjectURL(src); } catch (e) { /* 回收失败只是内存 */ }
-        try { video.load(); } catch (e) { /* 已经丢了，无所谓 */ }
+        // ⚠️ 别在这里 load()/removeChild()：下一个动画还要用同一个元素。
+        //   只把画面擦干净（否则上一段的残帧会混进这一段的并集框里）。
+        try { g.clearRect(0, 0, canvas.width, canvas.height); } catch (e) { /* ignore */ }
         resolve(box);
       };
-      var guard = setTimeout(function () { finish(null); }, 20000); // 坏文件别把队列卡死
-      video.addEventListener("error", function () { finish(null); });
-      video.addEventListener("loadedmetadata", function () {
+var guard = setTimeout(function () { finish(null); }, 20000); // 坏文件别把队列卡死
+      // ⚠️ 监听器必须成对摘掉：元素是全局复用的，留着就会堆一串旧闭包，
+      //   旧闭包拿着旧的 resolve/minX/maxX（下一段的 seeked 会同时喂给它们）。
+      var onError = function () { finish(null); };
+      var onMeta = function () {
         // ⚠️ 步长必须按**整段时长**摊：固定 1/24 只看得到头 1.3s，而这些动画的气泡/道具
         //   是后半段才长出来的（实测「深度思考碎碎念」整段 10s，头 1.3s 只有角色 ——
         //   量出来 206..434，看着「量过了」其实把气泡整段漏了）。
-        step = Math.max(video.duration / INK_FRAMES, 1 / 120);
+step = Math.max(video.duration / INK_FRAMES, 1 / 120);
         video.currentTime = 0;
-      });
-      video.addEventListener("seeked", function () {
+      };
+      var onSeeked = function () {
         if (ended) return;
         try {
           g.clearRect(0, 0, 320, 180);
@@ -193,17 +219,19 @@ var HIT_BOX = { x0: 200, y0: 50, x1: 440, y1: 335 };
           });
           return;
         }
-        // 同帧 seek 不会再触发一次 seeked（会死等），所以每次都要往前挪一格
+// 同帧 seek 不会再触发一次 seeked（会死等），所以每次都要往前挪一格
         video.currentTime = Math.min(video.duration, video.currentTime + step);
-      });
+      };
+      video.addEventListener("error", onError);
+      video.addEventListener("loadedmetadata", onMeta);
+      video.addEventListener("seeked", onSeeked);
+      finish.off = function () {
+        video.removeEventListener("error", onError);
+        video.removeEventListener("loadedmetadata", onMeta);
+        video.removeEventListener("seeked", onSeeked);
+      };
+video.pause();
       video.src = src;
-      // ⚠️⚠️ 必须挂进 DOM：不挂的 <video> 不走渲染管线，seek 完了 drawImage 拿到的还是**首帧**
-      //   （实测：量出来 15 段全是 202..436 的「只有角色」的框 = 整段都画成了第 0 帧，
-      //   后半段才长出来的气泡一个没量到，而看着还「量过了」—— 最坏的一种错）。
-      //   1px + opacity 0：不占地方、不被点到，也看不见。
-      video.style.cssText =
-        "position:fixed;left:0;top:0;width:1px;height:1px;opacity:0;pointer-events:none";
-      (document.body || document.documentElement).appendChild(video);
     });
   }
 

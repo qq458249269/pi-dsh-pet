@@ -936,7 +936,12 @@ check("可见框是运行时自测的（没有 ink-boxes.js 那种硬编表）",
 check("扫描的 webm 先 fetch 成 blob（直连的 video 根本不可 seek）", /fetch\(url\)/.test(petSrc) && /URL\.createObjectURL\(blob\)/.test(petSrc) && /URL\.revokeObjectURL\(src\)/.test(petSrc));
 check("自测走 seek（不是 play）——透明窗里播放被 Chromium 节流", /addEventListener\("seeked"/.test(petSrc) && /video\.currentTime = Math\.min\(video\.duration, video\.currentTime \+ step\)/.test(petSrc) && !/measureInkBox[\s\S]{0,900}video\.play\(/.test(petSrc));
 check("扫描均匀铺满整段（固定步长只看得到头 1.3s，后半段的气泡整段漏掉）", /step = Math\.max\(video\.duration \/ INK_FRAMES, 1 \/ 120\)/.test(petSrc));
-check("扫描用的 video 必须挂在 DOM 上（不挂的 video 拿到的还是首帧）", /appendChild\(video\)/.test(petSrc) && /width:1px;height:1px;opacity:0;pointer-events:none/.test(petSrc) && /if \(video\.parentNode\) video\.parentNode\.removeChild\(video\)/.test(petSrc));
+check("扫描用的 video 必须挂在 DOM 上（不挂的 video 拿到的还是首帧）", /appendChild\(video\)/.test(petSrc) && /width:1px;height:1px;opacity:0;pointer-events:none/.test(petSrc));
+// ⚠️⚠️ 回归护栏：扫描舞台**全局复用**，扫完不许拆。
+//   每段动画现建现毁一个 <video>（load + removeChild）看着干净，实际是解码器/GPU 纹理
+//   反复重建：全量扫 91 段 → GPU 进程 94MB 涨到 **5090MB**，扫完不降（实测）。
+check("扫描 video 全局复用一个、扫完不回收（拆了就是 GPU 进程泄漏 5GB）", /var INK_STAGE = null/.test(petSrc) && /function ensureScanStage\(\)/.test(petSrc) && /function scanInkBox\(name, src\)[\s\S]{0,2000}ensureScanStage\(\)/.test(petSrc) && !/function scanInkBox\(name, src\)[\s\S]{0,2000}removeChild\(video\)/.test(petSrc) && !/function scanInkBox\(name, src\)[\s\S]{0,2000}video\.load\(\)/.test(petSrc));
+check("复用的扫描元素必须成对摘监听器（旧闭包会吃掉下一段的 seeked）", /removeEventListener\("seeked", onSeeked\)/.test(petSrc) && /removeEventListener\("loadedmetadata", onMeta\)/.test(petSrc) && /removeEventListener\("error", onError\)/.test(petSrc));
 check("采样余量只加在形状上（烘进缓存会渗进几何，待机贴边白差 9px）", /var mg = INK_MARGIN \* kx/.test(petSrc) && /var INK_MARGIN = 8/.test(petSrc) && /x0: minX \* 2,\s*x1: maxX \* 2 \+ 2/.test(petSrc));
 check("起动就排上扫描（状态 override 最优先）+ 正在播的插队 + 量完重夹位置重报形状", /prewarmInkBoxes\(\)/.test(petSrc) && /function prewarmInkBoxes\(\)/.test(petSrc) && /EVENT_ANIM_MAP\[k\]\); \}/.test(petSrc) && /queueInkMeasure\(next\)/.test(petSrc) && /INK_QUEUE\.unshift\(name\)/.test(petSrc) && /function onInkBoxReady[\s\S]{0,400}p\.refitInk\(\)/.test(petSrc) && /this\.refitInk = function \(\)[\s\S]{0,600}clampPos\(r\.left \+ inkOff, r\.top\)/.test(petSrc));
 check("扫描不拖累正常播放（一次一段 + 段间让开 + 超时兜底不死锁队列）", /if \(INK_BUSY\) return/.test(petSrc) && /setTimeout\(drainInkQueue, 200\)/.test(petSrc) && /setTimeout\(function \(\) \{ finish\(null\); \}, 20000\)/.test(petSrc));
