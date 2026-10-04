@@ -1824,6 +1824,28 @@ var buffered = function () {
       self.dwellTimer = null;
     };
 
+    /**
+     * 兜底看门狗（init 里 1s 跳一次，全局一个定时器）：**屏幕上没有在动的东西就把待机接回来。**
+     * 链子断一次就再也接不上 —— 前一段放完但没人接手、switchTo 被门禁排队后队列被
+     * drag/override 丢弃、pending 加载失败没换成 —— 症状是宠物**彻底消失**
+     *（front 停在最后一帧或干脆空白，之后再也不动）。
+     * 这里 front.ended 且没人接手 ⇒ 强制播一段待机。once 仍是 true：放完照走
+     * handleEnded → 待机停留 → 链子，**不是**永久冻在待机（冻住的话 pet 就再也不演动作了）。
+     * 休眠 / override / 拖拽 / 正在换手 / 正在停留都不算「没人接手」。
+     */
+    this.watchdog = function () {
+      if (self.destroyed || self.asleep || self.currentOverrideAnim) return;
+      if (dragState.active || self.dragging) return;
+      if (self.pending || self.queued || self.dwellTimer) return;
+      var front = self.frontIdx === 0 ? videoA : videoB;
+      if (!front.ended && front.readyState !== 0) return;
+      if (!config.animations.idle.length) return;
+      self.anim = config.animations.idle[0];
+      self.once = true;
+      self.seq++;
+      self.switchTo(self.anim, true, { force: true });
+    };
+
     // ---- Animation chain: pick next ----
     this.pickNext = function () {
       var anims = config.animations;
@@ -2724,6 +2746,11 @@ config.pets.forEach(function (cfg, i) {
 
     // Start all pets
     pets.forEach(function (pet) { pet.init(); });
+
+    // 兜底：链子断一次宠物就消失（见 PetCard.watchdog）。1s 一跳，闲时零成本（只读 ended）。
+    setInterval(function () {
+      for (var i = 0; i < pets.length; i++) pets[i].watchdog();
+    }, 1000);
 
     // ---- 睡 / 醒 的另外两个开关（见 4.7） ----
     //
