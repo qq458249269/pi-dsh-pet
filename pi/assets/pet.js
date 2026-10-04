@@ -374,6 +374,35 @@ idleDwellMs: num("idleDwellMs", TIMING_DEFAULT.idleDwellMs),
     };
   }
 
+/**
+   * 聊天/碎碎念（config.jsonc 的 chatter 段，§9.33）。
+   *
+   * **没写就闭嘴**（返回 null），不在代码里藏第二份默认文案：文案只有用户手里那份，
+   * 删掉整段就等于关掉这个功能，写坏了也只是没人碎碎念（绝不抛错把宠物搞没）。
+   */
+  function readChat(raw) {
+    var c = raw && raw.chatter;
+    if (!c || typeof c !== "object") return null;
+    function list(v) {
+      if (!Array.isArray(v)) return [];
+      return v.filter(function (s) { return typeof s === "string" && s.trim() !== ""; });
+    }
+    var idle = list(c.idle);
+    var fallback = list(c.fallback);
+    var replies = {};
+    if (c.replies && typeof c.replies === "object") {
+      Object.keys(c.replies).forEach(function (k) {
+        var v = list(c.replies[k]);
+        if (k && v.length) replies[k] = v;
+      });
+    }
+    var sec = Array.isArray(c.idleSec) ? c.idleSec.map(Number) : [];
+    var lo = isFinite(sec[0]) && sec[0] > 0 ? sec[0] : 90;
+    var hi = isFinite(sec[1]) && sec[1] >= lo ? sec[1] : lo * 2;
+    if (!idle.length && !fallback.length && !Object.keys(replies).length) return null;
+    return { enabled: c.enabled !== false, idleSec: [lo, hi], idle: idle, fallback: fallback, replies: replies };
+  }
+
   /** 窗里到处都要问这两个数（config 可能还没加载完，所以都带兜底） */
   function minPlayMs() {
     return config && config.timing ? config.timing.minPlayMs : TIMING_DEFAULT.minPlayMs;
@@ -457,7 +486,7 @@ idleDwellMs: num("idleDwellMs", TIMING_DEFAULT.idleDwellMs),
       if (!isFinite(v) || v < 0) throw new Error("animationWeights." + k + " invalid");
     });
 
-    return { pets: pets, animations: a, animationWeights: w, timing: readTiming(raw.timing) };
+return { pets: pets, animations: a, animationWeights: w, timing: readTiming(raw.timing), chatter: readChat(raw) };
   }
 
   // ========================================================================
@@ -557,24 +586,29 @@ idleDwellMs: num("idleDwellMs", TIMING_DEFAULT.idleDwellMs),
 var HIT_PAD_X = 10;
   var HIT_PAD_TOP = 12;
   var HIT_PAD_BOTTOM = 10;
-  /** 气泡行高（13px × 1.45 ≈ 18.85），算「头顶能塞几行」用（见 clampBubble） */
-  var BUBBLE_LINE_H = 18.85;
-  /** 「说点什么…」输入框自己占的高度（input 30 + 下边距 6 + 余量） */
-  var BUBBLE_INPUT_H = 44;
+/** 气泡行高（13px × 1.4 ≈ 18.2），算「头顶能塞几行/几条」用（见 clampBubble / fitCount） */
+  var BUBBLE_LINE_H = 18.2;
+  /** 一条气泡最少占的高度：一行的字 + 上下内边距（pet.css 的 padding 5 + border 2） */
+  var BUBBLE_MIN_H = 30;
   /** 气泡头顶要让出来的：外边距 10 + 贴边 8。
       （尾巴那 6px 是画在气泡框**下面**的，正好落在 10px 的外边距里，不占头顶空间；
         早先按 36 算，白白少给一行 —— 见 §9.21 的实测） */
 var BUBBLE_CHROME_H = 18;
 /** 气泡与容器之间的外边距（pet.css 的 margin-bottom，恒在头顶就是这一条）。
       算「无偏移时气泡在哪」时必须算上它，忘了就恒差 10px（实测偏移差 10）。 */
-  var BUBBLE_GAP = 10;
+var BUBBLE_GAP = 10;
+/** 气泡之间（以及输入行）的间隙，clampBubble 分头顶空间时要用（§9.34） */
+  var BUBBLE_GAP_PX = 4;
+  /** 头顶最多同时泡几条（§9.34）。**上限**；真能留几条由 fitCount() 按头顶实测空间算
+   *  （贴上边、窗口小的时候自动降），超出就把最老的收掉。 */
+  var BUBBLE_MAX = 5;
   /**
    * 舞台窗的留白（§9.24）：窗 = 宠物 + 四边 padding。
    *
    * 配置里的 marginX/marginY 当**下限**用：比 padding 小的抬到 padding。理由：
    *   ① 头顶那截不是装饰，是气泡的舞台（150 = 6 行字 113 + 贴边 18，实测）；
    *   ② 左右那截只当「动画离窗边的余量」（24px）—— 宽气泡**不再**靠它，
-   *      窗宽改成**跟着动画走**（下面 stageSize），气泡封顶 = min(窗宽-16, BUBBLE_W_MAX)。
+   *      窗宽改成**跟着动画走**（下面 stageSize），气泡宽度 = min(窗宽-16, BUBBLE_W_MAX)。
    *   ③ 但这截窗里除了宠物和气泡全是透明的 —— 它不能挡住别的软件，
    *      所以窗可以大、形状必须小（见 pet-electron.cjs 的 setShape）。
    *
@@ -690,8 +724,10 @@ var BUBBLE_CHROME_H = 18;
       y: Math.round(loY > hiY ? loY : Math.min(Math.max(want.y, loY), hiY)),
     };
   }
-  /** 气泡封顶：再宽也不超过这个数（超宽气泡会横跨半个屏，看着不像「宠物说话」） */
-  var BUBBLE_W_MAX = 820;
+  /** 气泡**定宽**（§9.34）：宽度不再跟文案走 → 折行稳定 → 位置不动、不会自己乱跳。
+   *  BUBBLE_W_MAX 是上限（再宽就横跨半个屏，不像「宠物说话」），BUBBLE_W_MIN 防窄窗里夹成一条。 */
+  var BUBBLE_W_MAX = 340;
+  var BUBBLE_W_MIN = 220;
   /**
    * 贴上边的宠物在窗里离窗顶多远：至少 STAGE_PAD_TOP。
    * applyPosition（摆位）与 reportWindowSize（报窗大小）必须用**同一个**算法，
@@ -1381,90 +1417,178 @@ e.preventDefault();
       });
     });
 
-    // ---- Speech bubble + manual input ----
-    // The bubble hangs above the pet and is reused for every message (state text and
-    // anything a human types). It is NOT part of the v1 wire format: the host sends
-    // {"type":"bubble",...} and we only render it, so an old window ignores the frame.
-    var bubble = document.createElement("div");
-    bubble.className = "pet-bubble";
-    bubble.style.display = "none";
-    // 文案单独占一个节点：直接 bubble.textContent = 文案 会把同级的输入框节点一起删掉
-    // （之后 askSay 拿到的就是个脱离 DOM 的 input，「说点什么…」框永远出不来）。
-    var bubbleText = document.createElement("span");
-    bubbleText.className = "pet-bubble-text";
-    bubble.appendChild(bubbleText);
-    container.appendChild(bubble);
-    self.bubbleEl = bubble; // 命中区要把头顶的气泡算进去
+// ---- 气泡栈 + 手动输入（§9.34）----
+    // 状态文案、人打的字、自己冒的碎碎念全都走这里。它**不是** v1 线格式的一部分：
+    // 宿主发 {"type":"bubble",...}，窗只负责渲染，老窗照旧忽略这帧。
+    //
+    // ⚠️ 改成「一摞」而不是「一个复用的框」：每条消息一个 .pet-bubble，新的一条在**下面**，
+    //   老的被顶上去（看着就是滚动），同时最多留 BUBBLE_MAX(3) 条 —— 再多就把最老的收摊。
+    //   宽度**定死**（--bubble-w，见 applyBubbleWidth）：以前是 max-content，气泡宽度跟着
+    //   文案变 → 折行变 → 夹取算出的偏移变 → 每来一句话气泡就横向跳一下（用户口径
+    //   「气泡框丑、位置乱动」）。定宽之后几何只跟宠物位置有关，它钉在头顶不动。
+    var stack = document.createElement("div");
+    stack.className = "pet-bubble-stack";
+    container.appendChild(stack);
+    self.bubbleEl = stack; // 命中区要把整摞气泡算进去（collectHitRects 看它有没有 .show）
+    /** 活着的消息气泡：下标越大越新 = 越靠下。 */
+    var bubbles = [];
 
-    var bubbleTimer = null;
+function stackEmpty() {
+      return bubbles.length === 0 && !inputOpen;
+    }
 
-  /** 气泡贴到屏幕边（宠物拖到边角）时把它挪回来，不然半边在屏幕外 = 看着被切了一半。
-        偏移走 left/bottom（不在 transition 里，改完立刻到位，不会一边补一边抖）。 */
-  self.clampBubble = function () {
-      if (!bubble.classList.contains("show")) return;
-      var r = bubble.getBoundingClientRect();
+    /** 头顶**实测**能放下几条（§9.34）：每条至少「一行字 + 上下内边距 + 间隙」。
+        BUBBLE_MAX 只是上限，真留几条看头顶有多少 —— 贴上边、窗口小的时候自动降。
+        为什么不用「分摊高度」硬撑：分摊下来每条只剩 20px，**字被裁掉半行** ——
+        裁半行比少一条难看得多。 */
+    function fitCount() {
+      var cr = container.getBoundingClientRect();
+      var roomAbove = Math.max(0, Math.round(cr.top - BUBBLE_CHROME_H));
+      if (roomAbove < BUBBLE_LINE_H * 2) return 1; // 头顶不够两行 → 走「盖头顶」那档，不分摊
+      var per = BUBBLE_MIN_H + BUBBLE_GAP_PX;
+      return Math.max(1, Math.min(BUBBLE_MAX, Math.floor((roomAbove + BUBBLE_GAP_PX) / per)));
+    }
+
+    /** 留多了就收最老的（先淡后摘，动画跟 dropBubble 走）。 */
+    function trim() {
+      while (bubbles.length > fitCount()) dropBubble(bubbles[0]);
+    }
+
+    /** 收掉一条：先淡出，动画走完再摘节点（直接 remove 就没有那一下淡出了）。 */
+    function dropBubble(el) {
+      if (!el || el.parentNode !== stack) return;
+      if (el._timer) {
+        clearTimeout(el._timer);
+        el._timer = 0;
+      }
+      var i = bubbles.indexOf(el);
+      if (i >= 0) bubbles.splice(i, 1);
+el.classList.remove("show", "has-tail");
+      el.classList.add("gone");
+      stack.classList.toggle("show", !stackEmpty());
+      setTimeout(function () {
+if (el.parentNode) el.parentNode.removeChild(el);
+        ageAll(); // 少了一条 ⇒ 剩下的都往前排一档（变亮一点）
+        markTail(); // 底下那条收了，尾巴得挪到现在的最后一条上
+        self.clampBubble(); // 条数少了 ⇒ 剩下的能分到更多行，重新分一次高
+        pushHitRegion();
+      }, 200);
+    }
+
+/** 尾巴只长在最底下那一条上（气泡栈看着才像一句话的尾巴，而不是一堆箭头）。
+        ⚠️ 输入框开着时不长尾巴：它就贴在输入框正上方，一支箭插在输入框里比没有更怪。 */
+    function markTail() {
+      var last = bubbles.length - 1;
+      for (var i = 0; i < bubbles.length; i++) {
+        bubbles[i].classList.toggle("has-tail", i === last && !inputOpen);
+      }
+    }
+
+    /** 越老越退后（§9.34）：最新的满亮，老的一条按档位变淡（文字 + 底色一起）。
+        淡的是 `--fade`，不动 opacity —— opacity 是入场动画用的（.show），抢它就闪。 */
+    var AGE_FADE = [1, 0.62, 0.34];
+    function ageAll() {
+      for (var i = 0; i < bubbles.length; i++) {
+        var slot = bubbles.length - 1 - i; // 0 = 最新
+        bubbles[i].style.setProperty("--fade", String(AGE_FADE[slot] == null ? AGE_FADE[AGE_FADE.length - 1] : AGE_FADE[slot]));
+      }
+    }
+
+/** FLIP（§9.34）：新的一条进来，老的会**被顶上去** —— 但布局一变就是瞬间到位，
+        看着是「跳」。所以插入前先量一遍各自的位置，插入后算差多少，用 transform 把它们
+        放回原处，下一帧撤掉 transform ⇒ 浏览器自己补一段上移动画。
+        ⚠️ 只动 transform：动 top/height 没有过渡可补（那是布局，不是动画）。
+⚠️ 曲线与入场分开（cubic-bezier(0.22,0.78,0.26,1)、比入场慢一档）：老的上推是
+        「被挤上去」，该慢而稳；入场是「新冒出来」，该快。
+        时长按**上推多远**缩放：被顶得越高，走得越久（远远的那条一眼能跟上），
+        就近的（差 6px）快快让一下就够 —— 一律 0.26s 的话，近的拖着尾巴、远的赶不上。 */
+    function flipFrom(tops) {
+      for (var i = 0; i < tops.length && i < bubbles.length; i++) {
+        var el = bubbles[i];
+        var dy = tops[i] - el.getBoundingClientRect().top;
+        if (!dy) continue; // 本来就没动（第一条 / 高度没变）—— 别白跑一次过渡
+        // ⚠️ 第一帧必须**禁掉过渡**：否则「拉回原位」这一步自己也会补一段动画，
+        //   两段接起来 = 老的气泡先往下坠一下再上去（实测会闪）。
+        el.style.transition = "none";
+        el.style.transform = "translateY(" + dy + "px)";
+        (function (e2, dist) {
+          // 120ms 起步，每 10px 加 30ms，上封 420ms（顶一整条很高时才封顶）
+          var ms = Math.min(420, 120 + Math.round(Math.abs(dist) * 3));
+          requestAnimationFrame(function () {
+            e2.style.transition = "transform " + (ms / 1000) + "s cubic-bezier(0.22, 0.78, 0.26, 1)";
+            requestAnimationFrame(function () {
+              e2.style.removeProperty("transform");
+              // 过渡走完把内联曲线撤掉（回到样式表的入场曲线）；兜底 ms + 120：
+              // 过渡被打断（又来一条）时不留残值。
+              var done = function () {
+                e2.style.removeProperty("transition");
+              };
+              e2.addEventListener("transitionend", done, { once: true });
+              setTimeout(done, ms + 120);
+            });
+          });
+        })(el, dy);
+      }
+    }
+
+    /** 气泡贴到屏幕边（宠物拖到边角）时把它挪回来，不然半边在屏幕外 = 看着被切了一半。
+        偏移走 left/bottom（不在 transition 里，改完立刻到位，不会一边补一边抖）。
+        ⚠️ 量的是**整摞**（stack），不是单条：位置是这一摞共同的，夹一次就够。 */
+    self.clampBubble = function () {
+      if (stackEmpty()) {
+        stack.style.removeProperty("left");
+        stack.style.removeProperty("bottom");
+        return;
+      }
+      var r = stack.getBoundingClientRect();
       if (!r || !(r.width > 0) || !(r.height > 0)) return;
       var W = window.innerWidth;
       var H = window.innerHeight;
 
       // ---- 高度：按头顶**真实**空间收（§9.21），且**恒在头顶**（§9.27）----
-      // 以前高度交给 CSS 的「最多三行」：宠物贴上边时（corner: top-*,top = marginY）
-      // 头顶只有 marginY 那么点，一行都塞不下，气泡要么顶出窗外被切，要么被挤到宠物身上。
+      // 以前高度交给 CSS 的「最多几行」：宠物贴上边时头顶只有 marginY 那么点，一行都塞不下。
       // 现在按容器顶到窗顶的距离算能塞几行，写 max-height + 行数，两个方向都封死。
       //
       // ⚠️⚠️ 不再「头顶不够就翻到身下」（§9.25 那支实测后删掉了）：身下那侧**永远**不够 ——
       //   脚下只有 bottomPad 60 的余量，翻下去等于把气泡塞进一条 60px 的缝里，字被裁成
-      //   两行还压着脚（用户口径：「脚下气泡被遮挡了 高度不够」）。现在高度只按头顶空间收；
-      //   真的贴到屏幕上边（头顶 0）时**不封高**（§9.28）—— 气泡盖在头顶上，字全都在。
+      //   两行还压着脚。现在高度只按头顶空间收；真的贴到屏幕上边（头顶 0）时**不封高**
+      //   （§9.28）—— 气泡盖在头顶上，字全都在。
       var cr = container.getBoundingClientRect();
       var roomAbove = Math.max(0, Math.round(cr.top - BUBBLE_CHROME_H));
       // 头顶放不下两行 → 放弃「按空间封高」，改盖在头顶上（见下面的 overlap 分支）。
-      // 不封高的话 max-height 只剩 24px 下限，气泡是一条 24px 的东西，字全裁没。
-      var overlap = roomAbove < BUBBLE_LINE_H * 2;
-      var room = Math.max(24, roomAbove);
-      cr = container.getBoundingClientRect(); // 上面被写样式弄脏了？重拿一份干净的（下方 baseL/baseT 用它）
-      var withInput = bubble.classList.contains("with-input");
-      if (overlap) {
-        // 盖在头顶：不限高、不限行数（CSS 的 60vh / 6 行仍兜着），位置交给下面的 wantT = 8。
-        bubble.style.removeProperty("max-height");
-        bubble.style.removeProperty("-webkit-line-clamp");
-        bubbleText.style.removeProperty("max-height");
-        bubbleText.style.removeProperty("overflow");
-      } else if (withInput) {
-        // 输入框在气泡**底部**（bubbleText 之后 append），封整个气泡会把框裁掉
-        // → 只封文字，把框那 44px 留出来。
-        bubble.style.removeProperty("max-height");
-        bubble.style.removeProperty("-webkit-line-clamp");
-        bubbleText.style.display = "block";
-        bubbleText.style.maxHeight = Math.max(20, room - BUBBLE_INPUT_H) + "px";
-        bubbleText.style.overflow = "hidden";
+      // 不封高的话 max-height 只剩下限，气泡是一条 24px 的东西，字全裁没。
+var overlap = roomAbove < BUBBLE_LINE_H * 2;
+      if (!overlap) {
+        trim(); // 贴到边上 / 窗口变小 ⇒ 头顶不够了，先收几条再分（顺序不能反）
+        // 一摞的话要**分**：N 条 + N−1 个间隙，头顶那点地方平均分给每条。
+        // N 已按 fitCount 收敛（留不下的早收了），所以分下来每条至少一行字。
+        var n = bubbles.length + (inputOpen ? 1 : 0);
+        var room = Math.max(BUBBLE_MIN_H, Math.floor((roomAbove - BUBBLE_GAP_PX * Math.max(0, n - 1)) / n));
+        for (var i = 0; i < bubbles.length; i++) {
+          var b = bubbles[i];
+          b.style.maxHeight = room + "px";
+          b.style.webkitLineClamp = String(Math.max(1, Math.min(6, Math.floor((room - 14) / BUBBLE_LINE_H))));
+        }
       } else {
-        bubbleText.style.removeProperty("max-height");
-        bubbleText.style.removeProperty("overflow");
-        if (bubbleText.style.display) bubbleText.style.removeProperty("display");
-        bubble.style.maxHeight = room + "px";
-        var lines = Math.max(1, Math.min(6, Math.floor((room - 14) / BUBBLE_LINE_H)));
-        bubble.style.webkitLineClamp = String(lines);
+        for (var j = 0; j < bubbles.length; j++) {
+          bubbles[j].style.removeProperty("max-height");
+          bubbles[j].style.removeProperty("-webkit-line-clamp");
+        }
       }
+      cr = container.getBoundingClientRect(); // 上面被写样式弄脏了？重拿一份干净的（下方 baseL/baseT 用它）
 
       // ⚠️⚠️ 高度写完之后**必须重新量**：上面那一步会改变几何 —— max-height / 行数一变，
-      //   文字重新折行，**宽度也跟着变**（实测 63 字在 622px 宽下折 2 行、在 574px 下折 3 行，
-      //   宽度差 48px）。拿旧几何算 dx/dy = 把气泡夹在旧位置上（实测贴右边时探出窗边 40px，
-      //   而 showBubble 那次「下一帧再夹」也救不回来：文字宽度不再变，夹取也认为自己是对的）。
+      //   文字重新折行，**宽度也跟着变**。拿旧几何算 dx/dy = 把气泡夹在旧位置上
+      //   （实测贴右边时探出窗边 40px，而 showBubble 那次「下一帧再夹」也救不回来）。
       //   这里量的是布局，代价可以忽略。
-      r = bubble.getBoundingClientRect();
+      r = stack.getBoundingClientRect();
       if (!r || !(r.width > 0) || !(r.height > 0)) return;
 
-      // dy 的口径：**正值 = 往下挪**（头顶这一侧的算法）
-      var dx = 0;
-      var dy = 0;
       // ⚠️⚠️ 偏移是**绝对**的，不是增量（实测踩过的坑：算增量、写绝对）。
       //   写下去的是 `left: calc(50% ± X)` —— X 是相对「容器水平居中位」的**总偏移**，
       //   每次写都把上一次的 X 顶掉。而「差多少」的算法（dx = 8 - r.left）算的是增量：
-      //   容器一动，气泡跟着容器平移（`50%` 是相对容器的），读到的 r.left 已经是新位置，
-      //   于是每次只补回一部分，实测往左拖时气泡在 -42 / -30 之间来回磨（欠 40px），
-      //   贴右边同理探出窗边 40px，而且**永远夹不准**（离得越远差得越多）。
-      //   正确算法：先把「X=0 时气泡的绝对左边」算出来，再把想要的绝对位置减掉它。
+      //   容器一动气泡跟着平移，于是每次只补回一部分，永远夹不准。
+      //   正确算法：先把「X=0 时这一摞的绝对左边」算出来，再把想要的绝对位置减掉它。
       var baseL = cr.left + (cr.width - r.width) / 2;
       // 竖向的「居中位」= 头顶那套 bottom:100% + margin-bottom 10px（pet.css；
       // 忘了算这个 10px，偏移就会恒差 10px）。
@@ -1476,49 +1600,81 @@ e.preventDefault();
       // 越界只有两种：顶出窗顶、掉出窗底（后者只在没封高、盖在头顶上的那档可能出现）。
       if (r.top < 8) wantT = 8;
       else if (r.bottom > H - 8) wantT = H - 8 - r.height;
-      dx = Math.round(wantL - baseL);
-      dy = Math.round(wantT - baseT);
+      var dx = Math.round(wantL - baseL);
+      var dy = Math.round(wantT - baseT);
       // 写一样的值没有代价，但每帧都写新值会让浏览器白排一次版
-      if (!dx) bubble.style.removeProperty("left");
-      else bubble.style.left = "calc(50% + " + Math.round(dx) + "px)";
-      if (!dy) bubble.style.removeProperty("bottom");
-      else bubble.style.bottom = "calc(100% " + (dy > 0 ? "- " : "+ ") + Math.round(Math.abs(dy)) + "px)";
-      bubble.style.removeProperty("top");
-    };
-    self.showBubble = function (text, opts) {
-      opts = opts || {};
-      var t = String(text == null ? "" : text);
-if (!t) return;
-      if (bubbleText.textContent !== t) bubbleText.textContent = t;
-      bubble.classList.add("show");
-      bubble.classList.toggle("sticky", opts.sticky === true);
-      bubble.style.display = "";
-      self.clampBubble();
-      // 再夹一次：刚 show 出来那下量到的可能是**上一段文案**留下的布局（宽度、行数
-      // 都还没按新文案排完），于是 dx/dy 算在旧几何上 → 气泡右侧探出窗边被切掉
-      // （§9.21 实测：显示后 586 宽的气泡右缘超出窗 38px，下一帧才夹回来）。
-      // 下一帧再夹一次就稳了 —— 这是布局，不是动画，代价可以忽略。
-      requestAnimationFrame(function () { self.clampBubble(); });
-      pushHitRegion(); // 气泡会改变命中区（它在宠物头顶）
-      if (bubbleTimer) clearTimeout(bubbleTimer);
-      var ms = Number(opts.ms) || 0;
-      // sticky = 状态还在：不清计时器，靠宿主每 10s 的续期帧接着
-      if (!opts.sticky && ms > 0) {
-        bubbleTimer = setTimeout(function () {
-          bubble.classList.remove("show");
-          bubbleTimer = null;
-        }, ms);
-      }
-    };
-    self.hideBubble = function () {
-      if (bubbleTimer) clearTimeout(bubbleTimer);
-      bubbleTimer = null;
-      bubble.classList.remove("show");
-      pushHitRegion();
+      if (!dx) stack.style.removeProperty("left");
+      else stack.style.left = "calc(50% + " + dx + "px)";
+      if (!dy) stack.style.removeProperty("bottom");
+      else stack.style.bottom = "calc(100% " + (dy > 0 ? "- " : "+ ") + Math.abs(dy) + "px)";
+      stack.style.removeProperty("top");
     };
 
-    // 「说点什么…」：输入框就长在气泡里。Enter 提交，Esc 取消。
+    /**
+     * 冒一条。sticky = 状态还在（宿主每 10s 续期一帧）：全局只留**一条** sticky，
+     * 新状态来了旧的立刻收摊 —— 状态是「当前是什么」，不是聊天记录。
+     */
+    self.showBubble = function (text, opts) {
+      opts = opts || {};
+      var t = String(text == null ? "" : text).trim();
+      if (!t) return;
+      if (opts.sticky === true) {
+        for (var s = bubbles.length - 1; s >= 0; s--) {
+          if (bubbles[s].classList.contains("sticky")) dropBubble(bubbles[s]);
+        }
+      }
+      // 同一句已经泡着（续期帧 / 重复事件）→ 不再堆一条，直接续命。
+      var dup = null;
+      for (var d = 0; d < bubbles.length; d++) if (bubbles[d].getAttribute("data-text") === t) dup = bubbles[d];
+      if (dup) {
+        if (opts.sticky === true) dup.classList.add("sticky");
+        var dm = Number(opts.ms) || 0;
+        if (dup._timer) { clearTimeout(dup._timer); dup._timer = 0; }
+        if (opts.sticky !== true && dm > 0) {
+          var target = dup;
+          dup._timer = setTimeout(function () { dropBubble(target); }, dm);
+        }
+        return;
+      }
+
+      var b = document.createElement("div");
+      b.className = "pet-bubble";
+      b.classList.toggle("sticky", opts.sticky === true);
+      b.setAttribute("data-text", t);
+      // 文案单独占一个节点：以后要在同一条里挂输入框/别的，直接改 bubble.textContent 会把它删掉。
+      var span = document.createElement("span");
+      span.className = "pet-bubble-text";
+      span.textContent = t;
+b.appendChild(span);
+      // 插入前量一遍老的位置（FLIP 的 First），插入点在输入框**之上** ——
+      // 否则新消息会排到输入框下面，把正在打的字顶走。
+      var tops = [];
+      for (var t = 0; t < bubbles.length; t++) tops.push(bubbles[t].getBoundingClientRect().top);
+      stack.insertBefore(b, inputOpen ? inputRow : null);
+      bubbles.push(b);
+markTail();
+      ageAll();
+      trim(); // 头顶放不下的先收掉（宁可少几条，也不要裁半行字）
+      flipFrom(tops);
+      while (bubbles.length > BUBBLE_MAX) dropBubble(bubbles[0]); // 上限保险
+      stack.classList.add("show");
+      self.clampBubble();
+      // 再夹一次：刚 show 出来那下量到的可能是**上一条文案**留下的布局（宽度、行数
+      // 都还没按新文案排完）。下一帧再夹一次就稳了 —— 这是布局，不是动画，代价可以忽略。
+      requestAnimationFrame(function () { self.clampBubble(); });
+      pushHitRegion(); // 气泡会改变命中区（它在宠物头顶）
+      // sticky = 状态还在：不清计时器，靠宿主每 10s 的续期帧接着
+      var ms = Number(opts.ms) || 0;
+      if (opts.sticky !== true && ms > 0) {
+        var el = b;
+        el._timer = setTimeout(function () { dropBubble(el); }, ms);
+      }
+    };
+// 「说点什么…」：输入框是气泡栈里**独立的最后一行**（不是塞在某条消息里）——
+    // 消息一条条冒，框的位置就不会被上一条文案顶来顶去。Enter 提交，Esc 取消。
     // 提交走主进程 → 宿主 /control（只有主进程手里有 token）。
+    var inputRow = document.createElement("div");
+    inputRow.className = "pet-bubble pet-bubble-row";
     var input = document.createElement("input");
     input.className = "pet-bubble-input";
     input.type = "text";
@@ -1526,20 +1682,24 @@ if (!t) return;
     input.placeholder = "说点什么…（Enter 发送）";
     // 亮不亮全看 class：写内联 display:none 的话优先级压过 .on{display:block}，框永远出不来
     input.classList.remove("on");
-    bubble.appendChild(input);
-    bubble.classList.add("has-input");
+    inputRow.appendChild(input);
+    stack.appendChild(inputRow);
 
     /** 输入框开着？（主进程靠这个决定要不要把窗切成可聚焦） */
     var inputOpen = false;
 
-    /** 收工：清框、藏气泡、告诉主进程把键盘焦点还给下面的窗口。所有关闭路径都走这里。 */
+    /** 收工：清框、收输入行（历史气泡留着 —— 那是聊天记录，不该被关框带走）、
+        告诉主进程把键盘焦点还给下面的窗口。所有关闭路径都走这里。 */
     function closeInput() {
       if (!inputOpen) return;
       inputOpen = false;
       input.value = "";
       input.classList.remove("on");
-      bubble.classList.remove("with-input");
-      self.hideBubble();
+inputRow.classList.remove("show", "on");
+      stack.classList.toggle("show", !stackEmpty());
+      markTail(); // 框关了，尾巴回到最底下那条
+      self.clampBubble();
+      pushHitRegion();
       if (window.__petElectron__ && window.__petElectron__.sayInputEnd) window.__petElectron__.sayInputEnd();
     }
 
@@ -1561,22 +1721,27 @@ if (!t) return;
       try { input.select(); } catch { /* ignore */ }
     }
 
-    function submitInput() {
+function submitInput() {
       var v = input.value.trim();
       closeInput();
       if (!v) return;
       if (window.__petElectron__ && window.__petElectron__.say) window.__petElectron__.say(v);
       else self.showBubble(v, { ms: 5000 });
+      // 回一句：宿主把用户那句话原样弹回来（宠物「听到了」），这里补它自己的回答。
+      // 延一小拍才有来有回的感觉；不管闲不闲 —— 有人跟它说话就得应。
+      var r = chatReply(v);
+      if (r) setTimeout(function () { chatSay(r); }, 700 + Math.random() * 600);
     }
 
-    self.askSay = function () {
+self.askSay = function () {
 inputOpen = true;
-      bubble.classList.add("show");
-      bubble.classList.add("with-input");
       input.classList.add("on"); // ⚠️ 不能写 style.display = ""：样式表里的 display:none
       //    优先级更高，空的内联样式等于「按样式表来」，框还是出不来
-      bubble.style.display = "";
+inputRow.classList.add("show", "on");
+      stack.classList.add("show");
+      markTail(); // 输入框一开，尾巴让位
       self.clampBubble();
+      requestAnimationFrame(function () { self.clampBubble(); });
       pushHitRegion();
       focusInput();
     };
@@ -1669,7 +1834,7 @@ inputOpen = true;
         self.pending = null;
 self.playing = next;   // 屏幕上真正在放的（判定「演到哪了」只看它）
         // 命中区跟着「当前这段动画画了多大」变（见 animInkBox）；emitHitRegion 会按矩形去重
-        // ⚠️⚠️ 换手后必须**重夹一次位置**（§9.31）：形状会罩住宽动画，可窗不会跟着变大 ——
+// ⚠️⚠️ 换手后必须**重夹一次位置**（§9.31）：形状会罩住宽动画，可窗不会跟着变大 —
         //   宠物停在窗的右半边时，宽出来那截（思考气泡 95..551）直接顶出窗外被切，
         //   用户口径「右侧还是展示不全」。以前只有 refitInk（量完可见框时）会夹，
         //   而框一旦进了缓存就不会再量 ⇒ refitInk 永远不跑 ⇒ 缓存一热就必现。
@@ -2257,6 +2422,13 @@ self.customPos = { rx: (rc.left + halfW) / W1, ry: (rc.top + halfH) / H1, w: W1,
       }
     });
 
+// 双击 = 想跟它说话（单击仍然是点回应动画，不抢）
+    hit.addEventListener("dblclick", function () {
+      if (dragState.active || dragState.dragging || self.justDragged) return;
+      bubbleTarget = self; // 回话的气泡要出现在同一只头顶
+      self.askSay();
+    });
+
     // ---- Override: WebSocket forces a specific animation ----
     this.playOverride = function (animName, durationMs) {
       self.stopDwell(); // 状态帧来了：待机停留让位
@@ -2302,11 +2474,16 @@ self.customPos = { rx: (rc.left + halfW) / W1, ry: (rc.top + halfH) / H1, w: W1,
       }
     }
 
-    this.destroy = function () {
+this.destroy = function () {
       self.destroyed = true;
       self.stopDwell();
       self.clearQueue();
       self.stopMove();
+      // 气泡的淡出计时器也得收，不然宠物没了计时器还在往一个没人看的 DOM 上跑
+      for (var bi = 0; bi < bubbles.length; bi++) {
+        if (bubbles[bi]._timer) clearTimeout(bubbles[bi]._timer);
+      }
+      bubbles.length = 0;
       if (self.overrideTimer) clearTimeout(self.overrideTimer);
       container.remove();
       // force：睡着了也要报（不然形状留在已经删掉的宠物老地方，那儿会点不动也点不出东西）
@@ -2412,7 +2589,7 @@ self.customPos = { rx: (rc.left + halfW) / W1, ry: (rc.top + halfH) / H1, w: W1,
    * 报「这扇窗要多大」给主进程（Electron 才有意义，浏览器里静默跳过）。
    *
    * 窗 = 宠物 + 四边留白（padding），不是「把宠物放大」（§9.21）：
-   *   宽：宠物宽 + 左右各 STAGE_PAD_X（气泡封顶 = 窗宽 - 32，见 applyBubbleMaxWidth）
+   *   宽：宠物宽 + 左右各 STAGE_PAD_X（气泡定宽 = 窗宽 - 16，见 applyBubbleWidth）
    *   高：头顶留白 + 宠物高 + 底下留白
    *     贴上边：头顶 = max(marginY, STAGE_PAD_TOP)，底下 STAGE_PAD_BOTTOM
    *     贴下边：头顶 STAGE_PAD_TOP，底下 = max(marginY, STAGE_PAD_BOTTOM)
@@ -2428,7 +2605,7 @@ self.customPos = { rx: (rc.left + halfW) / W1, ry: (rc.top + halfH) / H1, w: W1,
    */
 function reportWindowSize() {
     var s = stageSize();
-    applyBubbleMaxWidth(s.w, s.petW);
+    applyBubbleWidth(s.w);
     var api = window.__petElectron__;
     if (!api || !api.setWindowSize || !config) return;
     // 宽度跟着**当前动画**变（§9.32）：变化小于滞回阈值就不报 ——
@@ -2521,32 +2698,30 @@ var maxW = maxStage;
     };
   }
 
-  /**
-   * 气泡能有多宽（写进 CSS 变量 --bubble-max-w，pet.css 那侧只读它）。
+/**
+   * 气泡**固定宽**（写进 CSS 变量 --bubble-w，pet.css 那侧只读它，§9.34）。
    *
-   * = min(窗宽 − 16, 围着宠物的那圈, BUBBLE_W_MAX)：
-   *   窗宽 − 16 是 clampBubble 夹得住的上限（左右各留 8）；
-   *   ⚠️ 窗宽不再直接当封顶（§9.25）：横向多出来的那截是**漫游行程**，不是给气泡的 ——
-   *     拿窗宽当封顶，气泡就会宽过动画近一倍（窗 740 / 动画 380 → 气泡 724），
-   *     宠物一漫游到道的一头，clampBubble 把它推到贴一边，看着就是「歪」。
-*     气泡该围着**角色**长：可见框宽 + 160，下限 420（§9.27 起算的是可见框）。
-   *   BUBBLE_W_MAX 封顶，免得小屏上横跨半个屏。
+   * ⚠️⚠️ 以前是 `width: max-content` + 一个 max-width 上限：宽度跟着**文案长度**变 →
+   *   折行数变 → 气泡几何变 → clampBubble 算出的 dx/dy 变 → **每来一句话气泡就横向跳一下**，
+   *   而一棳气泡还会一起抖（用户口径：「气泡框有点丑，位置乱动」）。
+   *   定死宽度之后，气泡的几何只跟宠物位置有关 —— 它就钉在头顶不动了，顺带一棳对齐也齐。
+   *
+   *   = min(窗宽 − 16, BUBBLE_W_MAX)：窗宽 − 16 是 clampBubble 夹得住的上限（左右各留 8），
+   *   再封一个 BUBBLE_W_MAX，免得横跨半个屏（看着不像「宠物说话」）。
    * ⚠️ 这个数是**外框**宽（.pet-bubble 是 border-box）：按内容盒算的话会差
-   *   24px padding + 2px border，气泡就比窗宽，夹取永远夹不住（§9.22）。
+   *   padding + border，气泡就比窗宽，夹取永远夹不住（§9.22）。
    */
-  function applyBubbleMaxWidth(winW, petW) {
+  function applyBubbleWidth(winW) {
     try {
-      var w = Math.min(Math.max(240, Math.round(winW) - 16), BUBBLE_W_MAX);
-      var around = Math.max(420, (Number(petW) || 0) + 160);
-      w = Math.min(w, Math.round(around), BUBBLE_W_MAX);
-      document.documentElement.style.setProperty("--bubble-max-w", w + "px");
+      var w = Math.min(Math.max(BUBBLE_W_MIN, Math.round(winW) - 16), BUBBLE_W_MAX);
+      document.documentElement.style.setProperty("--bubble-w", w + "px");
     } catch (e) {
       /* 老浏览器不支持自定义属性：CSS 里那个兜底值还在 */
     }
   }
 
 /** Maps size arg to px width.
-      ⚠️ 最小档别再往小了：气泡是 16:9 舞台头顶的 max-content 块（最宽 420px），舞台太窄时
+      ⚠️ 最小档别再往小了：气泡是 16:9 舞台头顶一块定宽的框（§9.34），舞台太窄时
       气泡和动画一起被挤到屏幕边上，看着像「被裁了一半」。380 起。 */
 var SIZE_MAP = { small: 380, normal: 400, large: 540 };
 
@@ -2572,6 +2747,66 @@ var root = document.getElementById("pet-root");
 if (asleep) pet.sleep();
     applySavedPositions(); // 新加的这只也认得「上次的位置」（id 认不出就单只借位，见 4.6）
     pushHitRegion(); // 进了 pets 才量得到它（构造时它还没进数组）
+  }
+
+// ========================================================================
+  // 7.5 聊天 & 碎碎念（§9.33）
+  //
+  // 刻意做在**窗侧本地**，不走宿主：窗才知道「现在闲不闲」—— currentOverrideAnim 有值
+  // 就是 agent 正在忙，这时候宠物就该闭嘴；输入框开着（有人在打字）也别插嘴。
+  // ========================================================================
+
+  /** 现在该不该闭嘴：agent 忙 / 有人正在输入 / 窗看不见 → 一律不出声。 */
+  function chatBusy() {
+    if (document.hidden) return true;
+    if (document.querySelector(".pet-bubble-input.on")) return true;
+    for (var i = 0; i < pets.length; i++) if (pets[i].currentOverrideAnim) return true;
+    return false;
+  }
+
+  /** 冒一句话（优先最近被右键 / 双击的那只宠物，跟输入框同处）。 */
+  function chatSay(text, ms) {
+    var t = String(text == null ? "" : text).trim();
+    if (!t) return;
+    var target = bubbleTarget && bubbleTarget.showBubble ? bubbleTarget : pets[0];
+    if (target) target.showBubble(t, { ms: ms || 6000 });
+  }
+
+  /**
+   * 关键词 → 回话。取**最长**命中（先按长度降序），否则「你好吗」会被短词 "?/？" 先截胡。
+   * 一个都没命中就 fallback（也可能没配 → 闭嘴）。
+   */
+  function chatReply(text) {
+    var c = (config && config.chatter) || { replies: {}, fallback: [] };
+    var t = String(text == null ? "" : text).toLowerCase();
+    var keys = Object.keys(c.replies || {});
+    keys.sort(function (a, b) { return b.length - a.length; });
+    for (var i = 0; i < keys.length; i++) {
+      if (keys[i] && t.indexOf(keys[i].toLowerCase()) >= 0) {
+        var hit = c.replies[keys[i]];
+        return hit[Math.floor(Math.random() * hit.length)];
+      }
+    }
+    var fb = c.fallback || [];
+    return fb.length ? fb[Math.floor(Math.random() * fb.length)] : "";
+  }
+
+  var chatTimer = null;
+
+  /**
+   * 排下一次碎碎念（随机时刻，避免每只宠物 / 每次重连都齐步走）。
+   * 自己排自己：到点了先看闲不闲，闲就冒一句，然后重新排。config 里没 chatter = 不排。
+   */
+  function startChatter() {
+    if (chatTimer) { clearTimeout(chatTimer); chatTimer = null; }
+    var c = config && config.chatter;
+    if (!c || c.enabled === false || !c.idle.length) return;
+    var sec = c.idleSec[0] + Math.random() * Math.max(1, c.idleSec[1] - c.idleSec[0]);
+    chatTimer = setTimeout(function () {
+      chatTimer = null;
+      if (!chatBusy()) chatSay(pick(c.idle));
+      startChatter();
+    }, sec * 1000);
   }
 
   /** Apply an event override to all pets */
@@ -2672,8 +2907,9 @@ reconnectAttempts = 0;
       var anim = EVENT_ANIM_MAP[msg];
       if (anim) {
         applyEventOverride(anim);
-      } else if (msg === "agent_idle") {
+} else if (msg === "agent_idle") {
         // pets return to chain naturally via override timeout
+        startChatter(); // 刚忙完，重新开始计「无聊」（不然可能马上就冒一句）
       } else if (msg === "add_pet") {
         addPet();
       } else if (msg.startsWith("add_pet:")) {
@@ -2768,8 +3004,11 @@ if (window.__petElectron__ && window.__petElectron__.onPower) {
       else goWake();
     });
 
-    // Connect WebSocket
+// Connect WebSocket
     connectWs();
+
+    // 碎碎念：先排上第一句（§9.33）。没配 chatter 段就是 no-op。
+    startChatter();
   }
 
   // ---- Start when DOM ready ----

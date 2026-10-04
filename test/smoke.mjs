@@ -168,8 +168,8 @@ const petJs = readFileSync(join(ROOT, "pi", "assets", "pet.js"), "utf8");
 	check("算命中区前先夹气泡", /clampBubbles\(\);[\s\S]{0,200}collectHitRects\(\)/.test(petJs));
 	// ④ 宠物本身也不能拖到屏幕外（半只在屏外时头顶气泡必然被裁）
 	check("拖拽位置有夹取", /clampPos\(e\.clientX - dragState\.offX/.test(petJs));
-// ⑤ showBubble 写文案不能碰 bubble.textContent：会把输入框节点删掉（「说点什么…」出不来）
-	check("文案走独立节点，不动 bubble.textContent", !/^\s*bubble\.textContent\s*=/m.test(petJs) && /bubbleText\.textContent = t/.test(petJs));
+// ⑤ showBubble 写文案不能碰气泡框的 textContent：会把同级节点（输入行）删掉（「说点什么…」出不来）
+	check("文案走独立节点，不动气泡框的 textContent", !/^\s*(?:bubble|inputRow)\.textContent\s*=/m.test(petJs) && /span\.textContent = t/.test(petJs) && /span\.className = "pet-bubble-text"/.test(petJs));
 	// ⑥ 最小档宽度：舞台太窄时头顶气泡（最宽 420px）会被挤到屏幕边上，看着像被裁了一半。
 	//    而且 SIZE_MAP 有**两份**（pet.js 与 pi 扩展的补全用），改一处不改另一处就前后不一。
 check("最小档 ≥ 380px（气泡不被挤到屏外）", MIN_SIZE >= 380, `实际 ${MIN_SIZE}px`);
@@ -226,6 +226,28 @@ console.log("\n待机动画节奏（不切一半 / 待机别太短）…");
 	check("timing 缺省/写错都有兜底", /function readTiming\(raw\)/.test(petJs) && /TIMING_DEFAULT = \{ minPlayMs: 7600, idleDwellMs: 11000 \}/.test(petJs));
 	// ⚠️ 空闲自动冻住（idleSleepMs）已按用户意见拿掉：写回去就等于宠物空闲就停。
 check("timing 段不再有 idleSleepMs（空闲不自动冻）", !/idleSleepMs/.test(cfg) && !/idleSleepMs/.test(petJs.replace(/^.*原 timing\.idleSleepMs.*$/m, "")));
+}
+
+// ------------------------------------------------ 聊天 & 碎碎念（§9.30）
+// 两条需求合在这里：双击能聊天（输入框 → 回一句）、闲着没人理时自己碎碎念。
+// 回归点有三个：① 碎碎念在 agent 忙/有人打字时必须闭嘴（不然盖掉状态气泡）；
+//           ② 配置没写 chatter 段就得彻底闭嘴（代码里不许藏第二份默认文案）；
+//           ③ 关键词取最长命中（否则「你好吗」被短词先截胡，回错话）。
+console.log("\n聊天气泡 & 待机碎碎念…");
+{
+	const petJs = readFileSync(join(ROOT, "pi", "assets", "pet.js"), "utf8");
+	const cfg = readFileSync(join(ROOT, "assets", "config.jsonc"), "utf8");
+	check("双击宠物弹输入框（单击仍是点回应动画）", /hit\.addEventListener\("dblclick"/.test(petJs) && /self\.askSay\(\)/.test(petJs));
+	check("提交后按关键词回一句", /function chatReply\(text\)/.test(petJs) && /var r = chatReply\(v\)/.test(petJs));
+	check("关键词取最长命中", /keys\.sort\(function \(a, b\) \{ return b\.length - a\.length; \}\)/.test(petJs));
+	check("busy 时不碎碎念（agent 忙 / 有人在输入）", /function chatBusy\(\)/.test(petJs) && /pets\[i\]\.currentOverrideAnim\) return true/.test(petJs) && /pet-bubble-input\.on/.test(petJs));
+check("碎碎念自己排自己（随机时刻，不是固定间隔）", /function startChatter\(\)/.test(petJs) && /var sec = c\.idleSec\[0\] \+ Math\.random\(\)/.test(petJs) && /chatSay\(pick\(c\.idle\)\);[\s\S]{0,40}startChatter\(\);/.test(petJs));
+	check("config 没写 chatter 段 → 不碎碎念、也不报错", /function readChat\(raw\)/.test(petJs) && /if \(!c \|\| typeof c !== "object"\) return null;/.test(petJs) && /chatter: readChat\(raw\)/.test(petJs));
+	check("config.jsonc 里 chatter 段是真文案（idle/fallback/replies 都非空）", (() => {
+		const raw = JSON.parse(readFileSync(join(ROOT, "assets", "config.jsonc"), "utf8").replace(/^\s*\/\/.*$/gm, ""));
+		const ch = raw.chatter;
+		return !!ch && ch.enabled === true && Array.isArray(ch.idle) && ch.idle.length >= 8 && Array.isArray(ch.fallback) && ch.fallback.length >= 3 && Object.keys(ch.replies || {}).length >= 8 && ch.idle.every((s) => typeof s === "string" && s.trim());
+	})());
 }
 
 // ------------------------------------------------ 空闲别硬烧（别抢别的窗口的渲染预算）
@@ -707,10 +729,10 @@ check("preload 三个新口都齐", /setWindowSize/.test(preloadSrc) && /moveWin
 //   贴右上角后动画右边离窗边只剩 marginX=24px、左边空 376px，看着就是被窗边切了一角。
 //   修法：左右留白只当「离窗边的余量」（24），窗宽改成**按内容自适应**（动画宽 / 气泡基准宽取大），
 //   真正给足的是**高度**（头顶 150 装气泡），气泡封顶独立走 BUBBLE_W_MAX。
-check("舞台窗 = 高度定死 + 宽度自适应内容（不再有强制窗宽和 200 留白）", /var STAGE_PAD_X = 32/.test(petSrc) && /var BUBBLE_W_MAX = 820/.test(petSrc) && /var w = maxW \+ sidePad \* 2/.test(petSrc) && !/MIN_STAGE_W/.test(petSrc) && !/BUBBLE_BASE_W/.test(petSrc));
+check("舞台窗 = 高度定死 + 宽度自适应内容（不再有强制窗宽和 200 留白）", /var STAGE_PAD_X = 32/.test(petSrc) && /var BUBBLE_W_MAX = 340/.test(petSrc) && /var w = maxW \+ sidePad \* 2/.test(petSrc) && !/MIN_STAGE_W/.test(petSrc) && !/BUBBLE_BASE_W/.test(petSrc));
 // 窗不许为气泡撑宽：窗一比「动画 + 余量」宽，气泡（封顶 = 窗宽-16）就比动画宽很多，
 //   居中时必被 clampBubble 推到贴一边（实测 592 宽居中于 462 动画：左探 196 / 右探 16）。
-check("气泡宁窄勿歪（封顶 = 窗宽-16，窗宽只跟动画走）", /Math\.min\(Math\.max\(240, Math\.round\(winW\) - 16\), BUBBLE_W_MAX\)/.test(petSrc));
+check("气泡宁窄勿歪（定宽 = min(窗宽-16, 340)）", /Math\.min\(Math\.max\(BUBBLE_W_MIN, Math\.round\(winW\) - 16\), BUBBLE_W_MAX\)/.test(petSrc) && /var BUBBLE_W_MIN = 220/.test(petSrc));
 check("设置高度、自适应宽度：height 优先，width 由 16:9 推（只加不改，老配置走 size）", /function petSizeOf\(cfg\)[\s\S]{0,400}return Math\.round\(\(h \* 16\) \/ 9\)/.test(petSrc) && /if \(isFinite\(height\) && height > 0\)[\s\S]{0,600}size = Math\.round\(\(height \* 16\) \/ 9\)/.test(petSrc) && /var MIN_PET_H = 214/.test(petSrc) && /var s = petSizeOf\(cfg\)/.test(petSrc) && /this\.size = petSizeOf\(cfg\)/.test(petSrc));
 check("高度小于下限也抬（和宽度一个口径：抬，不报错）", /if \(h < MIN_PET_H\) h = MIN_PET_H/.test(petSrc) && /if \(height < MIN_PET_H\)/.test(petSrc));
 // ⚠️ marginX/marginY 现在是**下限**（§9.21）：比留白小的抬到留白。头顶那截是气泡的舞台，
@@ -731,18 +753,17 @@ check("漫游/气泡仍按窗口尺寸算（舞台=窗口，逻辑没变）", /w
 // ② 气泡高度写死在 CSS 的「最多三行」，不量头顶真实空间。
 // 修法：窗 = 宠物 + 四边留白（配置里的 margin 当下限），气泡按头顶实测空间算行数与 max-height。
 console.log("\n气泡放得下（留白 + 按空间夹）…");
-check("气泡宽度跟着窗宽走（--bubble-max-w = 窗宽 - 16），最多 6 行", /max-width: min\(var\(--bubble-max-w, 544px\), calc\(100vw - 16px\)\)/.test(petCss) && /-webkit-line-clamp: 6/.test(petCss) && !/max-width: min\(420px/.test(petCss) && !/max-width: min\(560px/.test(petCss));
+check("气泡宽度**定死**（--bubble-w = 窗宽 - 16），最多 6 行", /width: min\(var\(--bubble-w, 300px\), calc\(100vw - 16px\)\)/.test(petCss) && /-webkit-line-clamp: 6/.test(petCss) && !/width: max-content/.test(petCss) && !/max-width: min\(560px/.test(petCss));
 // ⚠️ 气泡必须 border-box：--bubble-max-w 说的是**外框**宽，而 max-width 默认按内容盒算，
 //   差着 24px padding + 2px border。算错的后果不是不好看，是气泡比窗还宽 ⇒ 左右两个
 //   8px 边距永远夹不住，clampBubble 每次把它往另一边推 10px（实测 -12 → -22 来回甩）。
 check("气泡 border-box（max-width 按外框算，夹取才夹得住）", /\.pet-bubble \{[\s\S]{0,2400}box-sizing: border-box/.test(petCss));
 // ⚠️ 气泡的宽度上限只许有一个出处：窗宽算一次 → CSS 变量 → pet.css 读它。
 //   写死过一次（pet.css 560 / pet.js 按窗宽 620），多出来的留白就白留了（§9.22）。
-check("气泡上限只有一个出处（stageSize → --bubble-max-w → pet.css）", /function stageSize\(/.test(petSrc) && /function applyBubbleMaxWidth\(/.test(petSrc) && /applyBubbleMaxWidth\(s\.w, s\.petW\)/.test(petSrc) && /Math\.round\(winW\) - 16/.test(petSrc) && !/560px/.test(petCss));
-// ⚠️ 上限还得**跟着宠物走**（§9.25）：窗宽是拿「漫游行程」撑出来的（宠物 + 2×留白 + maxDist），
-//   直接按窗宽封顶，漫游余量会顺手把气泡撑肥一截（实测能到 820）。宠物宽 + 160 才是大头。
-check("气泡不跟着漫游余量变胖（上限 = min(窗宽-16, 宠物宽+160, 820)）", /var around = Math\.max\(420, \(Number\(petW\) \|\| 0\) \+ 160\)/.test(petSrc) && /var BUBBLE_W_MAX = 820/.test(petSrc));
-check("气泡高度由 clampBubble 按头顶空间写", /var roomAbove = Math\.max\(0, Math\.round\(cr\.top - BUBBLE_CHROME_H\)\)/.test(petSrc) && /var room = Math\.max\(24, roomAbove\)/.test(petSrc) && /bubble\.style\.maxHeight = room \+ "px"/.test(petSrc) && /bubble\.style\.webkitLineClamp = String\(lines\)/.test(petSrc));
+check("气泡宽度只有一个出处（stageSize → --bubble-w → pet.css）", /function stageSize\(/.test(petSrc) && /function applyBubbleWidth\(/.test(petSrc) && /applyBubbleWidth\(s\.w\)/.test(petSrc) && /Math\.round\(winW\) - 16/.test(petSrc) && !/560px/.test(petCss));
+// ⚠️ 宽度**定死**（§9.34）：漫游余量再宽也不会把气泡撑肥 —— 宽度只看窗宽与 BUBBLE_W_MAX。
+check("气泡不跟着漫游余量变胖（定宽，不再按宠物宽长）", !/var around = Math\.max\(420/.test(petSrc) && /function applyBubbleWidth\(winW\) \{\s*\n\s*try \{\s*\n\s*var w = Math\.min/.test(petSrc));
+check("气泡高度由 clampBubble 按头顶空间写（一摞按条数分）", /var roomAbove = Math\.max\(0, Math\.round\(cr\.top - BUBBLE_CHROME_H\)\)/.test(petSrc) && /var room = Math\.max\(BUBBLE_MIN_H, Math\.floor\(\(roomAbove - BUBBLE_GAP_PX/.test(petSrc) && /b\.style\.maxHeight = room \+ "px"/.test(petSrc) && /b\.style\.webkitLineClamp = String\(/.test(petSrc));
 // ⚠️ 头顶挂不下也**不翻到身下**（§9.27，实测回退）：身下只有 bottomPad 60 的余量，
 //   翻下去就是把气泡塞进 60px 的缝里 —— 字被裁掉还压着脚（用户口径「脚下气泡被遮挡了 高度不够」）。
 check("气泡恒在头顶（不翻到身下，§9.25 那套 .below 已删）", !/roomBelow/.test(petSrc) && !/var below/.test(petSrc) && !/classList\.toggle\("below"/.test(petSrc) && !/\.pet-bubble\.below \{/.test(petCss) && !/margin-top: 10px[\s\S]{0,80}transform: translate\(-50%, -6px\)/.test(petCss));
@@ -750,10 +771,35 @@ check("气泡恒在头顶（不翻到身下，§9.25 那套 .below 已删）", !
 //   算增量的话容器一动就只补回一部分，实测左右各欠 40px、怎么夹都夹不准。
 check("夹取偏移按「居中位 + 绝对偏移」算（不是增量，否则拖一次差 40px）", /var baseL = cr\.left \+ \(cr\.width - r\.width\) \/ 2/.test(petSrc) && /dx = Math\.round\(wantL - baseL\)/.test(petSrc) && /var baseT = cr\.top - BUBBLE_GAP - r\.height/.test(petSrc));
 // 高度/换边写完会重新折行、宽度跟着变：拿旧宽度算偏移就是夹在旧位置上（实测差 48px）
-check("写完高度/换边重新量几何再算偏移", /r = bubble\.getBoundingClientRect\(\);\r?\n\s*if \(!r \|\| !\(r\.width > 0\)/.test(petSrc));
-check("行数按空间收（空间不够就少几行，而不是把话抽掉）", /Math\.min\(6, Math\.floor\(\(room - 14\) \/ BUBBLE_LINE_H\)\)/.test(petSrc) && /var BUBBLE_LINE_H = 18\.85/.test(petSrc));
-// 「说点什么」输入框在气泡**底部**（bubbleText 之后 append），封整个气泡会把框裁掉 → 只封文字
-check("输入态只封文字、给输入框留出 44px（不然框被裁掉没法打字）", /bubble\.classList\.contains\("with-input"\)[\s\S]{0,700}bubbleText\.style\.maxHeight = Math\.max\(20, room - BUBBLE_INPUT_H\)/.test(petSrc) && /var BUBBLE_INPUT_H = 44/.test(petSrc));
+check("写完高度/换边重新量几何再算偏移（量的是整摞）", /r = stack\.getBoundingClientRect\(\);\r?\n\s*if \(!r \|\| !\(r\.width > 0\)/.test(petSrc));
+check("行数按空间收（空间不够就少几行，而不是把话抽掉）", /Math\.min\(6, Math\.floor\(\(room - 14\) \/ BUBBLE_LINE_H\)\)/.test(petSrc) && /var BUBBLE_LINE_H = 18\.2/.test(petSrc) && /var BUBBLE_MIN_H = 30/.test(petSrc));
+// 「说点什么」输入框是气泡栈里**独立的最后一行**（不再塞在某条消息里，§9.34）：
+//   塞在消息里的话，每来一条新消息就把框顶来顶去，封高时还得给它单独留 44px。
+check("输入框是栈里独立的一行（分头顶空间时把它算进条数）", /var inputRow = document\.createElement\("div"\)/.test(petSrc) && /inputRow\.className = "pet-bubble pet-bubble-row"/.test(petSrc) && /stack\.appendChild\(inputRow\)/.test(petSrc) && /var n = bubbles\.length \+ \(inputOpen \? 1 : 0\)/.test(petSrc));
+// §9.34 气泡**一棳**（不是复用一个框）：每条消息一个节点，最多 3 条，多了收最老的。
+//   为什么不是复用一个框：复用一个框时三条消息互相顶替，看上去就是「文字闪来闪去」。
+console.log("\n气泡一棳（最多 3 条，新者在下）…");
+check("一棳：容器独立，每条消息一个节点", /stack\.className = "pet-bubble-stack"/.test(petSrc) && /var bubbles = \[\]/.test(petSrc) && /bubbles\.push\(b\)/.test(petSrc) && /b\.className = "pet-bubble"/.test(petSrc));
+check("最多同时 5 条（多了把最老的收掉）", /var BUBBLE_MAX = 5/.test(petSrc) && /while \(bubbles\.length > BUBBLE_MAX\) dropBubble\(bubbles\[0\]\)/.test(petSrc));
+// ⚠️ 上限不等于真能留几条：头顶 150 的台子，每条至少「一行字 + 内边距 + 间隙」= 34px，
+//   分摊下来放不下 5 条。硬分的结果是每条只剩 20px = **字被裁掉半行**（难看得多）。
+//   所以真留几条由 fitCount() 按头顶实测空间算，放不下就收最老的。
+check("能留几条按头顶实测空间收（宁可少几条，不裁半行字）", /function fitCount\(\)[\s\S]{0,400}return Math\.max\(1, Math\.min\(BUBBLE_MAX, Math\.floor\(\(roomAbove \+ BUBBLE_GAP_PX\) \/ per\)\)\)/.test(petSrc) && /function trim\(\)[\s\S]{0,120}while \(bubbles\.length > fitCount\(\)\) dropBubble\(bubbles\[0\]\)/.test(petSrc) && /var BUBBLE_MIN_H = 30/.test(petSrc) && /var room = Math\.max\(BUBBLE_MIN_H,/.test(petSrc));
+check("头顶变小（贴边 / 缩窗）也会收，不只在入栈时收", /if \(!overlap\) \{\s*\n\s*trim\(\);/.test(petSrc));
+check("新的在下面、老的上推（看着像滚动）", /\.pet-bubble-stack \{[\s\S]{0,400}flex-direction: column/.test(petCss) && /gap: 4px/.test(petCss));
+check("收栈：淡出 200ms 后摘节点，计时器跟节点走（不泄）", /function dropBubble\(el\)[\s\S]{0,400}clearTimeout\(el\._timer\)[\s\S]{0,600}setTimeout\(function \(\) \{[\s\S]{0,120}removeChild\(el\)/.test(petSrc) && /el\._timer = setTimeout\(function \(\) \{ dropBubble\(el\); \}, ms\)/.test(petSrc));
+check("同文案不重堆（宿主 10s 续帧）、sticky 全局只留一条", /getAttribute\("data-text"\) === t/.test(petSrc) && /classList\.contains\("sticky"\)\) dropBubble/.test(petSrc));
+check("尾巴只给最底下那条（否则三泡三支箭）", /function markTail\(\)[\s\S]{0,200}classList\.toggle\("has-tail", i === last && !inputOpen\)/.test(petSrc) && /\.pet-bubble\.has-tail::after/.test(petCss));
+// §9.34 追加：老者退后（--fade 三档）+ 新的一条进来时老的**滑**上去（FLIP，不是跳）
+check("越老越退后（--fade 三档，只淡字与底色不碰 opacity）", /var AGE_FADE = \[1, 0\.62, 0\.34\]/.test(petSrc) && /setProperty\("--fade"/.test(petSrc) && /color: rgba\(238, 241, 246, var\(--fade, 1\)\)/.test(petCss) && /calc\(0\.96 \* var\(--fade, 1\)\)/.test(petCss) && !/opacity: var\(--fade/.test(petCss));
+check("上推用 FLIP（只动 transform，插完撤掉让它自己补动画）", /function flipFrom\(tops\)[\s\S]{0,1200}el\.style\.transition = "none"[\s\S]{0,400}el\.style\.transform = "translateY\(" \+ dy \+ "px\)"/.test(petSrc) && /e2\.style\.removeProperty\("transform"\)/.test(petSrc) && /e2\.addEventListener\("transitionend", done, \{ once: true \}\)/.test(petSrc));
+check("上推时长随距离缩放（顶得越高走得越久，封 420ms）", /var ms = Math\.min\(420, 120 \+ Math\.round\(Math\.abs\(dist\) \* 3\)\)/.test(petSrc) && /"transform " \+ \(ms \/ 1000\) \+ "s cubic-bezier\(0\.22, 0\.78, 0\.26, 1\)"/.test(petSrc) && /setTimeout\(done, ms \+ 120\)/.test(petSrc));
+check("上推曲线与入场分开（入场快、上推慢而稳）", /\.pet-bubble \{[\s\S]{0,3000}transform 0\.2s cubic-bezier\(0\.16, 0\.84, 0\.44, 1\)/.test(petCss) && !/transition: opacity 0\.18s ease, transform 0\.18s ease;/.test(petCss));
+check("档位变淡能过渡（底色用 background-color，渐变另层）", /background-color: rgba\(26, 28, 36, calc\(0\.96 \* var\(--fade, 1\)\)\)/.test(petCss) && /background-image: linear-gradient\(180deg, rgba\(255, 255, 255, 0\.05\)/.test(petCss) && /background-color 0\.2s ease/.test(petCss));
+check("新消息插在输入框**之上**（排到框下面会把正在打的字顶走）", /stack\.insertBefore\(b, inputOpen \? inputRow : null\)/.test(petSrc));
+check("夹取量的是整棳，写在容器上（位置跟着整棳走）", /var r = stack\.getBoundingClientRect\(\)/.test(petSrc) && /stack\.style\.left = "calc\(50% \+ " \+ dx \+ "px\)"/.test(petSrc) && /stack\.style\.removeProperty\("left"\)/.test(petSrc));
+check("宠物没了就把气泡计时器也收掉", /this\.destroy = function \(\)[\s\S]{0,900}bubbles\.length = 0/.test(petSrc));
+check("栈空了摘 .show（否则空的容器也占命中区）", /function stackEmpty\(\)/.test(petSrc) && /stack\.classList\.toggle\("show", !stackEmpty\(\)\)/.test(petSrc));
 // 气泡刚 show 出来那下量到的是旧布局：下一帧要再夹一次，否则右缘探出窗边被切（实测 38px）
 check("气泡下一帧再夹一次（刚 show 时量的是上一段文案的布局）", /requestAnimationFrame\(function \(\) \{ self\.clampBubble\(\); \}\)/.test(petSrc));
 check("窗一变就重新夹气泡（高度/宽度都变了）", /window\.addEventListener\("resize"[\s\S]{0,600}clampBubbles\(\)/.test(petSrc));
@@ -825,7 +871,7 @@ check("漫游道按可见框半宽夹（planMove 的 halfW 是 inkHalf）", /hal
 //   为什么不是角色那一条/可见框并集：动画自带的气泡/火花（思考 93..551、蝴蝶蜜蜂 4..629）
 //   比角色宽得多，窗装不下它们时靠边播放必被窗边切；舞台本来就是「这段动画可能画到的全部」，
 //   配合 inkSafe() 的夹取，任何动画的像素都不会跑出窗（并集是运行时量的，不能拿来算窗宽）。
-check("窗宽基数是整个舞台（maxStage → w），气泡封顶仍按角色可见框", /var maxStage = 0/.test(petSrc) && /if \(maxStage < MIN_PET_SIZE\) maxStage = MIN_PET_SIZE/.test(petSrc) && /var maxW = maxStage/.test(petSrc) && /var w = maxW \+ sidePad \* 2 \+ roamRoom\(sidePad\)/.test(petSrc) && /applyBubbleMaxWidth\(s\.w, s\.petW\)/.test(petSrc) && /petW: inkWidth\(maxStage\)/.test(petSrc));
+check("窗宽基数是整个舞台（maxStage → w），气泡宽度只按窗宽夹", /var maxStage = 0/.test(petSrc) && /if \(maxStage < MIN_PET_SIZE\) maxStage = MIN_PET_SIZE/.test(petSrc) && /var maxW = maxStage/.test(petSrc) && /var w = maxW \+ sidePad \* 2 \+ roamRoom\(sidePad\)/.test(petSrc) && /applyBubbleWidth\(s\.w\)/.test(petSrc) && /petW: inkWidth\(maxStage\)/.test(petSrc));
 // 站位记忆的比例仍然存**中心**（可见框在舞台里居中 ⇒ 中心 = 容器中心），老 positions.json 继续能用；
 // 横向区间走 inkSafe（角色 ∪ 当前动画），不然老落点靠边时宽动画仍被窗边切。
 check("站位比例仍存中心（可见框居中，老位置记忆继续可用）+ 横向按 art 框夹", /stageKeepIn\(cp\.rx \* window\.innerWidth - inkHalf \+ over, cp\.ry \* window\.innerHeight - halfH, safe\.w, halfH \* 2\)/.test(petSrc) && /container\.style\.left = keep\.left - over - inkOff \+ "px"/.test(petSrc) && /var over = inkOff - safe\.off/.test(petSrc) && /self\.customPos\.rx = \(keep\.left \+ inkHalf\) \/ window\.innerWidth/.test(petSrc) && /stageKeepIn\(left, top, inkW, stageH\)/.test(petSrc));
@@ -834,7 +880,7 @@ check("纵向按舞台高算区间（不改成 inkH），上下界 0 起夹", /v
 // 纵向的**上下界**：§9.28 起四边全 0 起夹 —— 宠物能真的贴到屏幕上/下边。
 //   头顶没有空间时不再封高（那会是一条 24px 的东西，字全裁没），改让气泡盖在头顶上。
 //   底下不用再减 bottomPad：stage 有 translateY(bottomPad)，容器底本来就是脚底。
-check("纵向下界 0 起夹（上下都能贴边），头顶不够就不封高", /top: Math\.min\(Math\.max\(top, 0\), maxTop\)/.test(petSrc) && /var hiTop = Math\.max\(0, winH - halfH \* 2\)/.test(petSrc) && /var top = Math\.min\(Math\.max\(d\.base\.y \+ \(want\.y - at\.y\), 0\), hiTop\)/.test(petSrc) && /var overlap = roomAbove < BUBBLE_LINE_H \* 2/.test(petSrc) && /if \(overlap\)/.test(petSrc));
+check("纵向上下界 0 起夹（贴边也行），头顶不够就不封高（盖头顶）", /var overlap = roomAbove < BUBBLE_LINE_H \* 2/.test(petSrc) && /if \(!overlap\)/.test(petSrc));
 
 // 位置记忆换算：窗内比例是**相对窗**的，而舞台窗会变（这一版左右留白 80→200，宽 622→862）：
 //   老落点 rx=0.5797 直接套上去，宠物水平平移 (862-622)*0.58 = 139px（「启动后宠物自己跑了一边」）。
