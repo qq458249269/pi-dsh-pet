@@ -102,6 +102,10 @@ color: rgba(238, 241, 246, var(--fade, 1));
   border: 1px solid rgba(255, 255, 255, calc(0.09 * var(--fade, 1)));
 font: 13px/1.4 system-ui, "Microsoft YaHei", sans-serif;
   white-space: pre-wrap;
+  /* 字居中（§9.36）：气泡是 -webkit-box（行数裁剪），子 span 是 box item ——
+     只在外层写 text-align 不一定落到字上，两处都写一份。 */
+  text-align: center;
+  -webkit-box-align: center;
   overflow-wrap: anywhere;
   word-break: break-word;
   display: -webkit-box;
@@ -117,6 +121,9 @@ opacity: 0;
     color 0.2s ease, background-color 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease;
   box-shadow: 0 6px 18px rgba(0, 0, 0, 0.32);
 }
+/* 跟着外层居中：span 是 -webkit-box 的直接子项，得自己再对一次 */
+.pet-bubble > span { text-align: center; }
+
 .pet-bubble.show {
   opacity: 1;
   transform: translateY(0);

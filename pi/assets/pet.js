@@ -1394,6 +1394,8 @@ container.style.left = centeredLeft(inkW, self.slot, Math.max(pets.length, self.
     };
 
 hit.addEventListener("mouseenter", function () {
+    self.grabbed = ""; self.grabAnim(); // 手还没按上就先解好拖拽姿势
+    gestureSay("hover"); // 移入打个招呼（池子空就静默）
       setPassthrough(false);
       hit.style.cursor = "grab";
       self.setHover(true);
@@ -1903,6 +1905,21 @@ var buffered = function () {
      * 时那一段的首帧早就解好了，换手是零延迟的硬切，而不是「先拿旧姿势顶着 40ms」。
      * 反过来，不预热的话抓起宠物会有一下可察觉的停顿。
      */
+    /**
+     * 抓起时该演哪一段：**一次会话只挑一段**（memo），顺手预热。
+     *
+     * ⚠️ 以前 pointerdown 预热的是 pick 出来的 A、真拖起来时又 pick 一次得到 B ——
+     *   十有八九不是同一段，于是抓起那一瞬间要现加载现解码首帧，屏幕上就是「抓了以后
+     *   空着不动一秒」才换上拖拽姿势（用户口径「有一秒左右的空闲时间无法拖拽动画」）。
+     *   现在鼠标移入就把这段解好，抓起零延迟。
+     */
+    this.grabAnim = function () {
+      if (self.grabbed) return self.grabbed;
+      self.grabbed = config.animations.drag.length ? pick(config.animations.drag) : "";
+      if (self.grabbed && this.warmAnim) this.warmAnim(self.grabbed);
+      return self.grabbed;
+    };
+
     this.warmAnim = function (name) {
       if (!name || self.asleep || self.destroyed) return;
       var target = self.frontIdx === 0 ? videoB : videoA;
@@ -2249,7 +2266,7 @@ hit.addEventListener("pointerdown", function (e) {
       self.stopMove();
       // 先把拖拽姿势解到后台缓冲区去（见 warmAnim）：手指刚按下到真拖起来还有几帧，
       // 这几帧足够把首帧解出来，拖起来那一瞬间就是硬切，不用拿旧姿势顶着。
-      if (self.warmAnim && config.animations.drag.length) self.warmAnim(pick(config.animations.drag));
+      self.grabAnim(); // 预热这一段（见 grabAnim：移入鼠标时已经解好了）
       setPassthrough(false); // capture during drag
       e.currentTarget.setPointerCapture(e.pointerId);
       var r = container.getBoundingClientRect();
@@ -2341,9 +2358,11 @@ if (!dragState.active) return;
       if (!dragState.dragging) {
         if (Math.hypot(dx, dy) < DRAG_THRESHOLD) return;
         dragState.dragging = true;
+        gestureSay("drag");
         self.dragging = true;
         self.once = true;
 if (config.animations.drag.length) {
+          self.anim = self.grabAnim();
           self.anim = pick(config.animations.drag);
           self.switchTo(self.anim, true, { force: true }); // 拖起来了就得立刻换姿势（已预热 → 零延迟硬切）
         }
@@ -2382,6 +2401,8 @@ var dp = clampPos(e.clientX - dragState.offX - inkHalf, e.clientY - dragState.of
         }
       }
       if (wasDragging) {
+        gestureSay("drop");
+        self.grabbed = "";
         self.justDragged = true;
         setTimeout(function () { self.justDragged = false; }, 100);
         self.dragging = false;
@@ -2412,6 +2433,8 @@ self.customPos = { rx: (rc.left + halfW) / W1, ry: (rc.top + halfH) / H1, w: W1,
       if (self.once && config.animations.idle.indexOf(self.playing) < 0) return;
       self.stopDwell();
       self.stopMove();
+
+      gestureSay("click");
 
       // Click during WS override (thinking/coding): cancel timer,
       // play 傲娇生气, then re-enter override on end
@@ -2781,6 +2804,24 @@ if (asleep) pet.sleep();
     if (!t) return;
     var target = bubbleTarget && bubbleTarget.showBubble ? bubbleTarget : pets[0];
     if (target) target.showBubble(t, { ms: ms || 6000 });
+
+  /**
+   * 手势 → 冒一句话（鼠标移入 / 点一下 / 拖起来 / 放下，§9.37）。
+   * 同一个池子里随机抽，池子空 = 不出声（老配置照旧）。
+   * 两道门：① chatBusy（agent 忙 / 有人在打字 / 窗不可见）—— 不插状态气泡的队；
+   * ② cooldownMs 冷却 —— 鼠标在宠物身上来回扫时不至于刷屏。
+   */
+  var gestureLast = {};
+  function gestureSay(kind, ms) {
+    var c = (config && config.gestures) || {};
+    var pool = c[kind];
+    if (!pool || !pool.length) return;
+    if (chatBusy()) return;
+    var now = Date.now();
+    if (gestureLast[kind] && now - gestureLast[kind] < (c.cooldownMs || 6000)) return;
+    gestureLast[kind] = now;
+    chatSay(pick(pool), ms || 2600);
+  }
   }
 
   /**
