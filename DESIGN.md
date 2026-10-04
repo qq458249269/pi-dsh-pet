@@ -359,6 +359,11 @@ pi-pet config           # 看/改 config.json
     双保险防重复换手 / 换手过期。顺手在 `pointerdown` 时 `warmAnim()` 一下拖拽姿势
     （只写 `src` 让解码器先去后台缓冲区，不动 `is-front`/`frontIdx`），
     抓起那一下就不用等解码。
+    ⚠️⚠️ 2026-10 补：`loadeddata` 只等**首帧数据**还是不够，得等**整段缓冲完**
+    （`readyState >= 4` / `canplaythrough`，外层 2s 兜底免得卡住宠物）。webm 的透明背景
+    是另带的 alpha 块（BlockAdditional），半截数据就出帧时 Chromium 会把它丢掉 ——
+    症状是「**部分**动画整体变成黑色背景」（素材本身没问题，换机器/换 Electron 版本又好了，
+    capturePage 拍出来是整块不透明），极难复现。宁可多等几毫秒。
     实测（`tmp/probe` 里那套渲染进程探针，一次真实拖拽逐帧记两层 computed opacity）：
     修复前 653 帧里有 **85 帧 front 落在 0.05~0.95**（宠物半透明）、84 帧两头同时可见，
     opacity 组合是一长串 0.03/0.08/0.16/0.26/0.37…；修复后 663 帧里**半透明 0 帧、

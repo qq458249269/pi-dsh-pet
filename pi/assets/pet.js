@@ -301,7 +301,9 @@ var HIT_BOX = { x0: 200, y0: 50, x1: 440, y1: 335 };
    * 正常只要 30~50ms（requestVideoFrameCallback 一回调就换手，见 switchTo）。这是给
    * 「回调一直不来」的兜底：宁可让旧姿势多顶一会儿，也不能让宠物卡在旧动作上不动。
    */
-  var FRAME_WAIT_MS = 220;
+var FRAME_WAIT_MS = 220;
+  // 等整段 webm 都进本地缓存的耐心（见 switchTo 里的说明）。预热过的段早就到了，不花时间。
+  var BUFFER_WAIT_MS = 2000;
 
   // ========================================================================
   // 2. Config helpers (from config.ts)
@@ -1638,9 +1640,17 @@ self.playing = next;   // 屏幕上真正在放的（判定「演到哪了」只
         if (!self.asleep && target.paused) target.play().catch(function () {});
         if (self.pendingMove && !self.asleep) self.startMoveDrive(target);
       };
-      /** loadeddata 只说明解码器交出了首帧，合成器还没把它贴上去；那时候换手就是闪一帧空白。 */
+/**
+       * loadeddata 只说明解码器交出了首帧，合成器还没把它贴上去；那时候换手就是闪一帧空白。
+       * ⚠️⚠️ 但**别在整段缓冲完之前上屏**（readyState >= 4 / canplaythrough 之前）：
+       * webm 的透明背景是另带的 alpha 块（BlockAdditional），半截数据就出帧时 Chromium
+       * 会把它丢了 —— 症状是「部分动画整体变成黑色背景」（素材本身没问题），
+       * 换台机器/换个 Electron 版本就好，更难查。宁可多等几毫秒。
+       */
       var onReady = function () {
-        target.removeEventListener("loadeddata", onReady);
+        target.removeEventListener("loadeddata", buffered);
+        target.removeEventListener("canplaythrough", buffered);
+        clearTimeout(bufferWait);
         if (self.pending && self.pending.gen !== gen) return;
         if (!self.asleep) target.play().catch(function () {});
         if (typeof target.requestVideoFrameCallback === "function") {
@@ -1652,8 +1662,18 @@ self.playing = next;   // 屏幕上真正在放的（判定「演到哪了」只
           fallback = setTimeout(commit, 0);
         }
       };
-      target.addEventListener("loadeddata", onReady);
-      if (target.readyState >= 2) onReady();
+var buffered = function () {
+        if (target.readyState >= 4) onReady();
+      };
+      // 卡住了（磁盘/network 抽风）也得换手，不能让宠物冻在旧动作上。
+      var bufferWait = setTimeout(function () {
+        target.removeEventListener("loadeddata", buffered);
+        target.removeEventListener("canplaythrough", buffered);
+        onReady();
+      }, BUFFER_WAIT_MS);
+      target.addEventListener("loadeddata", buffered);
+      target.addEventListener("canplaythrough", buffered);
+      buffered();
     };
 
     /**
