@@ -70,7 +70,7 @@ curl -X POST 127.0.0.1:47653/event -H "authorization: Bearer $(pi-pet token)" \
 | 块 | 大小 | 能动吗 |
 | --- | --- | --- |
 | Electron 运行时 | ≈85MB（压后） | 不能，去掉就不是 Electron 了 |
-| 91 个 webm 素材 | 46MB | **不能动**：禁止重编码/降分辨率（见下面的规则） |
+| 93 个 webm 素材 | 51MB | **不能动**：禁止重编码/降分辨率（见下面的规则） |
 | locales 语言包 | ≈41MB → 2MB | 已砍：只留 `zh-CN` / `en-US` |
 | `dxcompiler/dxil.dll` | 26MB → 0 | 已删：D3D12 后端用不上（`scripts/after-pack.cjs`） |
 
@@ -125,7 +125,7 @@ npm run build:dir      # 只出免安装目录版 dist/win-unpacked/，跑得快
 
 CI（推 main / 手动触发 `release` workflow）走同一条链，只是多两件事：
 先用 `win-unpacked/pi-dsh-pet.exe` 真跑一次冒烟（起服务、查 `/health`、确认 asar 里的
-页面与 92 个素材读得出来）
+页面与 93 个素材读得出来）
 产物名里**没有版本号**（版本号 `YYYY.MM.DD.NNNN` 不是合法 semver，electron-builder 会
 把它规范化成 `2026.9.3-0.2` 这种鬼样子），版本认 tag / release 说明。
 发布链的约束（token 权限、跨 job 依赖）见 [DESIGN.md §10](./DESIGN.md)。
@@ -176,8 +176,8 @@ pi-dsh-pet/
 ├── dsh/pi-pet.mjs      # dsh 侧适配（cordis 风格）
 ├── opencode/pi-pet.ts  # opencode 侧适配（Bun 插件 + pet 工具）
 ├── pi/assets/          # Electron 窗口 UI（pet.html + pet.js + pet.css + preload + 主进程）
-assets/preview/     # 91 个预览 GIF
-assets/thumb/       # 91 个透明 WebM 动画
+assets/preview/     # 93 个预览 GIF
+assets/thumb/       # 93 个透明 WebM 动画
 ├── assets/config.jsonc # 动画到事件/标签的映射
 ├── electron-builder.yml# 打单文件 exe 用（日常开发不需要）
 ├── package.json        # npm 包清单
@@ -202,7 +202,7 @@ node bin/pi-pet.cjs restart  # 换一扇窗，pet.js 才重新加载
 
 ## 动画预览
 
-全部 92 个动画（640×360 WebM）：
+全部 93 个动画（640×360 WebM）：
 
 **待机 / 转向**
 
@@ -241,6 +241,7 @@ node bin/pi-pet.cjs restart  # 换一扇窗，pet.js 才重新加载
   <img src="https://raw.githubusercontent.com/qq458249269/pi-dsh-pet/main/assets/preview/yaoshan-naliang.gif" width="160" alt="摇扇纳凉">
 assets/preview/chenjian-shuaya.gif" width="160" alt="晨间刷牙">
   <img src="https://raw.githubusercontent.com/qq458249269/pi-dsh-pet/main/assets/preview/ye-wan-tang-chuang-shang-shui-jiao.gif" width="160" alt="夜晚躺在床上睡觉">
+  <img src="https://raw.githubusercontent.com/qq458249269/pi-dsh-pet/main/assets/preview/shui-chuang-zuo-meng.gif" width="160" alt="睡床做梦">
 </p>
 
 **玩耍**
@@ -395,7 +396,7 @@ my-anim: {
 
 | 项 | 值 | 为什么 |
 |----|----|--------|
-| 与现有 92 个素材一致；窗按 16:9 舞台排版 |
+| 与现有 93 个素材一致；窗按 16:9 舞台排版 |
 | 编码 | **VP8 + `yuva420p`**（`-auto-alt-ref 0`） | 见下面的坑 |
 | 抠像 | 纯 alpha，背景 0 | 浮窗透明，多余的黑框会直接露馅 |
 | 自检 | 逐帧扫 alpha 外接框，贴边就报错 | 「切边」是静默故障：看着像角色被削平 |
@@ -433,7 +434,7 @@ FFMPEG_PATH=/path/to/ffmpeg node scripts/mp4-to-webm.cjs …    # ffmmpeg 不在
 
 | 选项 | 默认 | 说明 |
 |------|------|------|
-| `--fps` | 24 | 与其余 92 个素材一致 |
+| `--fps` | 24 | 与其余 93 个素材一致 |
 | `--size` | 640x360 | **必须** 640×360：窗的 ink box / 命中区拿 640×360 当基准 |
 | `--keep-aspect` | 关 | 等比缩放 + 四周补透明（走 pad 滤镜，需全功能 ffmpeg）；默认是**拉伸铺满** |
 
