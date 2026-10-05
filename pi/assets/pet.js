@@ -489,7 +489,7 @@ idleDwellMs: num("idleDwellMs", TIMING_DEFAULT.idleDwellMs),
       if (!isFinite(v) || v < 0) throw new Error("animationWeights." + k + " invalid");
     });
 
-return { pets: pets, animations: a, animationWeights: w, timing: readTiming(raw.timing), chatter: readChat(raw) };
+return { pets: pets, animations: a, animationWeights: w, timing: readTiming(raw.timing), chatter: readChat(raw), gestures: raw.gestures && typeof raw.gestures === "object" ? raw.gestures : null };
   }
 
   // ========================================================================

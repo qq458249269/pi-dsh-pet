@@ -182,8 +182,8 @@
     ]
   },
   "chatter": {
-    "enabled": true,
-    "idleSec": [5, 5],
+    "enabled": false,
+    "idleSec": [90, 180],
     "idle": [
       "……",
       "好无聊呀",
