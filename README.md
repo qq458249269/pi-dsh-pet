@@ -420,30 +420,71 @@ my-anim: {
 已经有视频/动图的时候，别去手写骨架 —— `scripts/mp4-to-webm.cjs` 一条命令搬进桌宠：
 
 ```sh
-node scripts/mp4-to-webm.cjs 生成图片.mp4 夜晚躺在床上睡觉   # → assets/thumb/夜晚躺在床上睡觉.webm
-node scripts/mp4-to-webm.cjs a.mp4 名字 --fps 24 --size 640x360 --keep-aspect
-FFMPEG_PATH=/path/to/ffmpeg node scripts/mp4-to-webm.cjs …    # ffmmpeg 不在 PATH 时
+node scripts/mp4-to-webm.cjs "D:\Users\yxh\Downloads\生成图片.mp4" 夜晚躺在床上睡觉 --key 0x001133
+FFMPEG_PATH=/path/to/ffmpeg node scripts/mp4-to-webm.cjs …    # ffmpeg 不在 PATH 时
 ```
 
-脚本替人做的三件事（手敲 ffmpeg 十有八九会漏）：
+### 完整生成流程（源不是 16:9 也没关系，绝不拉伸）
 
-1. **`setsar=1`** —— 不复位的话产物带 `SAR 9:16`，播放器按竖幅显示，人物被拉长。
-2. **`-auto-alt-ref 0`** —— 带 alpha 时开着它，编码器直接拒绝干活。
-3. **产物自检** —— 尺寸、空文件都是**静默**故障（窗里只表现为这段动画不播），所以编完
+```sh
+# 1. 转码：等比缩放 + 四周补**透明**边 + 抠掉纯色底
+node scripts/mp4-to-webm.cjs "D:\Users\yxh\Downloads\生成图片.mp4" 夜晚躺在床上睡觉 --key 0x001133
+#    → assets/thumb/夜晚躺在床上睡觉.webm（640×360，等比居中，两侧透明）
+
+# 2. 更新校验清单（sha256）并全量自检
+node scripts/check-assets.cjs --write && npm test
+
+# 3. 图库预览图（320×180）跟着换，否则 README 里摆的还是变形那张
+node_modules/ffmpeg-static/ffmpeg.exe -y -i assets/thumb/夜晚躺在床上睡觉.webm \
+  -vf "fps=12,scale=320:180:flags=lanczos,split[a][b];[a]palettegen=max_colors=128[p];[b][p]paletteuse=dither=bayer" \
+  -loop 0 assets/preview/ye-wan-tang-chuang-shang-shui-jiao.gif
+
+# 4. 推给在跑的那份 + 换窗
+npm run sync && node bin/pi-pet.cjs restart
+```
+
+**源是方形/竖形怎么办 —— 等比缩 + 补透明边，这是唯一正解。**
+旧脚本默认 `scale=640:360`，对 720×720 的源（就是「夜晚躺在床上睡觉」那份）就是
+**横向压到 56%**：容器仍报 640×360 / SAR 1:1，播放器量到的还是 16:9，查容器查不出毛病，
+屏幕上只表现为「人物被拉宽、比例不协调」。脚本现在遇到非 16:9 源自动走
+`scale=…:force_original_aspect_ratio=decrease,pad=…:color=black@0`（等比 + 补边）。
+⚠️ 补边颜色必须写 `black@0`：pad 默认填**不透明**黑，补出来的就是两条黑边条。
+跑不了 pad 的机器**直接报错停下** —— 宁可不出素材，也别默默交一个变形的。
+
+⚠️ ffmpeg 用哪一份（实测，别再猜）：
+
+| ffmpeg | 结论 |
+|--------|------|
+| `node_modules/ffmpeg-static`（gyan.dev essentials，devDependency） | ✔ pad/colorkey/blend/alpha 全有 |
+| `@ffmpeg-installer` 2018 | 有滤镜，但 `yuva420p` 编/解都失效 |
+| Steam CSNZ 自带（`--disable-everything`） | 有 pad，编不出 alpha ⇒ 产物全不透明，桌面上是方块 |
+| QQBrowser 自带 n7.1.1 | 根本没编解码 VP8/VP9 |
+
+脚本自动按上面顺序找（`FFMPEG_PATH` 可覆盖），并**真跑一帧**验 pad 能不能用。
+
+⚠️ 自检的盲区（实测踩过）：这些 ffmpeg **解不出** webm 的 alpha —— 抽帧出来的 PNG 连 alpha
+通道都没有，于是「数半透明像素」永远得到 0，会误报「编不出 alpha」。脚本现在只在 PNG 真带
+alpha 通道时才下结论，否则明说「量不了」。**验收得用 Chromium**：把 webm 画到 canvas 上数
+`alpha>24` 的像素 —— 抠过底的应该在 10%~40% 之间，且 ink box 落在画布中间（方形源的 ink 宽
+= 360，左右各 ~140px 透明），**顶满 0..640 就是没抠干净 / 没补透明边**。
+
+脚本替人做的四件事（手敲 ffmpeg 十有八九会漏）：
+
+1. **等比缩放 + 补透明边** —— 非 16:9 的源（AI 出的视频多半是方的）绝不硬 `scale=640:360`（见上）。
+2. **`setsar=1`** —— 不复位的话产物带 `SAR 9:16`，播放器按竖幅显示，人物被拉长。
+3. **`-auto-alt-ref 0`** —— 带 alpha 时开着它，编码器直接拒绝干活。
+4. **产物自检** —— 尺寸、空文件都是**静默**故障（窗里只表现为这段动画不播），所以编完
    抽一帧验 alpha、验尺寸，不合格当场报错。
 
 | 选项 | 默认 | 说明 |
 |------|------|------|
 | `--fps` | 24 | 与其余 93 个素材一致 |
 | `--size` | 640x360 | **必须** 640×360：窗的 ink box / 命中区拿 640×360 当基准 |
-| `--keep-aspect` | 关 | 等比缩放 + 四周补透明（走 pad 滤镜，需全功能 ffmpeg）；默认是**拉伸铺满** |
+| `--key` | 无 | 抠掉这个纯色底，如 `0x001133`（mp4 本身没有 alpha，只能靠它） |
+| `--loop` | 0 | >0 时剪成 N 秒首尾交叉淡化的无缝循环 |
+| ~~`--keep-aspect`~~ | — | **已删**：保比例现在是默认且强制的，别让「要不要保比例」再变成一个能踩的坑 |
 
-⚠️ 两条现实限制（ffmpeg 那边的事）：
-
-- 精简版 ffmpeg（Steam 自带那份 `--disable-everything` 就是）**常编不出 alpha**，
-  `yuva420p` 被静默忽略 ⇒ 产物不透明，桌面上是一块方块。脚本会抽帧提示。
-- 没有 `pad` / `colorkey` 滤镜时，非 16:9 的源只能拉伸（会变形）；mp4 本身也没 alpha，
-  要抠底得另走「逐帧 node 解码 → 去背 → 编码」。
+⚠️ 素材长度：普遍 2~4s 一段；超过 4s 桌宠循环播完会有明显接缝（加 `--loop 3` 做无缝）。
 
 ### 素材放进去了，怎么才会被播？
 

@@ -1016,9 +1016,14 @@ check("只有 turn + moves.actions 镜像，其余按素材原样", /function is
 check("镜像方向与走位方向同一口径（moveDir 一处算，两处用）", /function moveDir\(\)/.test(petSrc) && /var dir = moveDir\(\)/.test(petSrc) && /return \(self\.facingRef === "right"\) !== turnAnim \? 1 : -1/.test(petSrc));
 check("turn 动画放完仍翻 facing（不然转身动画永远朝一个方向）", /anims\.turn\.indexOf\(endedAnim\) >= 0[\s\S]{0,200}self\.facingRef = nextF/.test(petSrc));
 
-// §9.32：窗宽按**当前动画的可见框**，不是按整个舞台（否则两侧长期空一大块透明区，
-//   屏幕上留着上一段宽动画的旧画面）。滞回 + 换手时报，两者一起断言。
-check("窗宽按当前动画可见框（两侧不再长期空一大块）", /dynFrac > 0 \? Math\.round\(dynFrac \* maxStage\)/.test(petSrc) && /animInkBox\(pc\.playing\)/.test(petSrc));
+// ⚠️ 反向断言（2026-10 用户口径「动画会自己晃动偏移」）：窗的几何**只能**由配置（舞台）决定。
+//   曾经按当前动画的可见框缩窗宽（§9.32），而窗只改尺寸、容器又居中 ⇒ 每换一段动画窗宽就变一次，
+//   宠物跟着左右跳（最狠的是整幅不透明的素材，宽 = 整个舞台，与窄动画每 7.6s 互跳一次）。
+//   当前动画的宽窄只准影响形状/命中区（pushHitRegion），不准动窗宽。
+check("窗宽与当前动画无关（stageSize 不许读 animInkBox）——否则宠物每换一段动画就左右晃",
+  !/dynFrac/.test(petSrc) &&
+    !/function stageSize\(\)[\s\S]{0,2600}animInkBox/.test(petSrc) &&
+    /var w = maxW \+ sidePad \* 2 \+ roamRoom\(sidePad\)/.test(petSrc));
 check("换手时报一次窗宽（宽动画↔窄动画切换才改）", /self\.refitInk\(\);\s*pushHitRegion\(\);[\s\S]{0,200}reportWindowSize\(\);/.test(petSrc));
 check("窗宽变化有滞回（漫游微调不变成每秒十几次搬窗）", /WIN_W_HYSTERESIS/.test(petSrc) && /Math\.abs\(s\.w - lastWinW\) < WIN_W_HYSTERESIS/.test(petSrc));
 

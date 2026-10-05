@@ -18,8 +18,35 @@ const path = require("node:path");
 
 const ROOT = path.resolve(__dirname, "..");
 
-/** 只同步这些：窗与宿主真正读的文件。素材（assets/thumb/*.webm）按需单跑 gen:anim 后再推。 */
+/** 只同步这些：窗与宿主真正读的文件。 */
 const SYNC = ["app", "bin", "pi/assets", "assets/config.jsonc", "package.json"];
+
+/**
+ * 素材也推，但只推**缺的和大小不同的**。
+ * ⚠️ 以前素材整个不在同步列表里（怕 90 几个 webm 每次全拷），于是新加的素材永远
+ * 只躺在开发那份：窗去 /thumb/ 取到的是 404，Chromium 把 404 的响应体当媒体解 →
+ * `MEDIA_ERR_SRC_NOT_SUPPORTED`（错误码 4）—— 症状是「这段动画不播」，查素材本身却
+ * 完全正常（实测：睡床做梦.webm 用 file:// 打开好好的）。按大小比对就够，
+ * 一次全量也就 90 多次 stat。
+ */
+const THUMB = "assets/thumb";
+function syncThumbs(target, tally) {
+	const dir = path.join(ROOT, THUMB);
+	if (!fs.existsSync(dir)) return;
+	for (const name of fs.readdirSync(dir)) {
+		if (!name.endsWith(".webm")) continue;
+		const src = path.join(dir, name);
+		const dst = path.join(target, THUMB, name);
+		const st = fs.statSync(src);
+		if (fs.existsSync(dst) && fs.statSync(dst).size === st.size) {
+			tally.same++;
+			continue;
+		}
+		fs.mkdirSync(path.dirname(dst), { recursive: true });
+		fs.copyFileSync(src, dst);
+		tally.copied.push(`${THUMB}\\${name}`);
+	}
+}
 
 async function health() {
 	const portFile = process.env.PI_PET_PORT || (() => {
@@ -86,6 +113,7 @@ function walk(rel, target, tally) {
 	for (const rel of SYNC) {
 		if (fs.existsSync(path.join(ROOT, rel))) walk(rel, target, tally);
 	}
+	syncThumbs(target, tally);
 	console.log(`已同步到宿主在用的那份：${target}`);
 	console.log(`  更新 ${tally.copied.length} 个文件，${tally.same} 个本来就一样`);
 	for (const f of tally.copied.slice(0, 20)) console.log(`    ~ ${f}`);

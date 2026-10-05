@@ -1,7 +1,7 @@
 {
   "name": "pi-dsh-pet",
   "version": "0.0.2",
-"description": "Standalone desktop pet (transparent Electron window) that exposes a local HTTP/WS port so pi, dsh, opencode, or any script can drive it. Ships pi / dsh / opencode adapters as thin clients.",
+  "description": "Standalone desktop pet (transparent Electron window) that exposes a local HTTP/WS port so pi, dsh, opencode, or any script can drive it. Ships pi / dsh / opencode adapters as thin clients.",
   "keywords": [
     "pi",
     "pi-plugin",
@@ -38,7 +38,7 @@
   "files": [
     "app",
     "bin",
-"pi",
+    "pi",
     "dsh",
     "opencode",
     "assets/thumb",
@@ -57,8 +57,7 @@
     "build": "node scripts/build.cjs --win --publish never --config electron-builder.yml",
     "prebuild:dir": "node scripts/stamp.cjs",
     "build:dir": "node scripts/build.cjs --win --dir --publish never --config electron-builder.yml",
-
-"gen:anim": "node scripts/gen-anim.cjs",
+    "gen:anim": "node scripts/gen-anim.cjs",
     "sync": "node scripts/sync-running.cjs"
   },
   "engines": {
@@ -69,5 +68,8 @@
     "extensions": [
       "./pi/extensions"
     ]
+  },
+  "devDependencies": {
+    "ffmpeg-static": "^5.3.0"
   }
 }
