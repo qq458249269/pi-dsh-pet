@@ -242,8 +242,14 @@ resolveTarget():
 - 「记住位置」（宠物在窗里的站位）：拖拽松手 → `preload.savePosition` → 主进程带 token →
   `/control {action:"set-position"}` → 落盘 `home/positions.json`（比例坐标）；
   下次窗接上来时宿主补发一帧 `{"type":"positions"}`，`pet.js` 套用（本次运行已拖过的不动）。
-- 窗是**独立进程**：窗崩了宿主还在，`keepAlive` 会把它拉回来。打包版里这个"第二个进程"
-  就是 exe 自己（`pi-dsh-pet.exe --pi-pet-window <port>`）。
+- 窗与宿主**默认融进同一个进程**（打包版：宿主本身就是 Electron 主进程 → 直接在本进程开
+  BrowserWindow，见 `app/window-inproc.cjs`）。省一整套 Electron 实例：第二套的浏览器进程 +
+  GPU 进程 + 第二份 Chromium profile 缓存（进程 −2、内存 −100MB 上下）。**画质零改动**
+  （还是那扇小透明置顶窗、同一批 webm、同一条解码/合成管线）；数据面也没动 ——
+  窗仍然连宿主自己的 127.0.0.1 端口（WS + 静态资源），`bus.cjs` / `server.cjs` 一行没碰。
+  窗崩了服务还在的保证降级为「渲染进程崩不影响宿主」（本来也是独立进程）；
+  主进程崩则两者一起走（下次 `pi-pet start` 重来）。要老形态：`PI_PET_SPLIT_WINDOW=1`
+  （或 `pi-dsh-pet.exe --pi-pet-window <port>` 起独立窗进程）。
 
 ### 6.3 检查更新 / 自动更新（`app/updater.cjs`）
 
@@ -931,7 +937,7 @@ pi-pet config           # 看/改 config.json
 挂了写进摘要但不拦产物（别因为 runner 的图形环境卡死整次发布）。
 
 打包后运行期的两个前提：`app/electron.cjs` 就是 Electron 主进程
-（窗 = 同一个 exe 的第二个实例，`--pi-pet-window <port>`）；
+（窗默认开在本进程，`--pi-pet-window <port>` 仍保留给 `PI_PET_SPLIT_WINDOW=1` 的双进程形态）；
 `pi/assets/*` 与 `assets/thumb/*` 虽然打进 asar，但**由本机的 HTTP 服务**读给
 渲染进程（`/pet.html`、`/thumb/*.webm`），不依赖 Chromium 直接读 asar 里的媒体。
 `npm run build` / `npm run build:dir` 是本地等价物（`npx electron-builder`），

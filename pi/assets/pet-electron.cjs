@@ -36,13 +36,10 @@ const path = require("node:path");
 // 端口从 argv[2] 读：两种起法都落在 argv[2]
 //   electron pet-electron.cjs 47653
 //   pi-dsh-pet.exe --pi-pet-window 47653
-const port = parseInt(process.argv[2], 10);
-if (!port || isNaN(port)) {
-  console.error("Usage: electron pet-electron.cjs <port>");
-  process.exit(1);
-}
-
-const url = `http://127.0.0.1:${port}`;
+// 端口两条来路：argv[2] = 独立窗进程；PI_PET_PORT = 同进程开窗（宿主就是 Electron 主进程，
+// 见 app/window-inproc.cjs —— 少一整套 Electron 实例，省两个进程和一份 Chromium profile）。
+let port = 0;
+let url = "";
 const PKG_ROOT = path.resolve(__dirname, "..", "..");
 
 // ---- 别让 Windows 把「被遮住了」当成「不用画了」 ----
@@ -214,7 +211,50 @@ function writeStagePos(home, pos) {
   }
 }
 
-app.whenReady().then(() => {
+/** 这一轮 startWindow 挂上去的计时器（同进程重开一次要摘干净，否则重画白跑两遍）。 */
+const windowTimers = [];
+/** 当前那扇窗（宿主要能 close 它；窗没了 = 宿主那边判定「窗死了」）。 */
+let winRef = null;
+
+/**
+ * 同进程重开窗前，把上一轮注册到全局发射器上的东西摘干净。
+ * ipcMain 一条都不能留：菜单/命中区/穿透都挂在那儿，重复注册 = 右键弹两次菜单。
+ * ponytail: 这里假设同进程模式下没有别的模块用 ipcMain（确实没有，宿主是纯 HTTP/WS）；
+ *   真出现第二个使用者时改成「按 channel 精确 removeListener」。
+ */
+function teardownPrevWindow() {
+  try { ipcMain.removeAllListeners(); } catch { /* ignore */ }
+  for (const ev of ["display-added", "display-removed", "display-metrics-changed"]) {
+    try { screen.removeAllListeners(ev); } catch { /* ignore */ }
+  }
+  for (const ev of ["suspend", "lock-screen", "resume", "unlock-screen"]) {
+    try { powerMonitor.removeAllListeners(ev); } catch { /* ignore */ }
+  }
+  for (const t of windowTimers.splice(0)) clearInterval(t);
+}
+
+/** 窗自己的周期任务：登记一下，重开时能摘掉。 */
+function windowTimer(fn, ms) {
+  const t = setInterval(fn, ms);
+  t.unref?.();
+  windowTimers.push(t);
+  return t;
+}
+
+/**
+ * 开窗（可重复调用：hide-window → show-window 就是关掉再开一扇，同进程）。
+ * @param {number} p 宿主端口
+ */
+function startWindow(p) {
+  const n = Number(p) || 0;
+  if (!n) {
+    console.error("Usage: electron pet-electron.cjs <port>");
+    return false;
+  }
+  port = n;
+  url = `http://127.0.0.1:${port}`;
+  teardownPrevWindow();
+  app.whenReady().then(() => {
   const { home } = readTokenAndHome();
   // 舞台尺寸：先按常规档摆，渲染进程拿到配置后会报准数（pet:window-size）。
   const STAGE = { w: 620, h: 560 };
@@ -311,14 +351,14 @@ win.on("move", (_e, b) => rememberPos(b));
   if (TOPMODE === 2) {
     // 不置顶 = 不占置顶通道；靠定时把自己顶上来。showInactive 不抢焦点，
     // 代价：别的窗盖上来时会有最多 1.5s 的延迟才被顶回去（用户能看见）。
-    setInterval(() => {
+windowTimer(() => {
       if (win.isDestroyed() || !win.isVisible()) return;
       try {
         win.showInactive();
       } catch {
         /* 窗刚关/正在关，忽略 */
       }
-    }, 1500).unref?.();
+}, 1500);
     console.error("[pi-dsh-pet] TOPMODE=2：不置顶，每 1.5s showInactive 顶一次");
   }
   // ⚠️ resize 除了记落点，还得把形状**重新裁一遍**（§9.21）：形状是 Win32 的窗口区域，
@@ -381,11 +421,11 @@ function nudgeRepaint() {
    * ponytail: 若证实「只有内容变脏时才需要」就把这个兼底去掉（拿事件驱动换这点开销）；
    *   升级路径 = 主进程统计 invalidate 实际次数，超过 ~10/s 就收掉计时器。
    */
-  const REPINT_TICK_MS = Number(process.env.PI_PET_REPAINT_MS) || 400;
-  setInterval(() => {
+const REPINT_TICK_MS = Number(process.env.PI_PET_REPAINT_MS) || 400;
+  windowTimer(() => {
     if (win.isDestroyed() || !win.isVisible()) return;
     nudgeRepaint();
-  }, REPINT_TICK_MS).unref?.();
+  }, REPINT_TICK_MS);
 /** SetWindowRgn 是重活：改一次形状就要让 DWM 把这扇窗这块地方重新合成一遍
    *  （也就是又一次跟别的窗口抢合成预算）。所以两头都掐着：
    *    ① 量化到 2px —— 亚像素抖动不重画（不动的宠物不该一直重画）；
@@ -565,8 +605,8 @@ ipcMain.on("pet:passthrough", (_event, on) => {
    */
   const HOVER_POLL_MS = Number(process.env.PI_PET_HOVER_POLL_MS) || 50;
   let hovering = false;
-  if (!SHAPE_OK) {
-    setInterval(() => {
+if (!SHAPE_OK) {
+    windowTimer(() => {
       if (win.isDestroyed() || !win.isVisible() || !hitRects.length) return;
       const c = screen.getCursorScreenPoint();
       const p = currentPos();
@@ -580,7 +620,7 @@ ipcMain.on("pet:passthrough", (_event, on) => {
       } catch {
         /* 窗正在关，忽略 */
       }
-    }, HOVER_POLL_MS).unref?.();
+}, HOVER_POLL_MS);
   }
 
   // ---- 舞台窗：尺寸 / 搬动 / 收工 ----
@@ -850,8 +890,11 @@ win.setPosition(pos.x, pos.y);
     });
   }
 
-  // 渲染进程：宿主退出 / WS 断了 → 自己关
-  ipcMain.on("pet:close", () => app.quit());
+// 渲染进程：宿主退出 / WS 断了 → 自己关
+  // ⚠️ 只关**窗**，不 app.quit()：同进程模式下宿主也住在这儿（app/window-inproc.cjs），
+  //   这里 quit 等于把 HTTP/WS 服务一起带走。独立窗进程里没别的窗，关窗由
+  //   window-all-closed 退，两条路的行为一样。
+  ipcMain.on("pet:close", () => closeWindow());
 
   // 渲染进程：“说点什么…” → 把输入框叫到宠物头上（输入框长在气泡里）
   ipcMain.on("pet:say-ask", () => askSay());
@@ -1161,15 +1204,43 @@ if (!u.hasUpdate) {
     setInputMode(false);
   });
 
-  // 窗被收起来/关掉时复位，免得下次调用被 inputMode 卡住
+// 窗被收起来/关掉时复位，免得下次调用被 inputMode 卡住
   win.on("hide", () => { inputMode = false; });
-  win.on("closed", () => { inputMode = false; });
+  win.on("closed", () => { inputMode = false; winRef = null; });
+  winRef = win;
 
   win.loadURL(url);
 
   // ⚠️ 级别用 floating（默认置顶）而不是 screen-saver：screen-saver 级会强行压到
   //    全屏/其他置顶程序之上，系统对它的处理也更重。桌面宠物只需要“压着普通窗口”。
-  win.on("ready-to-show", () => win.setAlwaysOnTop(true, "floating"));
+win.on("ready-to-show", () => win.setAlwaysOnTop(true, "floating"));
+  });
 
+  return true;
+}
+
+/** 关掉当前那扇窗（同进程模式由宿主调；独立窗进程里宿主关不动窗，走的是广播）。 */
+function closeWindow() {
+  const w = winRef;
+  if (!w || w.isDestroyed()) return false;
+  try { w.close(); } catch { return false; }
+  return true;
+}
+
+/** 现在有窗吗（宿主判定「窗死了没有」用：同进程没有 pid 可看，只看窗还在不在）。 */
+function hasWindow() {
+  return Boolean(winRef && !winRef.isDestroyed());
+}
+
+module.exports = { startWindow, closeWindow, hasWindow };
+
+// 独立窗进程（打包版第二个实例）：窗关掉 = 这个进程的任务结束，退掉。
+// 同进程模式下**不能**退：hide-window 关窗后 HTTP/WS 服务还得留着（见 app/host.cjs）。
+if (process.argv.includes("--pi-pet-window")) {
+  if (!startWindow(parseInt(process.argv[2], 10))) process.exit(1);
   app.on("window-all-closed", () => app.quit());
-});
+} else {
+  // ⚠️ Electron 的默认行为是「没挂 window-all-closed 监听器 = 最后一扇窗关掉就退应用」。
+  //   同进程模式下那个应用就是宿主：不挡一下，用户点一下「隐藏宠物」就会连服务一起带走。
+  app.on("window-all-closed", (e) => e.preventDefault());
+}

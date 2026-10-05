@@ -575,6 +575,7 @@ var SIZE_MAP = { small: 380, normal: 400, large: 540 };
 开关一览（都只给窗进程，正常跑不用设）：
 
 ```sh
+PI_PET_SPLIT_WINDOW=1       # 强制双进程（窗另开一个 Electron 实例；默认已融合）
 PI_PET_SHAPE=1               # 回到窗口区域精确命中区（Windows 上会复现残影）
 PI_PET_HOVER_POLL_MS=50      # 光标判定间隔（延迟 = 这个值）
 PI_PET_REPAINT_MS=400        # 整窗重画的兼底间隔（0 关掉）
@@ -636,6 +637,11 @@ PI_PET_UPDATE_DELAY_MS=…  # 启动后等多久再查（默认 12s，别跟起�
 
 ### 省电 / 占用
 
+- **宿主与窗融进同一个进程**：打包版里宿主本身就是 Electron 运行时，窗直接开在本进程
+  （`app/window-inproc.cjs`），不再 spawn 第二个 Electron 实例 —— 少一个浏览器进程 +
+  一个 GPU 进程 + 第二份 Chromium profile 缓存（进程 −2，内存 −100MB 上下）。
+  窗还是那扇窗、素材还是那些 webm，**画质与事件面一字未改**（窗照样连宿主自己的
+  127.0.0.1 端口）。纯 node（`npm start` / `pi-pet serve` / CI）仍走双进程。
 - **不再有「空闲 N 秒自动冻住」**：宠物就该一直动，空闲也照常放（原 `timing.idleSleepMs` 已拿掉）。
 - **窗看不见时自动停**：最小化 / 屏保锁屏 / 系统挂起 → 主进程直接喊它睡（不经过服务）。
 - **手动省电模式：已屏蔽**（2026-10 起接口一律回「暂时屏蔽」，右键菜单里也没这一项）。

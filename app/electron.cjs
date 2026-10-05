@@ -2,16 +2,20 @@
  * app/electron.cjs —— 打包成 exe 之后的入口（electron main）
  *
  * 一个 exe 干两件事，用命令行参数区分：
- *   pi-dsh-pet.exe                    → 起宿主（HTTP/WS 服务）+ 拉起窗进程
- *   pi-dsh-pet.exe --pi-pet-window N  → 同一个 exe 的第二个实例，只负责开那扇透明窗
+*   pi-dsh-pet.exe                    → 起宿主（HTTP/WS 服务），并在本进程开那扇透明窗
+ *   pi-dsh-pet.exe --pi-pet-window N  → 同一个 exe 的第二个实例，只开窗（老形态，
+ *                                       现由 PI_PET_SPLIT_WINDOW=1 / 本参数触发）
  *   pi-dsh-pet.exe --no-window        → 只当服务（给 pi/dsh 连，桌面上什么都不出现）
  *   pi-dsh-pet.exe --port 47653       → 指定端口
  *   pi-dsh-pet.exe --force            → 先请退已有的宿主再起
  *
- * 为什么窗要开成第二个进程（而不是本进程开个 BrowserWindow）：
- * 透明穿透窗 + 右键菜单 + 「隐藏窗但服务留着」这三件事，在同一个进程里很难干净地拆开
- * ——窗一崩，服务跟着完蛋。分成两个进程后，窗随便崩，宿主都会按 keepAlive 把它拉回来。
- * 打包版没有 electron.exe 可 spawn，所以第二个进程就是**这个 exe 自己**。
+ * 为什么窗默认开在**本进程**（而不是 spawn 第二个实例）：
+ * 这个 exe 自己就是 Electron 运行时，宿主已经是一个浏览器进程了 —— 再 spawn 第二个实例
+ * 就是白养第二套浏览器进程 + GPU 进程 + 第二份 Chromium profile 缓存（实测 100MB 上下）。
+ * 合并后：1 浏览器 + 1 GPU + 1 渲染。**画质不动**（同一扇窗、同一批素材、同一条管线），
+ * 数据面也不动（窗照样连宿主自己的 127.0.0.1 端口）。
+ * 代价（说清楚，别事后才发现）：窗崩了服务还活着的保证，从「整个窗进程」降级为
+ * 「渲染进程」—— 主进程崩则两者一起走。要老形态：PI_PET_SPLIT_WINDOW=1。
  */
 
 const os = require("node:os");

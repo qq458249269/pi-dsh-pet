@@ -50,8 +50,17 @@ const {
 } = require("./single.cjs");
 const { createBus } = require("./bus.cjs");
 const { createServer, listen } = require("./server.cjs");
-const { createWindowManager } = require("./window.cjs");
 const updater = require("./updater.cjs");
+
+/**
+ * 宿主自己是不是 Electron 主进程（打包版：pi-dsh-pet.exe 既是宿主又是窗的运行时）。
+ * 是的话窗直接开在本进程（app/window-inproc.cjs），少一整套 Electron 实例 ——
+ * 省两个进程（第二套的浏览器进程 + GPU 进程）和第二份 Chromium profile 缓存。
+ * 纯 node（开发态 / `pi-pet serve` / CI 冒烟）没有 electron，走原来的双进程；
+ * 逃生门 PI_PET_SPLIT_WINDOW=1 强制双进程（窗崩了服务还活着的老形态）。
+ * ⚠️ 只换**开窗方式**：WS / HTTP / 事件总线一行没动，画质也一行没动。
+ */
+const FUSED_WINDOW = Boolean(process.versions.electron) && process.env.PI_PET_SPLIT_WINDOW !== "1";
 
 const TICK_MS = 2000;
 const STATE_WRITE_MIN_GAP_MS = 5000;
@@ -222,7 +231,7 @@ async function start(options = {}) {
 const busHooks = { onStateChange: () => {}, maxPets: () => 1, paused: () => false, positions: () => readPositions(), power: () => false };
 	const bus = createBus(busHooks);
 
-	const win = createWindowManager({
+const win = (FUSED_WINDOW ? require("./window-inproc.cjs") : require("./window.cjs")).createWindowManager({
 		// 窗靠 PI_PET_TOKEN 拿到权威口令（不要让它自己去 home 里猜）
 		token,
 		onWindowChange: (patch) => Object.assign(state, patch),

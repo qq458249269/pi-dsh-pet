@@ -8,12 +8,16 @@
  *      后调 `closeWindow()` → `app.quit()`。
  * 宿主化之后，本进程就是那个「更长寿的人」，窗挂在它下面。
  *
- * 三个 Windows 上的实测坑（照抄，别改回去）：
+* 三个 Windows 上的实测坑（照抄，别改回去）：
  *   - **别用 npx electron**：npx 那层不带 CREATE_NO_WINDOW，会凭空弹一个黑框控制台。
  *     直接 spawn electron.exe：一条进程、零控制台，还省掉 1~2s 的解析。
  *   - **detached + windowsHide 一起给**：无论本进程自己被怎么拉起（node / bun），
  *     窗都不在父控制台的控制台事件范围里（Ctrl+C / 关 cmd 都碰不到）。
  *   - **窗在不在以「有没有 WS 客户端」为准**，不是 pid：pid 在但渲染进程崩了照样连不上。
+ *
+ * ⚠️ 这层只在宿主**不是** Electron 主进程时才走（开发态 / `pi-pet serve` / CI 冒烟）。
+ *   打包版宿主自己就是 Electron，窗开在本进程（app/window-inproc.cjs），少一整套实例；
+ *   想强制回到本文件的双进程形态：PI_PET_SPLIT_WINDOW=1。
  */
 
 "use strict";
