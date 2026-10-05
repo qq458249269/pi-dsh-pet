@@ -1172,6 +1172,14 @@ var halfW = this.size / 2;
         container.style.left = Math.round(m.left) + "px";
         container.style.right = "auto";
         clampBubbles();
+        // ⚠️ 位置记忆必须跟着改（同 applyPosition）：currentCenterX/Y（漫游起点）读的是
+        //   customPos.rx*W，不回写的话它还记着「夹之前」那个点 —— 下一次走路起手先跳回
+        //   旧位置、窗一 resize 也会用 applyPosition 弹回原地（宽动画的像素又被顶出窗外）。
+        //   语义同 applyPosition：存**实际落点**，不是计划点。
+        if (self.customPos) {
+          self.customPos.rx = (m.left + halfW) / window.innerWidth;
+          self.customPos.ry = (m.top + halfH) / window.innerHeight;
+        }
       }
       pushHitRegion();
     };

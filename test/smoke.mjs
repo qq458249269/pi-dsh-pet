@@ -843,6 +843,9 @@ check("拖拽基准 win0 = 屏幕坐标减窗内坐标（别拿容器偏移推�
 check("窗太窄时留白区间取中间（不翻车成贴边）", /if \(hiX < loX\) loX = hiX = Math\.max\(0, \(W - inkW\) \/ 2\)/.test(petSrc) && /if \(hiY < loY\) loY = hiY = Math\.max\(0, \(H - stageH\) \/ 2\)/.test(petSrc));
 // 夹完把内存里的落点也改回实际值：不改的话漫游起点（读 customPos）会先跳一下再走
 check("夹取后回写 customPos（漫游起点和 DOM 一致）", /self\.customPos\.rx = \(keep\.left \+ inkHalf\) \/ window\.innerWidth/.test(petSrc));
+// refitInk 把容器搬进去之后也得回写：不然画面位置和位置记忆分叉 ——
+// 下一次漫游从「夹之前」的旧点起手（跳一下再走），窗一 resize 就用 applyPosition 弹回原地
+check("refitInk 搬完位置回写 customPos（不再和画面分叉）", /this\.refitInk = function \(\)[\s\S]{0,700}if \(self\.customPos\) \{\s*self\.customPos\.rx = \(m\.left \+ halfW\) \/ window\.innerWidth/.test(petSrc));
 // 窗高公式和站位区间共用同一份 corner 算法（又一份算法就又一处对不上，§9.22 的教训）
 check("窗底留白 corner 算法只有一份（stageSize 与 stageKeepIn 共用）", /function bottomPadOf\(/.test(petSrc) && /botPad = Math\.max\(botPad, bottomPadOf\(cfg\)\)/.test(petSrc) && !/botPad = Math\.max\(botPad, Math\.max\(mY, STAGE_PAD_BOTTOM\)\)/.test(petSrc));
 
