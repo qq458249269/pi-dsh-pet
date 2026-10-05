@@ -79,6 +79,17 @@ function homeDir() {
   return path.join(os.homedir(), ".pi-dsh-pet");
 }
 
+// 开发态窗（electron.exe pet-electron.cjs <port>）默认共用 %APPDATA%\Electron 这个
+// profile：一只僵尸窗没退干净，下一只就抢不到 disk/GPU cache（win.log 里那串
+// "Unable to move the cache: 拒绝访问 / Gpu Cache Creation failed: -2"），
+// 首帧慢、排查时满屏红字。给窗自己的 profile（app/electron.cjs 融合模式里同款）。
+// ⚠️ 必须在 app ready 之前 setPath，晚一步就抛。
+try {
+  app.setPath("userData", path.join(homeDir(), "window-profile"));
+} catch {
+  /* 抢不到就算了，不影响开窗 */
+}
+
 /** 主进程 → 渲染进程的单向通道（目前只有“叫出输入框”用得到） */
 let webContentsSend = null;
 

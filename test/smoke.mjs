@@ -1077,6 +1077,21 @@ check("命中矩形与光标比的都是**屏幕**坐标（currentPos + 窗内�
 const pkgJson = JSON.parse(readFileSync(join(ROOT, "package.json"), "utf8"));
 check("build / build:dir 都走 scripts/build.cjs（镜像源）", /scripts\/build\.cjs/.test(pkgJson.scripts.build) && /scripts\/build\.cjs/.test(pkgJson.scripts["build:dir"]));
 check("build.cjs 不覆盖外层已设的镜像（CI 有自己的代理）", /if \(!env\[k\]\) env\[k\] = v/.test(readFileSync(join(ROOT, "scripts", "build.cjs"), "utf8")));
+// 开发态窗是 `electron.exe <script> <port>` 起的，而开窗收在 pet-electron.cjs 的
+// startWindow() 里、入口靠 --pi-pet-window 触发。少了它：宿主照常打「拉起窗 pid」，
+// 窗进程也活着，却一扇窗不开（屏幕上什么都没有，状态永远「窗客户端 0」）。
+check(
+	"开发态 spawn 带 --pi-pet-window（不然窗永远不开）",
+	/args = \[ELECTRON_SCRIPT, String\(port\), "--pi-pet-window"\]/.test(
+		readFileSync(join(ROOT, "app", "window.cjs"), "utf8")
+	)
+);
+// 窗共用默认 %APPDATA%\Electron profile 时，一只僵尸窗没退干净就把下一只的
+// disk/GPU cache 抢没了（满屏 cache_util_win 拒绝访问，首帧慢、排查被带偏）。
+check(
+	"窗自己一个 userData profile（app.setPath 在 ready 之前）",
+	/app\.setPath\("userData", path\.join\(homeDir\(\), "window-profile"\)\)/.test(petMain)
+);
 check("stop 返回成功", (await post(PORT, "/control", { action: "shutdown" }, token)).body.ok === true);
 const exitCode = await new Promise((res) => host.on("exit", res));
 check("宿主干净退出", exitCode === 0, `exit=${exitCode}`);

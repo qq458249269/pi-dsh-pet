@@ -217,7 +217,10 @@ function createWindowManager(ctx) {
 			spec = { file: process.execPath, args: ["--pi-pet-window", String(port)], shell: false };
 		} else {
 			const bin = resolveElectronBin();
-			const args = [ELECTRON_SCRIPT, String(port)];
+// ⚠️ --pi-pet-window 不能少：pet-electron.cjs 现在把开窗收进 startWindow()，
+			//   入口靠这个 flag 触发。少了它窗进程照样起、却什么都不干 —— 宿主那边只看到
+			//   「拉起窗 pid xxx」然后永远「窗客户端 0」，屏幕上什么都没有。
+			const args = [ELECTRON_SCRIPT, String(port), "--pi-pet-window"];
 			spec = bin
 				? { file: bin, args, shell: false }
 				: { file: isWin ? "npx.cmd" : "npx", args: ["--yes", "electron", ...args], shell: isWin };
