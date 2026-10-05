@@ -420,15 +420,15 @@ my-anim: {
 已经有视频/动图的时候，别去手写骨架 —— `scripts/mp4-to-webm.cjs` 一条命令搬进桌宠：
 
 ```sh
-node scripts/mp4-to-webm.cjs "D:\Users\yxh\Downloads\生成图片.mp4" 夜晚躺在床上睡觉 --key 0x001133
+node scripts/mp4-to-webm.cjs "D:\Users\yxh\Downloads\生成图片.mp4" 夜晚躺在床上睡觉
 FFMPEG_PATH=/path/to/ffmpeg node scripts/mp4-to-webm.cjs …    # ffmpeg 不在 PATH 时
 ```
 
 ### 完整生成流程（源不是 16:9 也没关系，绝不拉伸）
 
 ```sh
-# 1. 转码：等比缩放 + 四周补**透明**边 + 抠掉纯色底
-node scripts/mp4-to-webm.cjs "D:\Users\yxh\Downloads\生成图片.mp4" 夜晚躺在床上睡觉 --key 0x001133
+# 1. 转码：等比缩放 + 四周补**透明**边（不抠底，深色部分保留）
+node scripts/mp4-to-webm.cjs "D:\Users\yxh\Downloads\生成图片.mp4" 夜晚躺在床上睡觉
 #    → assets/thumb/夜晚躺在床上睡觉.webm（640×360，等比居中，两侧透明）
 
 # 2. 更新校验清单（sha256）并全量自检
