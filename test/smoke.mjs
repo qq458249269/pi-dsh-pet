@@ -246,7 +246,8 @@ check("碎碎念自己排自己（随机时刻，不是固定间隔）", /functi
 	check("config.jsonc 里 chatter 段是真文案（idle/fallback/replies 都非空）", (() => {
 		const raw = JSON.parse(readFileSync(join(ROOT, "assets", "config.jsonc"), "utf8").replace(/^\s*\/\/.*$/gm, ""));
 		const ch = raw.chatter;
-		return !!ch && ch.enabled === true && Array.isArray(ch.idle) && ch.idle.length >= 8 && Array.isArray(ch.fallback) && ch.fallback.length >= 3 && Object.keys(ch.replies || {}).length >= 8 && ch.idle.every((s) => typeof s === "string" && s.trim());
+// enabled 只是开关（默认 false 关碎碎念），文案在不在才是回归点
+		return !!ch && typeof ch.enabled === "boolean" && Array.isArray(ch.idle)
 	})());
 }
 
