@@ -1395,7 +1395,7 @@ container.style.left = centeredLeft(inkW, self.slot, Math.max(pets.length, self.
 
 hit.addEventListener("mouseenter", function () {
     self.grabbed = ""; self.grabAnim(); // 手还没按上就先解好拖拽姿势
-    gestureSay("hover"); // 移入打个招呼（池子空就静默）
+    gestureSay("hover", 2600, self); // 移入打个招呼（池子空就静默）
       setPassthrough(false);
       hit.style.cursor = "grab";
       self.setHover(true);
@@ -1439,7 +1439,7 @@ e.preventDefault();
     /** 活着的消息气泡：下标越大越新 = 越靠下。 */
     var bubbles = [];
 
-function stackEmpty() {
+    function stackEmpty() {
       return bubbles.length === 0 && !inputOpen;
     }
 
@@ -1734,7 +1734,7 @@ inputRow.classList.remove("show", "on");
       try { input.select(); } catch { /* ignore */ }
     }
 
-function submitInput() {
+    function submitInput() {
       var v = input.value.trim();
       closeInput();
       if (!v) return;
@@ -2358,7 +2358,7 @@ if (!dragState.active) return;
       if (!dragState.dragging) {
         if (Math.hypot(dx, dy) < DRAG_THRESHOLD) return;
         dragState.dragging = true;
-        gestureSay("drag");
+        gestureSay("drag", 2600, self);
         self.dragging = true;
         self.once = true;
 if (config.animations.drag.length) {
@@ -2401,7 +2401,7 @@ var dp = clampPos(e.clientX - dragState.offX - inkHalf, e.clientY - dragState.of
         }
       }
       if (wasDragging) {
-        gestureSay("drop");
+        gestureSay("drop", 2600, self);
         self.grabbed = "";
         self.justDragged = true;
         setTimeout(function () { self.justDragged = false; }, 100);
@@ -2434,7 +2434,7 @@ self.customPos = { rx: (rc.left + halfW) / W1, ry: (rc.top + halfH) / H1, w: W1,
       self.stopDwell();
       self.stopMove();
 
-      gestureSay("click");
+      gestureSay("click", 2600, self);
 
       // Click during WS override (thinking/coding): cancel timer,
       // play 傲娇生气, then re-enter override on end
@@ -2798,21 +2798,23 @@ if (asleep) pet.sleep();
     return false;
   }
 
-  /** 冒一句话（优先最近被右键 / 双击的那只宠物，跟输入框同处）。 */
-  function chatSay(text, ms) {
+  /** 冒一句话（默认最近被右键 / 双击的那只宠物；手势气泡走 own —— 多开时得冒在被碰的那只头顶）。 */
+  function chatSay(text, ms, own) {
     var t = String(text == null ? "" : text).trim();
     if (!t) return;
-    var target = bubbleTarget && bubbleTarget.showBubble ? bubbleTarget : pets[0];
+    var target = (own && own.showBubble) ? own : (bubbleTarget && bubbleTarget.showBubble ? bubbleTarget : pets[0]);
     if (target) target.showBubble(t, { ms: ms || 6000 });
+  }
 
   /**
    * 手势 → 冒一句话（鼠标移入 / 点一下 / 拖起来 / 放下，§9.37）。
    * 同一个池子里随机抽，池子空 = 不出声（老配置照旧）。
    * 两道门：① chatBusy（agent 忙 / 有人在打字 / 窗不可见）—— 不插状态气泡的队；
    * ② cooldownMs 冷却 —— 鼠标在宠物身上来回扫时不至于刷屏。
+   * own = 被碰的那只（多开时气泡得长在它自己头顶，别总往第一只头上堆）。
    */
   var gestureLast = {};
-  function gestureSay(kind, ms) {
+  function gestureSay(kind, ms, own) {
     var c = (config && config.gestures) || {};
     var pool = c[kind];
     if (!pool || !pool.length) return;
@@ -2820,8 +2822,7 @@ if (asleep) pet.sleep();
     var now = Date.now();
     if (gestureLast[kind] && now - gestureLast[kind] < (c.cooldownMs || 6000)) return;
     gestureLast[kind] = now;
-    chatSay(pick(pool), ms || 2600);
-  }
+    chatSay(pick(pool), ms || 2600, own);
   }
 
   /**

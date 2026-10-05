@@ -863,8 +863,21 @@ pi-pet config           # 看/改 config.json
     - 底色**分两层**：`background-color` 吃 `--fade`（能过渡 ⇒ 档位变化不硬跳），
       立体感另用一层近乎不透明的白 `background-image` 渐变 —— 渐变写在 `background`
       里是**过渡不了**的（`background-image` 不可插值）。
-    - 新消息插在**输入框之上**（`insertBefore(b, inputRow)`）：append 到栈尾会把正在
+- 新消息插在**输入框之上**（`insertBefore(b, inputRow)`）：append 到栈尾会把正在
       打的字顶走。
+
+35. **交互气泡：四个手势各一个文案池（§9.37）。**
+    `assets/config.jsonc` 的 `gestures` 下 `hover / click / drag / drop` 四个池子，随机抽一条，
+    冷却 `cooldownMs`（默认 6s，防止鼠标在身上来回扫刷屏），走 `chatSay → showBubble`。
+    池子空 = 不出声（老配置照旧）；`chatBusy()`（agent 忙 / 有人在输入 / 窗不可见）时不插队。
+    气泡必须**长在被碰的那只**头顶（`gestureSay(kind, ms, self)`），多开时不能总往第一只头上堆。
+
+    ⚠️ 这一节记的是踩过的坑：`chatSay()` 少了一个收尾的 `}`，于是后面的
+    `function gestureSay` 被关进了它的函数体。语法全绿（`node --check` 过），但
+    `gestureSay` 全局不存在 ⇒ hover / 点击 / 拖拽一句都不冒，控制台只有一句
+    ReferenceError，配多少文案都没用。所以 `scripts/check-pet-scope.cjs` 专门钉这一类：
+    配平交给 `vm.Script`（真编译器），自个儿只数「**函数声明出现在别的函数体内**」——
+    少写 `{` 的其它形态语法检查自己会拦，不必重造。
 
 规则 `YYYY.MM.DD.NNNN`（UTC 日期 + 当天第几个流水号），例：`2026.09.30.0001`。三个 job：`version`（算号 + 跑测试 + source zip + 建 tag）→ `exe`（Windows 打 portable）→ `release`（挂资产、发说明）。
 
