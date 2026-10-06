@@ -1635,9 +1635,12 @@ var overlap = roomAbove < BUBBLE_LINE_H * 2;
       opts = opts || {};
       var t = String(text == null ? "" : text).trim();
       if (!t) return;
-      if (opts.sticky === true) {
-        for (var s = bubbles.length - 1; s >= 0; s--) {
-          if (bubbles[s].classList.contains("sticky")) dropBubble(bubbles[s]);
+      // sticky（「思考中…」这类状态气泡）全局互斥：任何后续消息（新状态 / 空闲文案 /
+      // 手动 say）都顶掉旧的 sticky —— 否则状态回 idle 后那条 sticky 没有计时器，永远挂着。
+      // 唯一例外：同一句的续期帧，留着续命（下面 dup 分支处理）。
+      for (var s = bubbles.length - 1; s >= 0; s--) {
+        if (bubbles[s].classList.contains("sticky") && !(opts.sticky === true && bubbles[s].getAttribute("data-text") === t)) {
+          dropBubble(bubbles[s]);
         }
       }
       // 同一句已经泡着（续期帧 / 重复事件）→ 不再堆一条，直接续命。

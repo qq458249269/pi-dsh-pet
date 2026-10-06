@@ -53,11 +53,14 @@
     // leadSec/tailSec=动画首尾各多少秒原地不动。
     "moves": {
       "default": { "minDist": 60, "maxDist": 240, "margin": 20, "leadSec": 2, "tailSec": 2 },
-      "actions": [
-        { "name": "螃蟹走路" },
-        { "name": "原地漂浮踏步", "params": { "minDist": 40, "maxDist": 120 } },
-        { "name": "原地左转奔跑", "params": { "minDist": 120, "maxDist": 320 } }
-      ]
+      // 漫游（走路自主位移）已关闭：actions 留空 = 宠物位置固定，不再自己往左/右漂。
+      // 要恢复就把下面三行取消注释。
+      "actions": []
+      // "actions": [
+      //   { "name": "螃蟹走路" },
+      //   { "name": "原地漂浮踏步", "params": { "minDist": 40, "maxDist": 120 } },
+      //   { "name": "原地左转奔跑", "params": { "minDist": 120, "maxDist": 320 } }
+      // ]
     },
     // 随机动作：分类池。weight 为该分类出现权重；noMirror: true 表示“带文字、镜像会颠倒，
     // 宠物面向右（被镜像）时不播放该类”。所有分类 weight 合计应与 animationWeights 里

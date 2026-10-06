@@ -789,7 +789,7 @@ check("能留几条按头顶实测空间收（宁可少几条，不裁半行字�
 check("头顶变小（贴边 / 缩窗）也会收，不只在入栈时收", /if \(!overlap\) \{\s*\n\s*trim\(\);/.test(petSrc));
 check("新的在下面、老的上推（看着像滚动）", /\.pet-bubble-stack \{[\s\S]{0,400}flex-direction: column/.test(petCss) && /gap: 4px/.test(petCss));
 check("收栈：淡出 200ms 后摘节点，计时器跟节点走（不泄）", /function dropBubble\(el\)[\s\S]{0,400}clearTimeout\(el\._timer\)[\s\S]{0,600}setTimeout\(function \(\) \{[\s\S]{0,120}removeChild\(el\)/.test(petSrc) && /el\._timer = setTimeout\(function \(\) \{ dropBubble\(el\); \}, ms\)/.test(petSrc));
-check("同文案不重堆（宿主 10s 续帧）、sticky 全局只留一条", /getAttribute\("data-text"\) === t/.test(petSrc) && /classList\.contains\("sticky"\)\) dropBubble/.test(petSrc));
+check("同文案不重堆（宿主 10s 续帧）、sticky 全局只留一条", /getAttribute\("data-text"\) === t/.test(petSrc) && /classList\.contains\("sticky"\)[\s\S]{0,160}dropBubble/.test(petSrc));
 check("尾巴只给最底下那条（否则三泡三支箭）", /function markTail\(\)[\s\S]{0,200}classList\.toggle\("has-tail", i === last && !inputOpen\)/.test(petSrc) && /\.pet-bubble\.has-tail::after/.test(petCss));
 // §9.34 追加：老者退后（--fade 三档）+ 新的一条进来时老的**滑**上去（FLIP，不是跳）
 check("越老越退后（--fade 5 档对上 BUBBLE_MAX，只淡字与底色不碰 opacity）",
