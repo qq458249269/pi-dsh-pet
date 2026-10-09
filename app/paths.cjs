@@ -6,14 +6,19 @@
  *
  * 目录选择：`$PI_PET_HOME` > Windows `%APPDATA%/pi-dsh-pet` > `~/.pi-dsh-pet`。
  * 里面放：state.json（宿主写的全局状态）/ port（**只要一个端口号，纯文本，给脚本读**）
+ *        / port.keep（**记住上一次真的用上的端口**，下次优先复用）
  *        / ctrl.json（意图）/ config.json / host.lock/（单例锁）/ token（REST 鉴权）
  *        / positions.json（窗里拖到哪儿，下次启动还在那儿）/ electron.json（记住 electron.exe）
  *        / log.txt
  *
  * 为什么专门再写一个 port 文件：state.json 是给本项目的代码读的（带心跳、角色、版本），
- * 而 pi 扩展 / dsh 插件 / 用户自己的脚本只想知道「现在该连哪个端口」。47653 被占时宿主
- * 会退到随机端口，这时写死 47653 的调用方就永远连不上 —— 读这个文件才对。
+ * 而 pi 扩展 / dsh 插件 / 用户自己的脚本只想知道「现在该连哪个端口」。配置里的 47653 被占时
+ * 宿主会换一个端口，这时写死 47653 的调用方就永远连不上 —— 读这个文件才对。
  * 内容就是 `47653\n` 这种一行，`cat` / `$(<port)` / `readFileSync` 都能直接用。
+ *
+ * ⚠️ port（运行期，退出即删）与 port.keep（**长期记忆**，退出也留着）是两件事：
+ *   前者回答「现在连哪个」，后者回答「下次起还是先试哪个」。端口固定靠的是后者 ——
+ *   不然 47653 被别的软件占一次，宿主就每次启动都换一个随机端口，端口号一路飘。
  */
 
 "use strict";
@@ -49,6 +54,7 @@ const PATHS = {
 	home: HOME,
 	state: path.join(HOME, "state.json"),
 	port: path.join(HOME, "port"),
+	portKeep: path.join(HOME, "port.keep"),
 	ctrl: path.join(HOME, "ctrl.json"),
 	config: path.join(HOME, "config.json"),
 	token: path.join(HOME, "token"),
@@ -103,6 +109,48 @@ function readPortFile() {
 	}
 }
 
+/* ============================== 记住端口 ============================== */
+
+/**
+ * 读「上次真的用上的端口」（port.keep）。下次 listen() 拿它当**第一个**候选：
+ * 端口因此是**粘的** —— 起过就还是那个，除非它被别人占了（见 server.cjs 的 listen）。
+ *
+ * 为什么不直接拿 `port` 文件当记忆：那个文件退出时就删了（它只回答「现在连哪个」）。
+ * 也没有把它写进 state.json / config.json：那两个是「谁在跑 / 想怎么跑」的语义，
+ * 端口记忆是**运行期事实**，混进去以后两边会互相覆盖（老宿主写 state，新宿主写 config）。
+ * 返回 0 = 还没记过（首次启动），听配置的。
+ */
+function readPortKeep() {
+	try {
+		const n = Number(fs.readFileSync(PATHS.portKeep, "utf8").trim());
+		return Number.isInteger(n) && n > 0 && n <= 65535 ? n : 0;
+	} catch {
+		return 0;
+	}
+}
+
+/** 记下这次真正 bind 到的端口。跟已记的一样就不碰文件（少一次 rename）。 */
+function writePortKeep(port) {
+	const n = Number(port);
+	if (!Number.isInteger(n) || n <= 0 || n > 65535) return false;
+	if (readPortKeep() === n) return true;
+	ensureHome();
+	const tmp = `${PATHS.portKeep}.${process.pid}.tmp`;
+	try {
+		fs.writeFileSync(tmp, `${n}\n`, "utf8");
+		fs.rmSync(PATHS.portKeep, { force: true });
+		fs.renameSync(tmp, PATHS.portKeep);
+		return true;
+	} catch {
+		try {
+			fs.rmSync(tmp, { force: true });
+		} catch {
+			/* ignore */
+		}
+		return false;
+	}
+}
+
 /**
  * 退出时清掉端口文件。
  * 只在文件里写的还是**自己的**端口时才删：同一台机器上万一有另一个宿主刚起来
@@ -122,7 +170,8 @@ function clearPortFile(port) {
 /* ============================== 配置 ============================== */
 
 const CONFIG_DEFAULTS = {
-	/** 期望端口（全局共享的固定端口）。被占就退随机空闲端口，真实端口写进 state.json。 */
+	/** 期望端口（**首选**，不是唯一）。上次记住的端口优先于它；都被占才退随机空闲端口。
+	    真实端口写进 state.json 与 <home>/port。 */
 	port: 47653,
 	/** 窗自己没了要不要被重新拉起 */
 	keepAlive: true,
@@ -304,6 +353,8 @@ module.exports = {
 	writePortFile,
 	readPortFile,
 	clearPortFile,
+	readPortKeep,
+	writePortKeep,
 	readConfig,
 	writeConfig,
 	readCtrl,

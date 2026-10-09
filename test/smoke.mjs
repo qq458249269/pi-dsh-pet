@@ -620,12 +620,30 @@ check("锁有心跳（at 在走）", owner2.at > owner.at, `${owner.at} → ${ow
 
 // ---------------------------------------------------------------- 端口文件
 // pi 扩展 / dsh 插件 / 外部脚本不看 state.json，只读 <home>/port 那一行。
-// ⚠️ 端口是**运行期**才知道的：默认 47653 被占时 listen() 会退到随机端口，
+// ⚠️ 端口是**运行期**才知道的：配置里的 47653 被占时 listen() 会换一个，
 // 所以写死端口的调用方只能靠这个文件（否则永远连不上）。
 console.log("\n端口文件…");
 check("home/port 里就是真实监听的端口", readFileSync(join(HOME, "port"), "utf8").trim() === String(PORT));
 check("port 命令直接读它", (await runCli(["port"])) === String(PORT));
 check("端口是纯数字一行（cat / readFileSync 都能用），不多带 JSON", /^\d+\n?$/.test(readFileSync(join(HOME, "port"), "utf8")));
+// 端口**固定**：真用上的那个记在 port.keep（退出也不删），下次启动第一个就试它。
+const hostSrcEarly = readFileSync(join(ROOT, "app", "host.cjs"), "utf8");
+const serverSrcEarly = readFileSync(join(ROOT, "app", "server.cjs"), "utf8");
+const pathsSrcEarly = readFileSync(join(ROOT, "app", "paths.cjs"), "utf8");
+check("home/port.keep 记住真用上的端口", existsSync(join(HOME, "port.keep")) && readFileSync(join(HOME, "port.keep"), "utf8").trim() === String(PORT));
+check("宿主启动时先读 port.keep（复用上次端口），再退配置里的", /candidates = flagPort \? \[flagPort, cfg\.port\] : \[readPortKeep\(\), cfg\.port\]/.test(hostSrcEarly));
+check("listen 按候选顺序试，被占才换（不是一被占就整段随机）", /portCandidates/.test(serverSrcEarly) && /EADDRINUSE[\s\S]{0,160}tryAt\(i \+ 1/.test(serverSrcEarly));
+check("port.keep 只在真的换了端口时才写（没换不碰文件）", /if \(readPortKeep\(\) !== port && writePortKeep\(port\)\)/.test(hostSrcEarly));
+check("清端口文件只删 port，不动 port.keep（记忆得留住）", /fs\.rmSync\(PATHS\.port, \{ force: true \}\)/.test(pathsSrcEarly) && !/clearPortFile[\s\S]{0,400}rmSync\(PATHS\.portKeep/.test(pathsSrcEarly));
+// 候选表本身（纯函数，不用起进程就能验）：顺序 = 优先级，去重，不够才补随机。
+{
+	const srv = (await import(pathToFileURL(join(ROOT, "app", "server.cjs")).href)).default;
+	const pc = srv.portCandidates;
+	check("候选表按顺序排（记忆端口在前）", JSON.stringify(pc([47888, 47653], 3, () => 30000)) === "[47888,47653,30000]");
+	check("候选表去重（记忆端口 == 配置端口时不试两遍）", JSON.stringify(pc([47653, 47653], 2, () => 30000)) === "[47653,30000]");
+	check("候选表丢掉非法端口", JSON.stringify(pc([0, -1, 47653, 70000], 2, () => 30000)) === "[47653,30000]");
+	check("候选表兼容老的单数字写法", JSON.stringify(pc(47653, 2, () => 30000)) === "[47653,30000]");
+}
 
 const second = spawn(process.execPath, [join(ROOT, "bin", "pi-pet.cjs"), "start", "--port", "47700", "--no-window"], {
 	env: { ...process.env, PI_PET_HOME: HOME, PI_PET_SKIP_FOREIGN: "1" },
@@ -710,7 +728,7 @@ check("do-update 不会用空串盖掉刚查到的版本/提交", /if \(!s\[k\]\
 console.log("\n舞台窗（只包住宠物，不是全屏）…");
 check("主进程不再按屏幕大小开窗", !/workAreaSize/.test(elecSrc));
 check("窗落点落在工作区里（默认右下角 + 记住上次）", /workArea/.test(elecSrc) && /stage\.json/.test(elecSrc));
-check("拖宠物 = 搬窗（位移从按下那下算起）", /queueWinMove\(dx, dy, dragState\.inset\)/.test(petSrc) && /windowDrag\.x \+ dx/.test(elecSrc));
+check("拖宠物 = 搬窗（位移从按下那下算起）", /queueWinMove\(dx, dy\)/.test(petSrc) && /windowDrag\.x \+ dx/.test(elecSrc));
 // ⚠️ 位移必须是**屏幕**坐标：clientX/Y 是窗内坐标，而窗正跟着拖拽一起动，
 //   拿它算「从按下那下算起的位移」= 光标位移 - 窗已走的位移 → 每次只跟上一半
 //   （实测跟手比 0.50，窗还一格一格抖。见 DESIGN.md §9.20）。
@@ -773,6 +791,15 @@ check("气泡恒在头顶（不翻到身下，§9.25 那套 .below 已删）", !
 check("夹取偏移按「居中位 + 绝对偏移」算（不是增量，否则拖一次差 40px）", /var baseL = cr\.left \+ \(cr\.width - r\.width\) \/ 2/.test(petSrc) && /dx = Math\.round\(wantL - baseL\)/.test(petSrc) && /var baseT = cr\.top - BUBBLE_GAP - r\.height/.test(petSrc));
 // 高度/换边写完会重新折行、宽度跟着变：拿旧宽度算偏移就是夹在旧位置上（实测差 48px）
 check("写完高度/换边重新量几何再算偏移（量的是整摞）", /r = stack\.getBoundingClientRect\(\);\r?\n\s*if \(!r \|\| !\(r\.width > 0\)/.test(petSrc));
+// ⚠️⚠️ 竖向**只往上夹、绝不往下压**（§9.38）：以前 `if (r.top < 8) wantT = 8` 会把气泡
+//   往下按回窗内 —— 正好落在宠物脸上 = 用户口径「气泡文本框位置异常下移」。竖向偏移只保留
+//   「往窗顶推」这一种；头顶真放不下时封高（overlap 分支），不许挪。
+check("气泡竖向只往上夹（不许往下压到宠物头上，§9.38）", !/wantT = 8/.test(petSrc) && !/if \(r\.top < 8\)/.test(petSrc) && /if \(r\.bottom > H - 8\) wantT = Math\.min\(wantT, H - 8 - r\.height\)/.test(petSrc));
+check("头顶放不下时**封高**而不是撤掉封高盖到头上（§9.38）", !/bubbles\[j\]\.style\.removeProperty\("max-height"\)/.test(petSrc) && /var tight = Math\.max\(BUBBLE_MIN_H, roomAbove\)/.test(petSrc));
+// ⚠️⚠️ 纵向夹取**只有一份**（§9.38）：站位恢复 / 拖拽 / 量完可见框重夹 都走 stageKeepIn。
+//   §9.28 那版把拖拽那两处改成 0 起夹、站位却还是 150 ⇒ 拖到屏幕上边松手记住 ry≈0，
+//   下次启动按 150 一夹，宠物凭空下移一截（用户口径「位置并非放下的准确位置」）。
+check("纵向夹取只有一份（三处都走 stageKeepIn，§9.38）", /var loY = STAGE_PAD_TOP/.test(petSrc) && /function stageKeepIn[\s\S]{0,1200}var loY = STAGE_PAD_TOP/.test(petSrc) && /stageKeepIn\(inkLeft - inkOff \+ safe\.off, top, safe\.w, halfH \* 2\)/.test(petSrc) && /stageKeepIn\(d\.base\.x \+ safe\.off \+ \(want\.x - at\.x\), d\.base\.y \+ \(want\.y - at\.y\), safe\.w, halfH \* 2\)/.test(petSrc) && /stageKeepIn\(cp\.rx \* window\.innerWidth - inkHalf/.test(petSrc) && !/Math\.max\(d\.base\.y \+ \(want\.y - at\.y\), 0\)/.test(petSrc) && !/Math\.max\(top, 0\), maxTop/.test(petSrc));
 check("行数按空间收（空间不够就少几行，而不是把话抽掉）", /Math\.min\(6, Math\.floor\(\(room - 14\) \/ BUBBLE_LINE_H\)\)/.test(petSrc) && /var BUBBLE_LINE_H = 18\.2/.test(petSrc) && /var BUBBLE_MIN_H = 30/.test(petSrc));
 // 「说点什么」输入框是气泡栈里**独立的最后一行**（不再塞在某条消息里，§9.34）：
 //   塞在消息里的话，每来一条新消息就把框顶来顶去，封高时还得给它单独留 44px。
@@ -870,9 +897,9 @@ check("多开按序号在舞台里错开（都居中会叠在一起）", /functi
 // ⚠️ 可见框口径直接用 HIT_BOX（它本来就是按「看着像角色」调出来的 640×360 框），别另写一份。
 check("可见框口径只有一份（= HIT_BOX，640×360 基准）", /var INK_X0 = HIT_BOX\.x0 \/ 640/.test(petSrc) && /var INK_X1 = HIT_BOX\.x1 \/ 640/.test(petSrc) && /function inkWidth\(size\)/.test(petSrc) && /\(INK_X1 - INK_X0\)/.test(petSrc) && !/inkWidth\s*=\s*\d/.test(petSrc));
 // 贴边（slideTo）：夹可见框、写容器左边 —— 少这一步就是「容器贴到 0、角色还在 144 外」
-check("贴边按可见框夹（写回容器左边），不是按舞台夹", /var inkW = inkWidth\(this\.size\)/.test(petSrc) && /var inkOff = INK_X0 \* this\.size/.test(petSrc) && /var safe = inkSafe\(\)[\s\S]{0,400}var left = safeLeft - safe\.off/.test(petSrc) && !/winW - self\.size\)/.test(petSrc));
+check("贴边按可见框夹（写回容器左边），不是按舞台夹", /var inkW = inkWidth\(this\.size\)/.test(petSrc) && /var inkOff = INK_X0 \* this\.size/.test(petSrc) && /var keep = stageKeepIn\(inkLeft - inkOff \+ safe\.off[\s\S]{0,200}left: keep\.left - safe\.off/.test(petSrc) && !/winW - self\.size\)/.test(petSrc));
 // 漫游/拖拽/站位回夹：同理，「进的是可见框左边、出的是容器左边」（clampPos 的固定口径）
-check("clampPos 进可见框、出容器（漫游/浏览器拖拽都走它）", /function clampPos\(inkLeft, top\)/.test(petSrc) && /var safeLeft = inkLeft - inkOff \+ safe\.off/.test(petSrc) && /left: safeLeft - safe\.off/.test(petSrc) && /clampPos\(px - inkHalf, py - halfH\)/.test(petSrc) && /clampPos\(e\.clientX - dragState\.offX - inkHalf/.test(petSrc));
+check("clampPos 进可见框、出容器（漫游/浏览器拖拽都走它）", /function clampPos\(inkLeft, top\)/.test(petSrc) && /var safe = inkSafe\(\)/.test(petSrc) && /stageKeepIn\(inkLeft - inkOff \+ safe\.off/.test(petSrc) && /return \{ left: keep\.left - safe\.off, top: keep\.top \}/.test(petSrc) && /clampPos\(px - inkHalf, py - halfH\)/.test(petSrc) && /clampPos\(e\.clientX - dragState\.offX - inkHalf/.test(petSrc));
 // 漫游道两端按可见框半宽夹（道是给角色走的，透明舞台区不占地）
 check("漫游道按可见框半宽夹（planMove 的 halfW 是 inkHalf）", /halfW: inkHalf/.test(petSrc));
 // 窗宽基数：maxStage（size 口径，MIN 下限照旧）→ **整个舞台** → 窗宽（§9.28）。
@@ -920,8 +947,16 @@ check("重裁不会被去重吃掉（shapeKey 清掉，下一次照裁）", /fun
 // 主进程把「已经被屏幕边夹住、其实没动」的 move 丢掉。
 console.log("\n拖拽不许抖 / 不许有阻力…");
 check("搬窗走 rAF 合帧（不是每个 pointermove 都搬）", /function queueWinMove[\s\S]{0,320}requestAnimationFrame\(flushWinMove\)/.test(petSrc));
-check("合帧只留最新位置（旧的丢掉，不会排队追）", /movePending = \{ dx: dx, dy: dy, inset: inset \}[\s\S]{0,200}if \(!moveRaf\) moveRaf/.test(petSrc));
-check("位移仍然从按下那下算起（合帧不累积误差）", /var p = screenPoint\(e\)[\s\S]{0,900}var dx = p\.x - dragState\.psx[\s\S]{0,900}queueWinMove\(dx, dy, dragState\.inset\)/.test(petSrc));
+check("合帧只留最新位置（旧的丢掉，不会排队追）", /movePending = \{ dx: dx, dy: dy \}[\s\S]{0,200}if \(!moveRaf\) moveRaf/.test(petSrc));
+check("位移仍然从按下那下算起（合帧不累积误差）", /var p = screenPoint\(e\)[\s\S]{0,900}var dx = p\.x - dragState\.psx[\s\S]{0,1400}queueWinMove\(dx, dy\)/.test(petSrc));
+// ⚠️⚠️ 窗内位移（slideTo）也必须合帧（§9.38）：pointermove 跟着鼠标轮询率走（125~1000Hz），
+//   贴边时每一帧都要写样式 + 夹气泡（强制同步布局）⇒ 渲染进程被拖死 = 拖到边框发抖。
+check("窗内位移也合帧（slideTo 不在 pointermove 里立即跑）", /function flushWinMove\(\)[\s\S]{0,400}slideTo\(m\.dx, m\.dy\)/.test(petSrc) && !/pointermove[\s\S]{0,1200}\n\s*slideTo\(dx, dy\)/.test(petSrc));
+// ⚠️⚠️ 松手那一帧不能丢：settleWinMove（→ slideTo）必须在 dragState.active=false **之前**
+check("松手先落地最后一帧，再清 dragState.active", /var wasDragging = dragState\.dragging;[\s\S]{0,700}settleWinMove\(\);[\s\S]{0,200}dragState\.active = false/.test(petSrc));
+// ⚠️⚠️ 拖拽期间不许别人再夹位置（换动画 commit / 量完可见框都会调 refitInk）：
+//   两边都写 container.style 就是各夹各的 = 一格一格哆嗦 + 落点被中途改写。
+check("refitInk 拖拽期间让位（不跟 slideTo 抢 container.style）", /this\.refitInk = function \(\) \{\s*\n\s*if \(dragState\.active\) return;/.test(petSrc));
 check("松手时把最后一帧落地", /settleWinMove\(\)[\s\S]{0,120}endWinDrag\(\)/.test(petSrc));
 check("主进程丢掉「其实没动」的搬窗", /pos\.x === stagePos\.x && pos\.y === stagePos\.y\) return/.test(elecSrc));
 
@@ -1004,7 +1039,7 @@ check("采样余量只加在形状上（烘进缓存会渗进几何，待机贴�
 check("起动就排上扫描（状态 override 最优先）+ 正在播的插队 + 量完重夹位置重报形状", /prewarmInkBoxes\(\)/.test(petSrc) && /function prewarmInkBoxes\(\)/.test(petSrc) && /EVENT_ANIM_MAP\[k\]\); \}/.test(petSrc) && /queueInkMeasure\(next\)/.test(petSrc) && /INK_QUEUE\.unshift\(name\)/.test(petSrc) && /function onInkBoxReady[\s\S]{0,400}p\.refitInk\(\)/.test(petSrc) && /this\.refitInk = function \(\)[\s\S]{0,600}clampPos\(r\.left \+ inkOff, r\.top\)/.test(petSrc));
 check("扫描不拖累正常播放（一次一段 + 段间让开 + 超时兜底不死锁队列）", /if \(INK_BUSY\) return/.test(petSrc) && /setTimeout\(drainInkQueue, 200\)/.test(petSrc) && /setTimeout\(function \(\) \{ finish\(null\); \}, 20000\)/.test(petSrc));
 
-check("夹取范围 = 角色 ∪ 当前动画（三条路都得走 inkSafe，漏一条就有一路靠边时被切）", /function inkSafe\(\)[\s\S]{0,320}animInkBox\(self\.playing\)/.test(petSrc) && /clampPos\(inkLeft, top\)[\s\S]{0,220}var safe = inkSafe\(\)/.test(petSrc) && /function slideTo[\s\S]{0,900}var safe = inkSafe\(\)/.test(petSrc) && /function applyPosition\(\)[\s\S]{0,400}var safe = inkSafe\(\)/.test(petSrc) && /Math\.min\(Math\.max\(safeLeft, 0\), Math\.max\(0, window\.innerWidth - safe\.w\)\)/.test(petSrc));
+/clampPos\(inkLeft, top\)[\s\S]{0,420}var safe = inkSafe\(\)/.test(petSrc)
 check("量出新框后重夹位置 + 重报形状（不然新量到的宽动画第一次播仍靠窗边）", /this\.refitInk = function \(\)[\s\S]{0,700}clampPos\(r\.left \+ inkOff, r\.top\)/.test(petSrc) && /function onInkBoxReady[\s\S]{0,300}refitInk\(\)[\s\S]{0,120}pushHitRegion\(\)/.test(petSrc));
 // ⚠️ refitInk 只挂在 onInkBoxReady 上不够（§9.31）：可见框进了 localStorage 缓存就不再量，
 // refitInk 永远不跑 ⇒ 缓存一热，思考动画宽出来的那截就顶出窗外被切（「右侧缺失」）。

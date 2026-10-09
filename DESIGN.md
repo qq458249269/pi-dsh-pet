@@ -121,12 +121,16 @@ token 存在 `%APPDATA%/pi-dsh-pet/token`，**只绑 127.0.0.1**。不开 LAN。
 
 ### 3.5 端口是怎么告诉客户端的
 
-`47653` 只是**期望值**：被占时 `listen()` 会退到随机空闲端口，真实端口只有运行期才知道。
-所以除了 `state.json`，宿主每次 listen 成功还会写一个一行纯文本的 `<home>/port`（退出时删掉）：
+`47653` 只是**首选**，不是唯一：被占时 `listen()` 会按「上次用上的端口 → 配置/命令行的端口 → 随机空闲端口」
+的顺序一个个试，真实端口只有运行期才知道。
+为了让端口**固定下来**，宿主把真正 bind 到的那个端口记在 `<home>/port.keep`（**退出也不删**）——
+下次启动第一个就试它，被占了才换并覆盖，所以端口不会每次启动都飘。
+另外每次 listen 成功还会写一行纯文本的 `<home>/port` 给客户端读（退出时删）：
 
 ```
 %APPDATA%/pi-dsh-pet/
-  port        12035          ← cat 一下就知道连哪个端口
+  port        12035          ← cat 一下就知道连哪个端口（运行期，退出即删）
+  port.keep   12035          ← 记住上次用上的端口，下次优先复用（长期，退出也留着）
   token       6f2a…          ← /feed 与 /control 的口令
 state.json  {…}            ← 给本项目代码读（心跳、pid、角色）
 positions.json {…}         ← 宠物在窗里的站位（比例坐标）
@@ -496,7 +500,9 @@ pi-pet config           # 看/改 config.json
     - 站位记忆套回来时也要走 `stageKeepIn()`：窗内 top 至少 `topOffsetOf(cfg)`（150），
       横向左右各 32、底 `bottomPadOf(cfg)`；夹完把 `customPos.rx/ry` **回写成实际值**，
       否则漫游起点（读 customPos）会先跳一下再走。
-      漫游/拖动**不**夹（`clampPos` 仍从 0 起夹）：漫游只改 left 不改 top，纵向由站位打底。
+      漫游/拖动**不**夹（当时 `clampPos` 从 0 起夹）：漫游只改 left 不改 top，纵向由站位打底。
+      > ⚠️ 「0 起夹」那一支后来被 §9.38 撤了：三处（applyPosition / slideTo / clampPos）
+      > 现在统一走 `stageKeepIn`，下界都是 `STAGE_PAD_TOP`（150）。
       实测（窗 1262×560）：老落点套上去宠物落在 (501,150)，纵向从贴顶变成 150，
       气泡 846×73 / 3 行 / y=67（原来 24px 高 1 行）。
     - 位置记忆多存一个**可选** `w/h`（存的时候窗多大）：窗变宽时按 `r' = r·W_old/W_new`
@@ -714,6 +720,9 @@ pi-pet config           # 看/改 config.json
     代价是贴上边时头顶没空间。那就不封高（§9.27 之前封高封成 24px 一条，字全裁没）：
     `clampBubble` 里 `roomAbove < 两行` 时**放弃封高**，气泡**盖在头顶上**（位置仍夹在窗内，
     `z-index` 本来就在宠物上面）。代价：贴上边那一小段会盖住宠物脑袋；换来的是四边贴边 + 字全在。
+    > ⚠️ **这一支（纵向 0 起夹 + 气泡盖头顶）已于 §9.38 整体作废**，理由见那节的实测：
+    > 松手落点会漂 150px、气泡会往下压在脸上（用户口径「位置并非放下的准确位置」/「气泡位置异常下移」）。
+    > 横向那部分（按可见框夹、`over` 补宽动画）仍然有效，别一起改回去。
 
     **② 动画画出来的气泡被切（命中区 + 夹取都按每段动画自己的可见框）**
     ②量出来才发现：`HIT_BOX`（200..440）只框得住**角色本体**，素材里不少动画画出来的效果
@@ -844,6 +853,7 @@ pi-pet config           # 看/改 config.json
     - `clampBubble` 改量**整摞**（位置是这一摞共同的），头顶空间按条数分摊
       `room = (roomAbove − gap×(N−1)) / N`；宠物贴屏幕上边、头顶不足两行时照旧
       **不封高、盖在头顶上**（§9.28 的行为，别退回去）。
+      > ⚠️ 后半句作废了（§9.38）：气泡**不许盖头顶**，改成封高；「台子 150」那份保留。
     - `hideBubble` 与 `bubbleTimer` 整个删掉（没有「一个框」可藏了）；`BUBBLE_INPUT_H` 同样删。
     - 旧代码引用（`--bubble-max-w` / `applyBubbleMaxWidth(winW, petW)` / `around = 宠物宽+160`）
 一并撤掉 —— 宽度只有一个出处：`stageSize → applyBubbleWidth → --bubble-w`。
@@ -884,6 +894,58 @@ pi-pet config           # 看/改 config.json
     ReferenceError，配多少文案都没用。所以 `scripts/check-pet-scope.cjs` 专门钉这一类：
     配平交给 `vm.Script`（真编译器），自个儿只数「**函数声明出现在别的函数体内**」——
     少写 `{` 的其它形态语法检查自己会拦，不必重造。
+
+36. **拖到边框的抖 / 落点 / 气泡下移，一起修（§9.38）。**
+    用户口径：拖到屏幕边框会抖；松手落点不是放下的准确位置；气泡文本框位置异常下移，需要固定气泡位置。
+
+    三个症状，三个病灶，互相独立，一起改。
+
+    **① 抖 = 贴边时 slideTo 挂在 pointermove 上，一来一次强制同步布局。**
+    `pointermove` 的频率跟**鼠标轮询率**走（125Hz 常见，500/1000Hz 的鼠标更常见），
+    而贴边时**只有窗内位移在动**（窗被 workArea 夹住了），于是每一帧都要写一次
+    `container.style` + `clampBubbles()`（里面好几个 `getBoundingClientRect` = 强制布局）。
+    1000Hz 时渲染进程被布局拖死 ⇒ 帧参差不齐 = 抖。**不贴边时不抖**，因为那时窗自己跟着走、
+    `want - at` 恒为 0，slideTo 的 0.5px 早退根本不写 DOM —— 和症状完全对上。
+    修法：`slideTo` 从 pointermove 挪进 `flushWinMove()`（和搬窗同一个 rAF）：
+    每帧至多一次挪动 + 一次夹取，且与 VSync 对齐。位移仍然是「从按下那下算起」的绝对量，
+    合帧不累积误差。
+
+    **② 落点不准 = 纵向下界有两份口径（0 / 150）。**
+    拖到屏幕上边松手时：`slideTo` 把容器 top 夹到 **0**，记住 `ry≈0`；而下次启动 /
+    窗重建 / 宿主补发位置帧走的是 `applyPosition → stageKeepIn`，下界是 `STAGE_PAD_TOP=150`
+    ⇒ **宠物凭空下移 150px**。横向没事：`inkOff + inkHalf === halfW`，存/取往返精确到 0.00px
+    （横向本来就是一份口径，见 §9.27/§9.28）。
+    修法：`clampPos`（量完可见框的重夹 + 浏览器里挪容器）和 `slideTo`（拖拽）都改成走
+    `stageKeepIn` —— **纵向夹取从此只有一份**，三处调用（applyPosition / slideTo / clampPos）
+    一个算法。代价：拖不到屏幕最顶上那 150px（头顶台子回来了，与 §9.27/§9.35 一致）。
+
+    顺带两个同一条命的小口子：
+    - `pointerup` 里 `settleWinMove()` 原本排在 `dragState.active = false` **后面**，
+      而 slideTo 开头就是 `if (!dragState.active) return` ⇒ **松手那一帧整个丢掉**
+      （鼠标低轮询率时更明显，看着就是「松手偶尔偏一两像素」）。改成先落地再清标志。
+    - `commit()`（每次换动画）和 `queueInkMeasure → onInkBoxReady` 都会调 `refitInk()`，
+      拖拽中途抢写 `container.style`、改写 `customPos`，还让 slideTo 的 `slideAt` 去重失效
+      ⇒ 又一处抖动来源。`refitInk` 开头改成 `if (dragState.active) return`：拖着的宠物由
+      slideTo 按光标位移算落点，它用的也是 `inkSafe()`，宽出来那截它自己已经算进去了。
+
+    **③ 气泡下移 = `clampBubble` 里那个「顶出窗顶就按回 8px」的分支。**
+    拖到屏幕上边时头顶空间是 0，那个分支把气泡**往下**推回窗内 —— 正好落在宠物脸上，
+    一格一格往下跳；`roomAbove < 两行` 的 overlap 分支还会**撤掉** max-height，让它整个盖上来。
+    修法：竖向偏移**只往上推**（`if (r.bottom > H-8) wantT = min(wantT, …)`），
+    「顶出窗顶」那支删掉；真到放不下的时候（走不到：站位/拖拽都留 150 的台子，roomAbove ≥ 132）
+    overlap 分支改成**封高到 roomAbove** 而不是撤掉封高。代价同 ②：宠物头顶留 150。
+
+    **验算**（`.tmp/drag-geo.mjs`，只算术，改一个数就能对比修前/修后）：
+
+        size   拖到上屏边 → 记住落点        下次启动还原      位移      头顶 room
+        300    top=0    → ry=0.2226      top=150.0        **150px**  132
+        462    top=0    → ry=0.2765      top=150.0        **150px**  132
+        700    top=0    → ry=0.3260      top=150.0        **150px**  132
+        修后   top=150  → ry=0.6184/0.5956/0.5743 → top=150.0  **0px**   132
+        横向贴屏边（左）往返误差 0.00px（改前改后都一样 —— 横向本来就是一份口径）
+
+    `test/smoke.mjs` 加了 6 条钉住这次的改法（合帧、refitInk 让位、松手顺序、
+    气泡只上夹、纵向单一出处），别改回去。
 
 规则 `YYYY.MM.DD.NNNN`（UTC 日期 + 当天第几个流水号），例：`2026.09.30.0001`。三个 job：`version`（算号 + 跑测试 + source zip + 建 tag）→ `exe`（Windows 打 portable）→ `release`（挂资产、发说明）。
 

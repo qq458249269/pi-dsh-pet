@@ -33,6 +33,8 @@ const {
 	readCtrl,
 	writePortFile,
 	clearPortFile,
+	readPortKeep,
+	writePortKeep,
 	readPositions,
 	rememberPosition,
 	log,
@@ -185,7 +187,7 @@ async function stopExistingHosts(list) {
 /**
  * 起宿主。
  * @param {object} options
- *   port        期望端口（默认配置 47653，被占退随机）
+ *   port        期望端口（默认配置 47653；**优先复用上次真的用上的那个**，被占才换）
  *   noWindow    只起服务不起窗
  *   insecure    关闭 token 校验
  *   force       即使已经有别的宿主在跑也照起（会**先请退旧的那个**，不是无视它）
@@ -275,8 +277,13 @@ busHooks.paused = () => readCtrl().paused === true;
 	let port;
 	/** uncaughtException 累计次数（只给 handler 里的“闭嘴上限”用，见下方监听器）。 */
 	let fatalLogged = 0;
+	// 端口**粘住**：先试上次真的用上的那个（<home>/port.keep），再试命令行/配置里的，
+	// 全被占才退随机端口（server.cjs 的 listen 按这个顺序试）。
+	// ⚠️ 命令行 `--port` 是用户的明确要求，压过记忆：写了 47700 就别去试记忆里的那个。
+	const flagPort = Number(options.port) || 0;
+	const candidates = flagPort ? [flagPort, cfg.port] : [readPortKeep(), cfg.port].filter((n) => n > 0);
 	try {
-		port = await listen(server, Number(options.port) || cfg.port);
+		port = await listen(server, candidates);
 	} catch (err) {
 		releaseLock();
 		log(`监听失败：${err && err.message ? err.message : err}`);
@@ -289,6 +296,9 @@ busHooks.paused = () => readCtrl().paused === true;
 	// 端口写进 home/port：pi 扩展 / dsh 插件 / 外部脚本读这一行就能连上，
 	// 不用 spawn `pi-pet status`、也不用赌 47653 没被占。
 	writePortFile(port);
+	// ⚠️ 这个文件**退出时不删**：它就是「下次起还试这个端口」的记忆。
+	//   只有真的换了端口才覆盖（说明上次的被别人占了），没换就别碰它。
+	if (readPortKeep() !== port && writePortKeep(port)) log(`端口 ${port} 已记住（下次启动优先复用）`);
 
 	/* ---- 5. 生命周期 ---- */
 	let stopping = false;

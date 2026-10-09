@@ -291,16 +291,34 @@ function createServer(ctx) {
 	return { server, handleRequest, ws };
 }
 
-/** 端口：优先期望值（全局共享的固定端口），被占就退一个随机空闲端口，真实端口写进状态文件。 */
-function listen(server, preferredPort, attempts = 20) {
+/**
+ * 端口：**按顺序试**，第一个空着的就用它。
+ *
+ * candidates 可以是一个数（老调用方式）或数组，顺序即优先级：
+ *   1. 上次真的用上的端口（host 传进来的 port.keep）—— 端口因此是**粘的**；
+ *   2. 命令行 `--port` / 配置里的固定端口；
+ *   3. 还不够就补随机空闲端口（老行为，attempts 次机会兜底）。
+ * 任何一个 EADDRINUSE 就换下一个试，不是「一被占就整段随机」。
+ *
+ * ⚠️ 为什么不 try 完一轮再报错（老代码随机到撞上就算了）：端口被占是**常态**
+ *   （别的软件、上一轮没退干净的宿主、别的 home），报错等于桌宠起不来。
+ *   但**只挑固定端口**也不成 —— 客户端里到处写着 47653，被占就必须能换。
+ */
+function listen(server, candidates, attempts = 20) {
 	const randomPort = () => 10240 + Math.floor(Math.random() * (49151 - 10240));
+	const list = portCandidates(candidates, attempts, randomPort);
 	return new Promise((resolve, reject) => {
-		const tryPort = (port, left) => {
+		const tryAt = (i, lastErr) => {
+			if (i >= list.length) {
+				reject(lastErr || new Error(`没有可用端口（试过 ${list.join(", ")}）`));
+				return;
+			}
+			const port = list[i];
 			const onError = (err) => {
 				server.removeListener("error", onError);
-				if (err && err.code === "EADDRINUSE" && left > 0) {
+				if (err && err.code === "EADDRINUSE") {
 					log(`端口 ${port} 被占 → 换一个`);
-					tryPort(randomPort(), left - 1);
+					tryAt(i + 1, err);
 					return;
 				}
 				reject(err);
@@ -311,8 +329,24 @@ function listen(server, preferredPort, attempts = 20) {
 				resolve(server.address().port);
 			});
 		};
-		tryPort(preferredPort || randomPort(), attempts);
+		tryAt(0, null);
 	});
 }
 
-module.exports = { createServer, listen, safeAsset, sendJson, MIME, SIZES, MAX_PETS_CEILING };
+/** 候选端口表：数字/数组都吃，非法值扔掉，重复去掉，不够用随机端口补齐到 attempts 个。 */
+function portCandidates(candidates, attempts, randomPort) {
+	const out = [];
+	const push = (n) => {
+		const v = Number(n);
+		if (!Number.isInteger(v) || v <= 0 || v > 65535) return;
+		if (out.includes(v)) return;
+		out.push(v);
+	};
+	if (Array.isArray(candidates)) candidates.forEach(push);
+	else push(candidates);
+	const total = Math.max(out.length, Math.min(attempts || 20, 64));
+	while (out.length < total) push(randomPort());
+	return out;
+}
+
+module.exports = { createServer, listen, portCandidates, safeAsset, sendJson, MIME, SIZES, MAX_PETS_CEILING };

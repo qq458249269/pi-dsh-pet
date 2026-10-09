@@ -771,10 +771,13 @@ function topOffsetOf(cfg) {
 * ⚠️ 窗比「宠物 + 两侧留白」还窄时（多开时窗按最大的那只算，小的那只就在区间外）
    *   区间会翻过来，这时取中间值而不是硬贴左边 —— 否则照样贴到窗边、同样没头顶。
    *
-   * ⚠️ 横向量的是**可见框**宽（§9.27 的 inkW），纵向量的是**舞台**高（stageH）：
-   *   两者不是一回事 —— 舞台左右各有 144px 透明边，按舞台宽算就永远贴不上屏边。
-   *   返回值也是**可见框**左边（调用方自己减掉 inkOff 才是容器左边）。
-   */
+     * ⚠️ 横向量的是**可见框**宽（§9.27 的 inkW），纵向量的是**舞台**高（stageH）：
+     *   两者不是一回事 —— 舞台左右各有 144px 透明边，按舞台宽算就永远贴不上屏边。
+     *   返回值也是**可见框**左边（调用方自己减掉 inkOff 才是容器左边）。
+     * ⚠️⚠️ 三个地方**必须**都走这一份（§9.38）：applyPosition（站位/位置记忆恢复）、
+     *   slideTo（拖拽）、clampPos（量完可见框的重夹 + 浏览器里挪容器）。
+     *   漏一个就是「松手时在那儿、下次启动不在那儿」—— §9.28 那一版就是漏了拖拽那两处。
+     */
 function stageKeepIn(left, top, inkW, stageH) {
     var W = window.innerWidth;
     var H = window.innerHeight;
@@ -1162,8 +1165,13 @@ var halfW = this.size / 2;
     }
 
     /** 量出更宽的可见框之后重夹一次位置：不动的话，宽出来的那截就在窗外被裁掉了。
-        夹取以**角色**可见框当前的位置为入参 ⇒ 角色不跳，只是整只往里挪。 */
+        夹取以**角色**可见框当前的位置为入参 ⇒ 角色不跳，只是整只往里挪。
+        ⚠️⚠️ 拖拽期间**一律不跑**（这次重写）：拖着的宠物由 slideTo 按**光标位移**算落点，
+          这里夹的是「上一帧的位置」—— 两边都写 container.style 就是各夹各的：
+          一格一格哆嗦（slideTo 的 slideAt 去重还以为没写过），位置记忆还被中途改写。
+          slideTo 用的也是 inkSafe()，宽出来那截它自己已经算进去了。 */
     this.refitInk = function () {
+      if (dragState.active) return;
       if (!container.getBoundingClientRect) return;
       var r = container.getBoundingClientRect();
       if (!(r.width > 0)) return;
@@ -1192,24 +1200,23 @@ var halfW = this.size / 2;
      * ⚠️ left 进的是**可见框**左边（调用方传「中心 − 可见半宽」），出的是**容器**左边
      *   —— 样式只能写容器左边。省一次换算的机会，但反过来算错就是「贴边差 144px」，
      *   而那种错看着还挺像正常（就差一点），所以固定成「进可见框、出容器」。
-     * ⚠️⚠️ 纵向 **0 起夹**（§9.28）：以前下界是 topOffsetOf（150），上边必须给气泡留台子，
-     *   结果就是「左右能贴边了、上下贴不上」。现在两头都 0 起夹：宠物能真的贴到屏幕上/下边，
-     *   代价是贴上边时头顶没有空间 —— 那时气泡改成**盖在头顶上**（见 clampBubble），
-     *   而不是被压成 24px 的一条。
+     * ⚠️⚠️ 纵向上下界**只认 stageKeepIn 一份**（§9.35/§9.38）：
+     *   这份夹取是站位恢复（applyPosition）、拖拽（slideTo）、量完可见框（refitInk）
+     *   唯一的口径。下界是头顶那截台子 STAGE_PAD_TOP（150）—— 头顶留不出地方时
+     *   气泡就只能压到宠物头上（用户口径「气泡位置异常下移」）。
+     *   以前 slideTo / clampPos 这里是 **0** 起夹（§9.28「四边都能贴到屏边」那一版），
+     *   而 applyPosition 早就改回 150 —— 两份口径不一致的直接后果：拖到屏幕上边松手，
+     *   记住的落点是 ry≈0，下次启动（窗重建/位置补发）按 150 一夹，宠物凭空下移一截
+     *   （用户口径「位置并非放下的准确位置」）。
      */
     function clampPos(inkLeft, top) {
       // 横向夹的是「角色 ∪ 当前动画」的可见框（inkSafe），所以宽动画的像素不会跑出窗；
       // 窄动画下 inkSafe 就等于角色可见框，退回 §9.27 那套贴边行为。
-      var safe = inkSafe();
-      var safeLeft = inkLeft - inkOff + safe.off;
-      safeLeft = Math.min(Math.max(safeLeft, 0), Math.max(0, window.innerWidth - safe.w));
       // 容器底 = 脚底（stage 有 translateY(bottomPad) 把脚下那段透明留白顶下去，见 §9.22），
       // 所以下界就是「容器底贴窗底」：不再减 bottomPad，宠物才能贴到屏幕最下边。
-      var maxTop = Math.max(0, window.innerHeight - halfH * 2);
-      return {
-        left: safeLeft - safe.off,
-        top: Math.min(Math.max(top, 0), maxTop),
-      };
+      var safe = inkSafe();
+      var keep = stageKeepIn(inkLeft - inkOff + safe.off, top, safe.w, halfH * 2);
+      return { left: keep.left - safe.off, top: keep.top };
     }
 
     // ---- State ----
@@ -1566,15 +1573,17 @@ if (el.parentNode) el.parentNode.removeChild(el);
       // 以前高度交给 CSS 的「最多几行」：宠物贴上边时头顶只有 marginY 那么点，一行都塞不下。
       // 现在按容器顶到窗顶的距离算能塞几行，写 max-height + 行数，两个方向都封死。
       //
-      // ⚠️⚠️ 不再「头顶不够就翻到身下」（§9.25 那支实测后删掉了）：身下那侧**永远**不够 ——
-      //   脚下只有 bottomPad 60 的余量，翻下去等于把气泡塞进一条 60px 的缝里，字被裁成
-      //   两行还压着脚。现在高度只按头顶空间收；真的贴到屏幕上边（头顶 0）时**不封高**
-      //   （§9.28）—— 气泡盖在头顶上，字全都在。
+      // ⚠️⚠️ 不再「头顶不够就盖在头顶上」（§9.28 的行为，§9.38 撤掉了）：
+      //   用户口径「气泡文本框位置也会异常下移，需要固定气泡位置」—— 盖到头顶上就是
+      //   「下移」：拖到屏幕上边时气泡忽然从头顶跳到脸前面，一格一格地跳。
+      //   现在头顶位置是**固定**的（横向只夹左右，竖向只往上推），高度按头顶实测空间收。
+      //   代价：头顶台子从 0 变回 STAGE_PAD_TOP（150），宠物拖不到屏幕最顶上那 150px。
       var cr = container.getBoundingClientRect();
       var roomAbove = Math.max(0, Math.round(cr.top - BUBBLE_CHROME_H));
-      // 头顶放不下两行 → 放弃「按空间封高」，改盖在头顶上（见下面的 overlap 分支）。
-      // 不封高的话 max-height 只剩下限，气泡是一条 24px 的东西，字全裁没。
-var overlap = roomAbove < BUBBLE_LINE_H * 2;
+      // 头顶连两行都放不下（正常走不到：站位/拖拽都留 STAGE_PAD_TOP 的台子，roomAbove ≥ 132）
+      // → 还是要**封高**（封到 roomAbove），而不是撤掉封高盖到头顶上。位置不许动，
+      //   宁可少显示两行：气泡乱跳比字少难看得多。
+      var overlap = roomAbove < BUBBLE_LINE_H * 2;
       if (!overlap) {
         trim(); // 贴到边上 / 窗口变小 ⇒ 头顶不够了，先收几条再分（顺序不能反）
         // 一摞的话要**分**：N 条 + N−1 个间隙，头顶那点地方平均分给每条。
@@ -1587,9 +1596,10 @@ var overlap = roomAbove < BUBBLE_LINE_H * 2;
           b.style.webkitLineClamp = String(Math.max(1, Math.min(6, Math.floor((room - 14) / BUBBLE_LINE_H))));
         }
       } else {
+        var tight = Math.max(BUBBLE_MIN_H, roomAbove);
         for (var j = 0; j < bubbles.length; j++) {
-          bubbles[j].style.removeProperty("max-height");
-          bubbles[j].style.removeProperty("-webkit-line-clamp");
+          bubbles[j].style.maxHeight = tight + "px";
+          bubbles[j].style.webkitLineClamp = String(Math.max(1, Math.floor((tight - 14) / BUBBLE_LINE_H)));
         }
       }
       cr = container.getBoundingClientRect(); // 上面被写样式弄脏了？重拿一份干净的（下方 baseL/baseT 用它）
@@ -1614,9 +1624,12 @@ var overlap = roomAbove < BUBBLE_LINE_H * 2;
       var wantT = r.top;
       if (wantL < 8) wantL = 8;
       else if (r.right > W - 8) wantL = W - 8 - r.width;
-      // 越界只有两种：顶出窗顶、掉出窗底（后者只在没封高、盖在头顶上的那档可能出现）。
-      if (r.top < 8) wantT = 8;
-      else if (r.bottom > H - 8) wantT = H - 8 - r.height;
+      // ⚠️⚠️ 竖向**只往上夹，绝不往下压**（§9.38）：气泡钉在头顶（bottom:100% + margin 10），
+//   唯一合法的竖向偏移是「往窗顶推」。以前还有一个「顶出窗顶就按回 8px」的分支 ——
+//   那是把气泡**往下**推回窗内，正好落在宠物脸上（用户口径「气泡位置异常下移」）。
+      //   现在的做法：站位/拖拽都留 STAGE_PAD_TOP 的台子 ⇒ 头顶永远有地方，
+      //   真到了放不下的时候也是**封高**（上面那个 overlap 分支），不许挪。
+      if (r.bottom > H - 8) wantT = Math.min(wantT, H - 8 - r.height);
       var dx = Math.round(wantL - baseL);
       var dy = Math.round(wantT - baseT);
       // 写一样的值没有代价，但每帧都写新值会让浏览器白排一次版
@@ -2241,14 +2254,29 @@ halfW: inkHalf, // 漫游道按**可见框**两端夹（§9.27），不是按舞
     // ⚠️ 位移仍然是「从按下那下算起」的（不是每帧增量），所以合帧不会累积误差。
     var moveRaf = 0;
     var movePending = null;
+    /**
+     * 一帧做两件事：**窗内挪一挪**（slideTo）+ **报一次搬窗**（moveWin）。
+     *
+     * ⚠️⚠️ slideTo 也必须合帧（这次才补上的）：拖到屏幕边时窗被夹住不动，**只有窗内位移在走**
+     *   —— 于是一路 pointermove 都在写 container.style + clampBubbles()。
+     *   而 pointermove 的频率是**鼠标轮询率**（125Hz 常见，500/1000Hz 的鼠标更常见）：
+     *   每来一次就要强制同步布局（clampBubble 里好几个 getBoundingClientRect），
+     *   1000Hz 时渲染进程被布局拖死 ⇒ 画面的帧参差不齐 = 用户说的「拖到边框会抖」。
+     *   （不贴边时 slideTo 0.5px 就早退了，写样式根本没发生，所以只有贴边才抖 —— 对得上症状。）
+     *   合帧之后：每帧至多一次挪动 + 一次夹取，且与 VSync 对齐。
+     * ⚠️ 位移仍然是「从按下那下算起」的（不是每帧增量），所以合帧不会累积误差。
+     */
     function flushWinMove() {
       moveRaf = 0;
       var m = movePending;
       movePending = null;
-      if (m && moveWin) moveWin(m.dx, m.dy, m.inset);
+      if (!m) return;
+      // 顺序：先挪窗内位置、后报搬窗 —— 两者用的是同一份 dx/dy，同帧内自洽。
+      slideTo(m.dx, m.dy);
+      if (moveWin) moveWin(m.dx, m.dy, dragState.inset);
     }
-    function queueWinMove(dx, dy, inset) {
-      movePending = { dx: dx, dy: dy, inset: inset };
+    function queueWinMove(dx, dy) {
+      movePending = { dx: dx, dy: dy };
       if (!moveRaf) moveRaf = requestAnimationFrame(flushWinMove);
     }
     /** 松手/取消时：把最后一帧必须落地（否则窗会停在上一位置，看着像「拽不动」）。 */
@@ -2258,7 +2286,6 @@ halfW: inkHalf, // 漫游道按**可见框**两端夹（§9.27），不是按舞
         moveRaf = 0;
       }
       flushWinMove();
-      movePending = null;
     }
 
     /** 事件的**屏幕**坐标（搬窗的位移必须用它算，见 pointermove 里的说明）。
@@ -2320,8 +2347,9 @@ hit.addEventListener("pointerdown", function (e) {
      * 现在：窗照旧整扇夹在屏内（气泡按**窗**夹取，窗在屏内它就必然可见，§9.23），
      * 窗夹不住的那份**差额**原样加到宠物在窗里的偏移上：
      *   屏幕上 → 宠物照常 1:1 跟手，贴到边时正好贴住（窗不出屏、宠物不出屏）；
-     *   窗内   → 偏移永远夹在 [0, 窗宽−动画宽] / [0, 窗高−动画高−脚底下移] 里，
-     *            所以动画**不会被窗边切掉**（这是「动画左右被裁剪」那条的另一半）。
+     *   窗内   → 偏移交给 stageKeepIn 夹（与站位恢复/refitInk **同一份**，§9.38）：
+     *            横向贴到窗边、纵向贴到「头顶台子/窗底」，动画不会被窗边切掉，
+     *            头顶也永远留着气泡那截台子（不然气泡只能盖在头上，见 clampBubble）。
      * 纯计算：偏移是「光标位移」的函数而不是累加的，来回拖不会漂；窗没被夹时差额恒为 0，
      * 于是一行 DOM 都不写（老行为逐帧不变）。
      */
@@ -2338,12 +2366,9 @@ hit.addEventListener("pointerdown", function (e) {
       // 夹完减回 safe.off —— 写进样式的仍然是容器左边。窄动画时 safe.off/w 就是角色那一份，
       // 窗边裁掉的仍是透明边，看不见（§9.28：宽动画时要连它画出来的像素一起保证在窗内）。
       var safe = inkSafe();
-      var safeLeft = Math.min(Math.max(d.base.x + safe.off + (want.x - at.x), 0), Math.max(0, winW - safe.w));
-      var left = safeLeft - safe.off;
-      // 纵向：0 起夹（§9.28）—— 上下都能贴到屏边。容器底就是脚底（stage 的
-      // translateY(bottomPad) 把脚下那段透明留白顶下去了），所以下界直接是「容器底贴窗底」。
-      var hiTop = Math.max(0, winH - halfH * 2);
-      var top = Math.min(Math.max(d.base.y + (want.y - at.y), 0), hiTop);
+      var keep = stageKeepIn(d.base.x + safe.off + (want.x - at.x), d.base.y + (want.y - at.y), safe.w, halfH * 2);
+      var left = keep.left - safe.off;
+      var top = keep.top;
       if (d.slideAt && Math.abs(d.slideAt.x - left) < 0.5 && Math.abs(d.slideAt.y - top) < 0.5) return;
       d.slideAt = { x: left, y: top };
       container.style.left = Math.round(left) + "px";
@@ -2386,12 +2411,16 @@ if (config.animations.drag.length) {
         // 但它现在真的是屏幕上的绝对位移，所以既 1:1 又不累积误差。
         // 窗被屏幕边夹住的那部分差额，渲染进程自己补到宠物在窗里的位置上（§9.25）——
         // 不补的话宠物会停在离屏边「它在窗里贴着的那条边」那么远，贴不上边。
-        slideTo(dx, dy);
-        queueWinMove(dx, dy, dragState.inset);
+        //
+        // ⚠️⚠️ 两件事（挪窗内位置 + 报搬窗）都**只排队不立即做**（见 flushWinMove）：
+        //   pointermove 的频率跟着鼠标轮询率走（125~1000Hz），逐事件写样式 + 夹气泡
+        //   （全是强制同步布局）会把渲染进程拖死，贴边时帧率不稳 = 「拖到边框会抖」。
+        queueWinMove(dx, dy);
         return;
       }
-      // 拖拽也要夹在屏幕内（窗内的纵向 0 起夹，见 clampPos §9.28）
-var dp = clampPos(e.clientX - dragState.offX - inkHalf, e.clientY - dragState.offY - halfH);
+      // 浏览器里没有窗可搬，退回「在视口里挪容器」：纵向夹取见 clampPos（§9.38，
+      // 头顶留 STAGE_PAD_TOP 的台子，气泡才不用压在头上）
+      var dp = clampPos(e.clientX - dragState.offX - inkHalf, e.clientY - dragState.offY - halfH);
       container.style.left = dp.left + "px";
       container.style.top = dp.top + "px";
       container.style.right = "auto";
@@ -2402,9 +2431,13 @@ var dp = clampPos(e.clientX - dragState.offX - inkHalf, e.clientY - dragState.of
 
     hit.addEventListener("pointerup", function (e) {
       var wasDragging = dragState.dragging;
+      // ⚠️⚠️ 先落地再清标志：flushWinMove → slideTo 开头就是 `if (!dragState.active) return`，
+      //   先清标志的话**松手那一帧整个丢掉**（鼠标 1000Hz 时通常也不差这一帧，但那就变成
+      //   「松手偶尔偏 1~2px」—— 和落点不准是同一条命）。slideTo 也必须跑：
+      //   贴边时窗已经不动了，最后一段全靠窗内位移兑现。
+      settleWinMove();
       dragState.active = false;
       dragState.dragging = false;
-      settleWinMove(); // 最后一帧落地，再让主进程记落点
       if (endWinDrag) endWinDrag(); // 搬完窗：让主进程记住这扇窗落在哪儿
       e.currentTarget.classList.remove("dragging");
       // Restore passthrough if mouse has already left the hitbox
