@@ -355,8 +355,33 @@ webPreferences: {
 win.on("move", (_e, b) => rememberPos(b));
 
   // ---- PI_PET_TOPMODE 1/2：换一条置顶路径（见上面 TOPMODE 的说明）----
+  /** 置顶级别：screen-saver（TOPMODE=1）还是普通 floating（默认）。 */
+  const TOP_LEVEL = TOPMODE === 1 ? "screen-saver" : "floating";
+
+  /**
+   * 把「置顶」重新压一次。
+   *
+   * ⚠️⚠️ 为什么不能只在建窗时置一次顶（症状：刚起来好好的，用过一阵就被别的窗盖住）：
+   *   Electron 在 Windows 上 `setFocusable(false)` 会**重算扩展窗口样式**，顺手把
+   *   `WS_EX_TOPMOST` 抹掉。而 `setFocusable(false)` 在「说点什么」收框、右键菜单、
+   *   窗失焦这些路径上天天走（都汇到 setInputMode）⇒ 每次互动都掉一次置顶，
+   *   而且**不会自己回来**（setAlwaysOnTop 只在调用的那一刻生效，不是粘着的属性）。
+   *   实测（Win32 GetWindowLong 读 ex-style）：互动前 WS_EX_TOPMOST=1，之后=0。
+   *
+   * 所以凡是**动过窗口样式**的路径之后都要补一遍；漏一处就复现「会被遮挡」。
+   */
+  function applyTopmost() {
+    if (win.isDestroyed()) return;
+    if (TOPMODE === 2) return; // 那档故意**不置顶**（见 TOPMODE 的说明）
+    try {
+      win.setAlwaysOnTop(true, TOP_LEVEL);
+    } catch (err) {
+      console.error("[pi-dsh-pet] 置顶失败：", err && err.message);
+    }
+  }
+
   if (TOPMODE === 1) {
-    win.setAlwaysOnTop(true, "screen-saver");
+    applyTopmost();
     console.error("[pi-dsh-pet] TOPMODE=1：alwaysOnTop 走 screen-saver 层级");
   }
   if (TOPMODE === 2) {
@@ -1082,6 +1107,7 @@ try {
           /* 拿不到就算了，盒子照样能弹 */
         }
         try { win.focus(); } catch { /* 同上 */ }
+        applyTopmost(); // 弹窗前也置顶（否则盒子会被别的窗盖住）
       }
       try {
         return await dialog.showMessageBox(win, opts);
@@ -1091,6 +1117,7 @@ try {
             if (process.platform === "darwin") win.setFocusableOnMac(false);
             else win.setFocusable(false);
             win.blur();
+            applyTopmost(); // 弹完把可聚焦收回去 ⇒ 必须把置顶也压回去
           } catch {
             /* 同上 */
           }
@@ -1195,6 +1222,7 @@ if (!u.hasUpdate) {
     } catch (err) {
       console.error("[pi-dsh-pet] 切可聚焦失败：", err && err.message);
     }
+    applyTopmost(); // ⚠️ setFocusable 在 Windows 上会抹掉 WS_EX_TOPMOST（见 applyTopmost）
     if (!on) {
       // 先 blur 再撤可聚焦：不可聚焦的窗交不出焦点，下面那个窗口才拿得回去
       try { win.blur(); } catch { /* ignore */ }
@@ -1234,9 +1262,12 @@ if (!u.hasUpdate) {
 
   win.loadURL(url);
 
-  // ⚠️ 级别用 floating（默认置顶）而不是 screen-saver：screen-saver 级会强行压到
-  //    全屏/其他置顶程序之上，系统对它的处理也更重。桌面宠物只需要“压着普通窗口”。
-win.on("ready-to-show", () => win.setAlwaysOnTop(true, "floating"));
+  // ⚠️ 置顶**不止**在 ready-to-show 那一次：setFocusable / hide→show 都会掉（见 applyTopmost）。
+  //   show / restore 也补一遍：宿主「藏起再拉起」（hide-window / show-window）走的就是这条路。
+  win.on("ready-to-show", () => applyTopmost());
+  win.on("show", () => applyTopmost());
+  win.on("restore", () => applyTopmost());
+  win.on("focus", () => applyTopmost());
   });
 
   return true;

@@ -832,7 +832,7 @@ const syncSrc = readFileSync(join(ROOT, "scripts", "sync-running.cjs"), "utf8");
 //   「内容不变 + 工作区干净」在 git 里只有一条路：把 HEAD 也快进到那份内容。
 check("sync 同步后把那份检出快进到远端（不是 checkout 把新代码打回去）", /async function unblockUpdates/.test(syncSrc) && /hash-object/.test(syncSrc) && /rev-parse", "--verify", "--quiet"/.test(syncSrc) && /"merge", "--ff-only", "--quiet", ref/.test(syncSrc) && !/"checkout", "--"/.test(syncSrc));
 check("快进失败（分叉）时给人话而不自己动手", /--rebase/.test(syncSrc) && /分叉了/.test(syncSrc));
-check("sync 只核对自己推过的那几个文件（别以名执行宽松的路径）", /changed = copied.filter/.test(syncSrc) && /same = changed.filter/.test(syncSrc));
+check("sync 只核对自己推过的那几个文件（别以名执行宽松的路径）", /const changed = copied\.length[\s\S]{0,200}copied\.filter\(\(rel\) => modified\.has/.test(syncSrc) && /same = changed\.filter/.test(syncSrc));
 check("sync 内容还没 push 时给出恢复命令（而不是静默拒绝）", /还没 push/.test(syncSrc) && /git reset --hard \$\{ref\}/.test(syncSrc));
 check("git 模式认远端分支而不是写死 origin/main", /rev-parse", "--abbrev-ref", "--symbolic-full-name", "@\{u\}"/.test(updSrc));
 check("npm 非全局装只报告不代劳", /info\.global[\s\S]{0,600}只报告不代劳/.test(updSrc));
@@ -1249,7 +1249,18 @@ check("PI_PET_SOFTWARE_COMPOSITE=1 可切软件合成（残影排查用）", /PI
 check("宠物在窗里一动（命中区上报）就并一次整窗重画", /ipcMain\.on\("pet:hit-region"[\s\S]{0,700}nudgeRepaint\(\);/.test(petMain));
 check("兼底重画可调（PI_PET_REPAINT_MS）", /PI_PET_REPAINT_MS/.test(petMain) && /setInterval\(/.test(petMain));
 // TOPMODE：重画类修法全试过仍复现后，最后要动的是合成路径本身
-check("TOPMODE 1 = alwaysOnTop 走 screen-saver 层级", /TOPMODE === 1[\s\S]{0,200}setAlwaysOnTop\(true, "screen-saver"\)/.test(petMain));
+check("TOPMODE 1 = alwaysOnTop 走 screen-saver 层级", /const TOP_LEVEL = TOPMODE === 1 \? "screen-saver" : "floating"/.test(petMain));
+
+// 置顶掉了的病根（用户口径：“现在不是全局置顶了。会被遮挡”）：
+//   Electron 在 Windows 上 setFocusable(false) 会**重算扩展窗口样式**，把 WS_EX_TOPMOST 抹掉；
+//   而这个调用在「说什么」收框 / 右键菜单 / 窗失焦上天天走 → 二次置顶掉一次，
+//   而 setAlwaysOnTop 只在调用那一刻生效（不是黏着的属性）⇊ 掉了就不会自己回来。
+//   实测（Win32 GetWindowLong 读 ex-style）：互动前 WS_EX_TOPMOST=1，之后=0。
+check("置顶有一个可重调的 applyTopmost（不是只在建窗时置一次）", /function applyTopmost\(\)/.test(elecSrc) && /win\.setAlwaysOnTop\(true, TOP_LEVEL\)/.test(elecSrc));
+check("setFocusable 之后必须补置顶（Windows 会把 WS_EX_TOPMOST 抹掉）", (elecSrc.match(/applyTopmost\(\)/g) || []).length >= 4 && /else win\.setFocusable\(on\);[\s\S]{0,200}applyTopmost\(\)/.test(elecSrc));
+check("show / restore / focus 也补置顶（宿主藏起再拉起走的是这条）", /win\.on\("show", \(\) => applyTopmost\(\)\)/.test(elecSrc) && /win\.on\("restore", \(\) => applyTopmost\(\)\)/.test(elecSrc));
+check("不要在别处直接调 setAlwaysOnTop（否则会漏掉那些补上的路径）", !/win\.on\("ready-to-show", \(\) => win\.setAlwaysOnTop/.test(elecSrc));
+check("TOPMODE=2 那档仍然故意不置顶（applyTopmost 里靠后靠返回）", /if \(TOPMODE === 2\) return;/.test(elecSrc));
 check("TOPMODE 2 = 不置顶，定时 showInactive 顶上来", /TOPMODE === 2[\s\S]{0,400}showInactive\(\)/.test(petMain) && /alwaysOnTop: TOPMODE !== 2/.test(petMain));
 check("TOPMODE 3 = 放弃透明，用实底色（最难看但没有透明层留快照）", /transparent: TOPMODE !== 3/.test(petMain) && /backgroundColor: TOPMODE === 3 \? "#0e0e12"/.test(petMain));
 // 实测定案：PI_PET_NO_SHAPE=1 不锁 ⇒ 病根是 SetWindowRgn（窗不再覆盖那块屏，DWM 不重合成）

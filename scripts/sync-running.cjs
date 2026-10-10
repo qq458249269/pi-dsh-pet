@@ -119,6 +119,27 @@ function isDirty(dir) {
 	return !!(r && r.code === 0 && r.stdout.trim().length);
 }
 
+/**
+ * git 认的、且工作区里**真的被改了**的跟踪文件（路径统一成正斜杠）。
+ * ⚠️ 必须问 git 而不是「这次拷了哪些文件」：拷贝清单里混着**生成物**
+ * （app/build.cjs 由 stamp 生成、.gitignore 掉的），它压根不在 git 里——
+ *   拿拷贝清单当脏文件清单，就会为它报一句「内容还没 push」，而其实没人管得了它。
+ * 只收 M（modified）：`??` 未跟踪的不算（sync 从不删文件，未跟踪跟这事无关）。
+ */
+function modifiedPaths(dir) {
+	const out = new Set();
+	const r = git(dir, ["status", "--porcelain", "-z"], 20000); // -z：路径里有中文/空格也不乱
+	if (!r || r.code !== 0) return out;
+	for (const entry of String(r.stdout).split("\0")) {
+		if (!entry) continue;
+		const code = entry.slice(0, 2);
+		const file = entry.slice(3).trim();
+		if (!file) continue;
+		if (code === "M" || code === "MM" || code === "AM") out.add(file.split(path.sep).join("/"));
+	}
+	return out;
+}
+
 /** 工作区里一个文件的 blob hash（跟 git index 无关，就是「现在这份内容」）。 */
 function blobOf(dir, rel) {
 	const r = git(dir, ["hash-object", "--", rel], 8000);
@@ -149,11 +170,15 @@ function remoteBlobOf(dir, ref, rel) {
  * 还对不上（改了还没 push）就**不动**：这时候本来就该先 push，更新走 git。
  */
 async function unblockUpdates(target, copied) {
-	if (!copied.length) return null;
 	if (!fs.existsSync(path.join(target, ".git"))) return null; // 不是 git 检出，管不着
-	if (!isDirty(target)) return null; // 没拓脏就不用收
-	// 只看**这次同步动过的**文件：别人早先留在那儿的老改动不归我们擦
-	const changed = copied.filter((rel) => fs.existsSync(path.join(target, rel)));
+	// 本次推过去的优先；**一次都没推也照样收**：上一次 sync 拓的脏还留在那儿，
+	// 用户往往正是「再跑一次 sync」时才发现更新被拦的（症状：菜单里点更新一直失败）。
+	const modified = modifiedPaths(target);
+	// 只看 git 跟踪 ∧ 真的改了：别人早先留在那儿的老 hand-edit 不归我们擦，
+	// 生成物（app/build.cjs 之类）压根不在 git 里，也别拿来当「有本地改动」的借口
+	const changed = copied.length
+		? copied.filter((rel) => modified.has(rel.split(path.sep).join("/")))
+		: [...modified];
 	if (!changed.length) return null;
 	const upstream = git(target, ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"], 8000);
 	const ref = upstream && upstream.code === 0 ? upstream.stdout.trim() : "";
@@ -162,6 +187,8 @@ async function unblockUpdates(target, copied) {
 	git(target, ["fetch", "--quiet", ref], 45000);
 	const same = changed.filter((rel) => blobOf(target, rel) && blobOf(target, rel) === remoteBlobOf(target, ref, rel));
 	if (same.length !== changed.length) {
+		// 本次没推任何东西 ⇒ 别拿别人早先的老 hand-edit 来烦人（那本来就该他自己管）
+		if (!copied.length) return null;
 		const diff = changed.filter((rel) => !same.includes(rel));
 		return {
 			ok: false,
