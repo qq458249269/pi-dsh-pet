@@ -115,12 +115,14 @@ npm run build:dir      # 只出免安装目录版 dist/win-unpacked/，跑得快
 > 不再出安装包（NSIS setup）：一个项目两个 exe 时最容易踩的是「双击了没反应」——
 > setup 双击先弹 UAC 和安装向导，用户以为程序挂了。免安装单文件双击即用。
 
-本地打包必踩的两个坑（CI 不会遇到：workflow 已经把环境和镜像备好了）：
+本地打包必踩的坑（CI 不会遇到：workflow 已经把环境和镜像备好了）：
 
 | 坑 | 症状 | 怎么办 |
 |----|------|--------|
 | 没设镜像 | `connect ETIMEDOUT 20.205.243.166:443`（GitHub 的 IP），而且**炸在打包中途**，看着像随机挂 | `npm run build` 走 `scripts/build.cjs`，它已经把 `ELECTRON_MIRROR`（electron 运行时 zip）与 `ELECTRON_BUILDER_BINARIES_MIRROR`（nsis / 7zip 等）指到 npmmirror。外层自己设过这两个变量就不动它（CI 有自己的代理） |
 | `--no-save` 分两次装 | 第二次 `npm i` 装完，electron 没了 → `Cannot compute electron version from installed node modules` | `--no-save` 装的包不进 package.json，**后一次 install 会把前一次的 prune 掉**。要装的写进同一条命令 |
+| 装了实时防护（腾讯电脑管家 / 360），而且**不装 electron 就打** | `Cannot compute electron version from installed node modules` | 宿主零依赖，但**打包要 electron 本身**（`node_modules/electron/package.json`）：`npm i --no-save electron@33 electron-builder@25`，和 electron-builder 一条命令一起装 |
+| 实时防护扫刚写出来的那个 180MB exe | `Fatal error: Unable to commit changes`（rcedit），或 `UNKNOWN: unknown error, open '…\pi-dsh-pet.exe'`（写 asar integrity 资源），或下一轮 `remove '…': Access is denied` | 全是**瞬态**的：报错那一瞬间对同一个文件读/改名/追加写全都正常，几十毫秒后自己好了。`scripts/build.cjs` 已经做了三手准备：关掉 rcedit 改用 resedit 写版本信息（`win.signAndEditExecutable: false`）、`retry-write.cjs` 原地重试写文件、整包重来 4 次。**根治**是把仓库目录加进防护的白名单/信任区（腾讯电脑管家里的「信任区」），那是机器设置，代码管不了 —— 详见 [DESIGN.md §10](./DESIGN.md) |
 
 打包前会自动写一份「包身份戳」`app/build.cjs`（git sha / dirty / 素材段数），
 `GET /health` 与 `pi-pet doctor` 都会报它 —— **对着旧 exe 调试时，界面上完全看不出来**，

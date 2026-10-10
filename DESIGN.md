@@ -1055,6 +1055,27 @@ pi-pet config           # 看/改 config.json
 `npm run build` / `npm run build:dir` 是本地等价物（`npx electron-builder`），
 仓库本身仍然零运行时依赖。
 
+打包链上一共三个「同一个 180MB exe 反复被整个重写」的点，实时防护（腾讯电脑管家
+QQPCRTP 之类）扫新文件的那几秒会一个个撞上去：
+
+| 步骤 | 撞上的症状 |
+|------|-----------|
+| `rcedit` 写版本信息/图标 | `Fatal error: Unable to commit changes`（EndUpdateResource 把整个文件重写） |
+| `resedit` 写 asar integrity 资源 | `UNKNOWN: unknown error, open '…\pi-dsh-pet.exe'`（errno -4094 = libuv 的 `UV_UNKNOWN`，Win32 错码没映射，看不出所以然） |
+| 下一轮「清空输出目录」 | `remove '…\pi-dsh-pet.exe': Access is denied` |
+
+三个都是**瞬态**的：实测报错的同一瞬间，对同一个文件 `open('r+')`、读、追加写、改名
+全都正常，几十毫秒后自己好了；同一份代码重跑一遍就成了 —— 不是权限、磁盘、文件内容坏了。
+处理办法（都在 `scripts/build.cjs` 一条链上）：
+
+1. `win.signAndEditExecutable: false` 关掉 rcedit 那步，版本信息改由
+   `scripts/after-pack.cjs` 用 resedit 原地写（少一次重写；图标/签名本项目本来就没有）。
+2. `scripts/retry-write.cjs` 经 `NODE_OPTIONS=--require` 只挂给 electron-builder
+   那个子进程：写文件在 **open 就失败**（一个字节都没落盘）时原地等 0.5s 重试，最多 8 次。
+3. 兜底：整包重来，最多 4 次（每次前清掉 `dist/` 残骸、等 10s）。
+
+真正的根治是本机把仓库目录加进防护的白名单/信任区，那是机器设置，代码里管不了。
+
 asar 也会丢：「files 白名单漏了」照样能打出一个 exe，症状是**双击开窗、窗里啥也没有**。
 所以「列产物」那步除了看三个固定名，还要看 `dist/win-unpacked/resources/app.asar`
 在不在、大小是不是离谱（5MB 门槛：91 个 webm 素材都在里面）。

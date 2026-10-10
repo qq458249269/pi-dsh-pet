@@ -60,7 +60,7 @@ if (!fs.existsSync(MANIFEST)) {
 const expect = new Map(
 	fs
 		.readFileSync(MANIFEST, "utf8")
-		.split("\n")
+		.split(/\r?\n/)
 		.filter(Boolean)
 		.map((line) => {
 			const m = line.match(/^([0-9a-f]{64})\s+(.+)$/);

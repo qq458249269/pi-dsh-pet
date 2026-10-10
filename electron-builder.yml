@@ -56,6 +56,17 @@ win:
   # 版本信息没丢：tag（v2026.09.30.0002）、release、asar 里的 package.json 都还在。
   artifactName: pi-dsh-pet.${ext}
 
+  # 关掉 electron-builder 自带的「改 exe 资源」那一步（默认开着），改由
+  # scripts/after-pack.cjs 用 resedit 写同样的版本信息。**别随手改回 true**：
+  # 那一步的 rcedit 走 BeginUpdateResource/EndUpdateResource，会把 180MB 的 exe
+  # 整个重写；机器上装着实时防护时文件正被扫描，句柄没放开 →
+  #   Fatal error: Unable to commit changes
+  # electron-builder 连重试 4 次都在几秒之内、扫描没结束，于是整个 build 红掉，
+  # 报错还指不到本仓库任何文件。实验记录见 scripts/after-pack.cjs 的 writeVersionInfo。
+  # 顺带丢掉的图标与代码签名本项目本来就没有（无 build/ 图标目录、无证书，
+  # manifest 默认 asInvoker），产物和以前一样。⚠️ 将来要换图标也得在这里补。
+  signAndEditExecutable: false
+
 portable:
   # 固定名：双击即用的那一个，见上面 win.artifactName 里的说明
   artifactName: pi-dsh-pet.${ext}
