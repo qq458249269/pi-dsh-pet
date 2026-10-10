@@ -18,8 +18,13 @@ const path = require("node:path");
 
 const ROOT = path.resolve(__dirname, "..");
 
-/** 只同步这些：窗与宿主真正读的文件。 */
-const SYNC = ["app", "bin", "pi/assets", "assets/config.jsonc", "package.json"];
+/**
+ * 只同步这些：窗与宿主真正读的文件。
+ * ⚠️ `pi/extensions` 在列表里：pi 加载扩展时读的是**运行那份**的 index.ts，
+ *    以前不在列表里，于是扩展改了永远不生效（症状：宿主认了新协议，
+ *    但生产者的会话标题永远是空的 —— 因为跑的还是旧扩展）。
+ */
+const SYNC = ["app", "bin", "pi/assets", "pi/extensions", "dsh", "opencode", "assets/config.jsonc", "package.json"];
 
 /**
  * 素材也推，但只推**缺的和大小不同的**。

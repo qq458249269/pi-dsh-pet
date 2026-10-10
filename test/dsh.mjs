@@ -37,8 +37,10 @@ handlers.get("agent/status")({ status: "idle" });
 await sleep(200);
 // 窗接上来时宿主会补发一次「省电模式当前值」（power 帧），它是开机状态而不是事件，
 // 所以从事件序列里滤掉 —— 否则下面按 anim[0]/[1] 的位置断言会把它算成第一个事件。
-const anim = frames.filter((f) => !f.startsWith('{"type":"bubble"') && !f.startsWith('{"type":"power"'));
+// v1.4 的会话气泡帧（session）是**另一条**通道，也不进 anim（它变不代表状态机动了）。
+const anim = frames.filter((f) => !f.startsWith('{"type":"bubble"') && !f.startsWith('{"type":"power"') && !f.startsWith('{"type":"session"'));
 const bubbles = frames.filter((f) => f.startsWith('{"type":"bubble"')).map((f) => JSON.parse(f).text);
+const sessions = frames.filter((f) => f.startsWith('{"type":"session"') && !f.includes('"remove"')).map((f) => JSON.parse(f));
 const st = (await (await fetch(`http://127.0.0.1:${PORT}/state`, { headers: { authorization: `Bearer ${token}` } })).json());
 const ok = (name, cond, extra = "") => {
   total++;
@@ -54,6 +56,8 @@ ok("thinking → 思考中", anim[0] === "thinking", JSON.stringify(anim));
 ok("窗接上来补发 power 帧（默认 false）", frames.some((f) => f === '{"type":"power","sleep":false}'), JSON.stringify(frames));
 ok("工具调用 → 执行中 + detail", anim[1] === '{"type":"tool_call","tool":"bash"}' && bubbles.includes("执行中：npm test"), JSON.stringify(bubbles));
 ok("done → 回空闲", anim[2] === "agent_idle", JSON.stringify(anim));
+// v1.4：这个会话自己的那条气泡（同一条 sid 从执行中 → 已完成，标题是它自己的）
+ok("每会话一条气泡（执行中 → 已完成）", sessions.length >= 3 && sessions.every((s) => s.source === "dsh-fake") && sessions[0].status === "running" && sessions[sessions.length - 1].status === "done" && sessions[0].title === "pi-dsh-pet" && sessions[1].text === "npm test", JSON.stringify(sessions));
 ok("会话名存在 /state 里", st.bus.feedsBySource["dsh-fake"] === 1, JSON.stringify(st.bus));
 console.log("bus:", JSON.stringify(st.bus));
 plugin.dispose();

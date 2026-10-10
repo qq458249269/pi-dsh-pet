@@ -95,6 +95,27 @@
 - 窗**看不见**时（最小化 / 屏保锁屏 / 挂起）主进程另走 IPC `pet:power` 喊它睡，
   不经过宿主也生效
 
+### 3.2.3 下行 v1.4（**每个会话一条**气泡，仍是只加不改）
+
+```json
+{"type":"session","sid":"pi#1","source":"pi","title":"修复登录","status":"running","text":"npm test"}
+{"type":"session","sid":"pi#1","remove":true}
+```
+
+- `sid` = 会话 id，宿主给（`来源#序号`）。**一条 `/feed` 连接 = 一个会话**（多开几个 pi
+  就是几条连接，各有各的 sid）—— 这以前是按 `source` 归一的，于是多开会话挤成一条
+- `title` = 会话标题（生产者在 `session_start` 报一次，见 3.3；没报就退到来源名）
+- `status` = `running`（角标「执行中」）/ `done`（角标「已完成」，**可点掉**）
+- `text` = 细节行（角标已经说了状态，正文不再重复说一遍「执行中：」）
+- `remove:true` = 收掉这一条：**会话退出**（连接断、120s 判死）或**用户点掉了已完成那条**
+- 窗靠 `sid` 认领：同一个会话的状态变化是**原地换**，不新冒一条、不跳位置
+- 窗接上来时按会话逐条补发（排在 v1.1 那条全局气泡**之前**，见 `bus.cjs` 的 `/ws` 分支）
+- 老窗不认识这两帧（`onmessage` 认不出 type 就忽略），**v1.1 那条全局 sticky 气泡照发**：
+  新旧窗看的是同一份状态。新窗收到第一条 `session` 帧后会收掉那条重复的全局气泡，
+  一个 session 帧都没收到（老宿主）就照旧画它
+- 移除一条：`POST /control {action:"dismiss-bubble", sid:"pi#1"}`（窗侧点一下就调；
+  渲染进程没 token ⇒ 走 `preload.dismissSession` → 主进程 → 宿主）
+
 ### 3.3 上行 v1.1（生产者在 /feed 上行或 POST /event）
 
 ```jsonc
@@ -103,6 +124,9 @@
 {"type":"done","summary":"改完 3 个文件"}         // 回空闲 + 完成气泡
 {"type":"say","text":"过来玩","ms":6000}         // 只冒泡，不动动画
 "agent_idle" / "add_pet:small" / "shutdown"      // v1 裸字符串照样能用
+{"type":"session","title":"修复登录"}             // v1.4：只报标题，不改状态、不冒泡
+// v1.4：上面每一帧都能带 title（= 会话标题），省得每条都报一次
+{"type":"tool_call","tool":"bash","detail":"npm test","title":"修复登录"}
 ```
 
 ### 3.4 HTTP 面
@@ -110,12 +134,12 @@
 | 端点 | 鉴权 | 用途 |
 |---|---|---|
 | `GET /health` | 否 | 探活；必须回 `role:"pi-pet-host"` 才认（防止端口被别人占了） |
-| `GET /state` | 是 | 状态文件 + ctrl + bus 统计（busySessions / feedsBySource） |
+| `GET /state` | 是 | 状态文件 + ctrl + bus 统计（busySessions / feedsBySource / sessionBubbles） |
 | `GET /` `GET /assets/*` | 否 | 窗页面 + webm 素材（`?token=` 由窗注入） |
 | `POST /event` | 是 | 单条上行（curl / 脚本用） |
 | `WS /ws` | 否 | 窗下行通道（`pet.js` 发不了自定义头，所以免鉴权） |
 | `WS /feed` | 是（`?token=`） | 生产者上行通道；`?source=` 决定会话归属 |
-| `POST /control` | 是 | `shutdown / restart-window / add-pet / drop-pets / say / pause / resume / hide-window / show-window / set-ctrl / set-position / check-update / do-update / state / release-lock`（**check-update / do-update 是 Promise**，见 §6.3）。`power-save` 与 `set-ctrl{powerSave}` 暂时屏蔽（§3.2.2） |
+| `POST /control` | 是 | `shutdown / restart-window / add-pet / drop-pets / say / dismiss-bubble / pause / resume / hide-window / show-window / set-ctrl / set-position / check-update / do-update / state / release-lock`（**check-update / do-update 是 Promise**，见 §6.3）。`power-save` 与 `set-ctrl{powerSave}` 暂时屏蔽（§3.2.2） |
 
 token 存在 `%APPDATA%/pi-dsh-pet/token`，**只绑 127.0.0.1**。不开 LAN。
 
@@ -148,7 +172,7 @@ positions.json {…}         ← 宠物在窗里的站位（比例坐标）
 ### 4.1 为什么要「按来源记状态」
 
 pi 和 dsh 可以同时喂。一律用「全局一份状态」的话，A 结束会把 B 正在写的代码擦掉。
-所以：**每个来源一份会话状态**，窗显示「最近活跃的忙碌会话」。
+所以：**每个会话一份状态**（v1.4 起 = 每条 `/feed` 连接一份，见 §4.4），窗显示「最近活跃的忙碌会话」。
 
 ```
 resolveTarget():
@@ -178,6 +202,32 @@ resolveTarget():
 | 完成 | `完成：xxx`（sticky，30s）→ `执行完成 ✓` |
 | 空闲 | `待命中…` |
 | 手动 | 你输入的原文（定时消失） |
+
+### 4.4 会话气泡（v1.4：每个会话一条）
+
+v1.1 那条气泡是**全局**的：一条只能讲「当前在干什么」，多开两个 pi 就分不清是谁。
+v1.4 起每个会话各有一条，宿主侧 `bus.cjs` 的 `sessionBubbles` 记着：
+
+```
+sid       pi#1（宿主分配，一连接一个）
+title     生产者报的，没报就退到 source
+status    running / done
+text      细节行（角标已说状态，正文不再重复）
+```
+
+三条规矩：
+
+1. **一条连接 = 一个会话**（以前按 source 归一，多开会话会挤成一条，断一条还把别人的状态带走）。
+   sid 同时是会话 id 与气泡的归属键。
+2. **状态变化原地换**：宿主只在 `title/status/text` 真变了才发（`upsertSessionBubble`），
+   窗按 `sid` 认领同一个节点，所以「执行中 → 已完成」不冒第二条、气泡也不跳位置。
+3. **移除的两条路**：会话退出（连接断 / 120s 判死）⇒ 宿主发 `remove`；
+   用户点已完成那条 ⇒ 窗本地收掉 + `POST /control dismiss-bubble`（宿主记 `dismissed`，
+   这一轮不再冒；下一轮真忙起来标记清掉，气泡重新出现）。
+
+另有一条「没干过活就不冒泡」的门槛：刚接上来就 idle 的会话不占头顶。
+头顶空间不够时（`fitCount`）窗侧优先收**已完成**的那条 —— 正在执行的一收，
+用户就看不见谁还在干活了。
 
 ## 5. 互斥：全局只能一只
 

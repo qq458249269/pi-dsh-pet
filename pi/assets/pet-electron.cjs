@@ -929,6 +929,18 @@ if (!res || res.ok !== true) {
     }
   });
 
+// 渲染进程：点掉一条「已完成」的会话气泡（v1.4）→ 告诉宿主别再发它。
+  // 不弹窗：点气泡是随手动作，失败了（宿主刚好不在）本地也已经收掉了。
+  ipcMain.on("pet:dismiss-session", async (_event, sid) => {
+    const id = String(sid == null ? "" : sid).trim();
+    if (!id) return;
+    const { token } = readTokenAndHome();
+    const res = await callHost("dismiss-bubble", { sid: id }, token);
+    if (!res || res.ok !== true) {
+      console.error(`[pi-dsh-pet] 会话气泡没点掉（${id}）：${res ? res.error : "no response"}`);
+    }
+  });
+
   // 渲染进程 → 主进程：记住拖拽落点（下次启动还在那儿）
   // 失败不弹窗：这是后台落盘，弹窗只会打断用户（位置仍能用默认角落）。
   ipcMain.on("pet:save-position", async (_event, payload = {}) => {

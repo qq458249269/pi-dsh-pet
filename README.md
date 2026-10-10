@@ -14,6 +14,9 @@ assets-91%20animations-ff69b4
 > 现在它是一个**独立应用**：自己带一个 127.0.0.1 的 HTTP/WS 端口，pi、dsh、opencode、curl 都能驱动同一只宠物。
 > 下行协议完全没变，老版本窗照旧能跑。
 
+> 💡 宠物头顶**每个会话一条气泡**：多开几个 pi 就多几格，各写各的标题与「执行中 / 已完成」；
+> 会话退出自动收掉，已完成的那条点一下也能收。见 [会话气泡](#会话气泡多开会话时头顶一会话一格)。
+
 > Fork 自 [dsh-pet](https://github.com/PC2005-cloud/dsh-pet)（[npm](https://www.npmjs.com/package/dsh-pet)），本项目专为 pi 平台适配 —— 响应 pi agent 工作状态（思考/写代码/空闲），通过 Electron 透明置顶小浮窗渲染（原 dsh-pet 用户请使用 npm 原版）。
 
 > 💡 浮窗**只包住宠物本身**，不是全屏：全屏透明置顶窗每产生一帧，DWM 都得把整块桌面重新合成一遍，别的程序的后台窗口就抢不到合成预算（「桌宠一开，浏览器就不刷新了」）。想把它放到别处就**拖它**（拖 = 搬整扇窗，见 [移动与位置记忆](#移动与位置记忆)）。
@@ -662,6 +665,36 @@ PI_PET_UPDATE_DELAY_MS=…  # 启动后等多久再查（默认 12s，别跟起�
 - 漫游拖动时也掐着：窗内写样式/上报命中区封顶 30fps，主进程那次 `setShape` 有 2px 去重 +
   60ms 节流 —— 不动的宠物不该反复触发整屏重合成。
 
+## 会话气泡（多开会话时，头顶一会话一格）
+
+多开几个 pi / dsh / opencode 时，宠物头顶**每个会话一条气泡**，各写各的：
+
+```
+┌──────────────────────────┐
+│ pi-dsh-pet        执行中 │   ← 蓝色角标 = 还在跑（点它没意义）
+│ npm test                 │
+└──────────────────────────┘
+┌──────────────────────────┐
+│ 写文档            已完成 │   ← 绿色角标 = 跑完了，**点一下就收掉**
+│ README 改好了            │
+└──────────────────────────┘
+```
+
+- **一条会话一格**：宿主按 `/feed` 连接分配 `sid`（`pi#1` / `pi#2`…），所以同开两个 pi
+  是两格，不会挤成一条。同一会话的状态变化是**原地换**（执行中 → 已完成），
+  不新冒第二条、位置也不跳。
+- **标题**是生产者报上来的会话名：pi 扩展在 `session_start` 时报一次
+  （能取到会话标题就用标题，取不到就用工作目录名），dsh 用配置里的 `title` 或工作目录名，
+  opencode 用 session 标题 / 目录名。都没有就显示来源名（`pi` / `dsh` / `opencode`）。
+- **会话退出就收**：那条会话的连接断了（pi 退出 / 换会话）或 120s 判死 ⇒ 那一格自动消失。
+- **点已完成的也能收**：点一下本地收掉，并告诉宿主「别再发它」
+  （`POST /control {"action":"dismiss-bubble","sid":"pi#1"}`）——
+  不告诉宿主的话，换窗补发时它又会回来。下一轮真开工时气泡重新冒出来。
+- 头顶空间不够时（贴上边 / 窗口小）优先收**已完成**的那几条，正在跑的留着。
+
+协议（下行 `{"type":"session",...}`、上行 `{"type":"session","title":...}`）见
+[DESIGN.md §3.2.3 / §4.4](./DESIGN.md)。
+
 ## 接自己的程序
 
 宿主只听 127.0.0.1，token 在 `%APPDATA%/pi-dsh-pet/token`（`pi-pet token` 打印）。
@@ -678,13 +711,14 @@ const token = fs.readFileSync(tokenFile, "utf8").trim();
 上行只有两种方式，语义完全一样：
 
 ```js
-// 1) WS（推荐，能一直连着，每个来源独立一份会话状态）
+// 1) WS（推荐，能一直连着：**每条连接 = 一个会话 = 头顶一格气泡**）
 const ws = new WebSocket(`ws://127.0.0.1:${port}/feed?source=my-tool&token=${token}`);
 ws.onopen = () => {
+  ws.send(JSON.stringify({ type: "session", title: "拉数据" }));     // 会话标题（只报一次）
   ws.send(JSON.stringify({ type: "thinking", task: "拉取数据" }));
   ws.send(JSON.stringify({ type: "tool_call", tool: "bash", detail: "npm run build" }));
-  ws.send(JSON.stringify({ type: "done", summary: "构建完成" }));
-};
+  ws.send(JSON.stringify({ type: "done", summary: "构建完成" }));     // 那格变「已完成」
+};                                                                      // 关掉 ws ⇒ 那格消失
 
 // 2) REST（一次性）
 await fetch(`http://127.0.0.1:${port}/event`, {
@@ -695,11 +729,11 @@ await fetch(`http://127.0.0.1:${port}/event`, {
 ```
 
 `dsh/pi-pet.mjs` 就是这么接的（直接 `import` 丢进 dsh 插件目录即可）。协议细节（下行 v1/v1.1
-帧格式、状态机、多会话语义）见 [DESIGN.md](./DESIGN.md)。
+帧格式、状态机、多会话语义、会话气泡）见 [DESIGN.md](./DESIGN.md)。
 
 ## 文档
 
-- [设计与实现](DESIGN.md) —— 架构、协议 v1/v1.1、状态机与气泡、互斥四层、运维命令、已知坑
+- [设计与实现](DESIGN.md) —— 架构、协议 v1~v1.4、状态机与气泡（含每会话一条）、互斥四层、运维命令、已知坑
 
 ## 许可
 

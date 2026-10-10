@@ -9,7 +9,8 @@
  *   endWindowDrag   松手：让主进程记住窗的落点
  *   onDisplays      各显示器的工作区（贴边靠它，§9.25）
  *   openMenu        右键菜单（菜单项的动作走宿主控制面，主进程负责弹）
- *   say / onAskSay  手动输入气泡：主进程叫出输入框 → 渲染进程提交 → 主进程调宿主
+*   say / onAskSay  手动输入气泡：主进程叫出输入框 → 渲染进程提交 → 主进程调宿主
+ *   dismissSession  点掉一条「已完成」的会话气泡（v1.4）→ 主进程调宿主 /control dismiss-bubble
  *   savePosition    拖拽落点记忆（→ 宿主 /control set-position → home/positions.json）
 *   sayInputEnd / onSayCancel  输入框的收工信号（关框后要把键盘焦点还给下面的窗口）
  *   closeWindow     宿主退出 / WS 断了 → 关窗
@@ -64,8 +65,11 @@ contextBridge.exposeInMainWorld("__petElectron__", {
 savePosition: (id, rx, ry, w, h) => ipcRenderer.send("pet:save-position", { id: String(id == null ? "" : id), rx: Number(rx), ry: Number(ry), w: Number(w), h: Number(h) }),
   /** 主进程叫输入框（右键菜单的「说点什么…」） */
   onAskSay: (cb) => ipcRenderer.on("pet:say-ask", () => cb()),
-  /** 输入框收工：告诉主进程把窗切回不可聚焦（别一直抢着键盘焦点） */
+/** 输入框收工：告诉主进程把窗切回不可聚焦（别一直抢着键盘焦点） */
   sayInputEnd: () => ipcRenderer.send("pet:say-input-end"),
+  /** 点掉一条「已完成」的会话气泡（v1.4）：交给主进程 → 宿主 /control dismiss-bubble。
+   *  渲染进程手里没有 token，写不了 /control（同 savePosition）。 */
+  dismissSession: (sid) => ipcRenderer.send("pet:dismiss-session", String(sid == null ? "" : sid)),
   /** 主进程强制收起输入框（焦点被别的程序抢走、或弹了右键菜单） */
   onSayCancel: (cb) => ipcRenderer.on("pet:say-cancel", () => cb()),
 /** 关闭 Electron 窗口（WS 断了、宿主说 shutdown 时调用） */

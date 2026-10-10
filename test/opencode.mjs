@@ -68,9 +68,11 @@ await sleep(200);
 const statusOut = await tool("status");
 const badOut = await tool("frobnicate");
 
-// 宿主起来时会补发 power 帧（开机状态不是事件），断言位置前先滤掉
-const anim = frames.filter((f) => !f.startsWith('{"type":"bubble"') && !f.startsWith('{"type":"power"'));
+// 宿主起来时会补发 power 帧（开机状态不是事件），断言位置前先滤掉；
+// v1.4 的会话气泡帧（session）是另一条通道，也不进 anim。
+const anim = frames.filter((f) => !f.startsWith('{"type":"bubble"') && !f.startsWith('{"type":"power"') && !f.startsWith('{"type":"session"'));
 const bubbles = frames.filter((f) => f.startsWith('{"type":"bubble"')).map((f) => JSON.parse(f).text);
+const sessions = frames.filter((f) => f.startsWith('{"type":"session"') && !f.includes('"remove"')).map((f) => JSON.parse(f));
 const st = await (
   await fetch(`http://127.0.0.1:${PORT}/state`, { headers: { authorization: `Bearer ${token}` } })
 ).json();
@@ -90,6 +92,8 @@ ok("pet 工具 say → 气泡", bubbles.includes("你今天摸鱼了吗") && Str
 ok("pet 工具 status 报出端口", String(statusOut).includes(`:${PORT}`), String(statusOut));
 ok("pet 工具认得非法命令", String(badOut).includes("用法"), String(badOut));
 ok("会话名存在 /state 里", st.bus.feedsBySource["opencode"] === 1, JSON.stringify(st.bus));
+// v1.4：这个会话自己一条气泡（执行中 → 已完成，sid 前后不变 = 原地换）
+ok("每会话一条气泡（sid 不变，状态变）", sessions.length >= 3 && sessions.every((s) => s.sid === sessions[0].sid) && sessions[0].status === "running" && sessions[sessions.length - 1].status === "done", JSON.stringify(sessions));
 
 hooks.dispose();
 await fetch(`http://127.0.0.1:${PORT}/control`, {

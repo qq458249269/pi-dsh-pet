@@ -602,9 +602,13 @@ var BUBBLE_CHROME_H = 18;
 var BUBBLE_GAP = 10;
 /** 气泡之间（以及输入行）的间隙，clampBubble 分头顶空间时要用（§9.34） */
   var BUBBLE_GAP_PX = 4;
-  /** 头顶最多同时泡几条（§9.34）。**上限**；真能留几条由 fitCount() 按头顶实测空间算
-   *  （贴上边、窗口小的时候自动降），超出就把最老的收掉。 */
-  var BUBBLE_MAX = 5;
+/** 头顶最多同时泡几条**会话**气泡（v1.4）。**上限**；真能留几条由 fitCount() 按头顶实测
+   *  空间算（贴上边、窗口小的时候自动降），超出就把最老的（或已完成的）收掉。 */
+var BUBBLE_MAX = 5;
+  /** 消息 lane（碎碎念 / 手打的话 / say）自己一条队列，上限**独立**算。
+   *  ⚠️ 别拿会话那个上限来用：消息是过期的、便宜的，挤一挤就该让位；
+   *     两边共用一个上限的话，聊天记录会把「谁还在执行中」顶掉（用户口径：碎碎念要恢复）。 */
+var CHAT_MAX = 3;
   /**
    * 舞台窗的留白（§9.24）：窗 = 宠物 + 四边 padding。
    *
@@ -1441,57 +1445,96 @@ e.preventDefault();
       });
     });
 
-// ---- 气泡栈 + 手动输入（§9.34）----
+// ---- 气泡：两条 lane（§9.34 + v1.4）----
     // 状态文案、人打的字、自己冒的碎碎念全都走这里。它**不是** v1 线格式的一部分：
-    // 宿主发 {"type":"bubble",...}，窗只负责渲染，老窗照旧忽略这帧。
+    // 宿主发 {"type":"bubble",...} / {"type":"session",...}，窗只负责渲染，老窗照旧忽略。
+    //
+    // ⚠️ 两条 lane 装在**同一个外框**里，各走各的队列：
+    //   会话 lane（上面）  每个会话一条（执行中 / 已完成），留到会话退出或用户点掉
+    //   消息 lane（下面）  碎碎念 / 手打的话 / say —— **独立消息队列**：独立的条数上限、
+    //                     独立的计时器、独立的过期。碎碎念不会被会话气泡挤掉，
+    //                     聊天记录也不会把「谁还在执行中」顶没了（用户口径：碎碎念要恢复）。
+    // 外框（.pet-bubble-lanes）只管位置：贴头顶、夹在屏内、命中区都按**两 lane 的并集**算。
     //
     // ⚠️ 改成「一摞」而不是「一个复用的框」：每条消息一个 .pet-bubble，新的一条在**下面**，
-    //   老的被顶上去（看着就是滚动），同时最多留 BUBBLE_MAX(3) 条 —— 再多就把最老的收摊。
+    //   老的被顶上去（看着就是滚动），到上限就把最老的收摊。
     //   宽度**定死**（--bubble-w，见 applyBubbleWidth）：以前是 max-content，气泡宽度跟着
     //   文案变 → 折行变 → 夹取算出的偏移变 → 每来一句话气泡就横向跳一下（用户口径
     //   「气泡框丑、位置乱动」）。定宽之后几何只跟宠物位置有关，它钉在头顶不动。
-    var stack = document.createElement("div");
+    var lanes = document.createElement("div");
+    lanes.className = "pet-bubble-lanes";
+    container.appendChild(lanes);
+    var stack = document.createElement("div"); // 会话 lane（外框里的上面那条）
     stack.className = "pet-bubble-stack";
-    container.appendChild(stack);
-    self.bubbleEl = stack; // 命中区要把整摞气泡算进去（collectHitRects 看它有没有 .show）
-    /** 活着的消息气泡：下标越大越新 = 越靠下。 */
+    lanes.appendChild(stack);
+    var chatStack = document.createElement("div"); // 消息 lane（外框里的下面那条，贴着宠物）
+    chatStack.className = "pet-bubble-stack pet-chat-stack";
+    lanes.appendChild(chatStack);
+    self.bubbleEl = lanes; // 命中区要把**两 lane 的并集**算进去（collectHitRects 看它有没有 .show）
+    /** 会话气泡：下标越大越新 = 越靠下。 */
     var bubbles = [];
+    /** 消息气泡（碎碎念 / 手打的话 / say）：**独立队列**，跟会话那摞各算各的。 */
+    var chatBubbles = [];
 
     function stackEmpty() {
-      return bubbles.length === 0 && !inputOpen;
+      return bubbles.length === 0 && chatBubbles.length === 0 && !inputOpen;
+    }
+
+    /** 这条节点属于哪摞？（dropBubble / FLIP 要知道） */
+    function laneOf(el) {
+      return bubbles.indexOf(el) >= 0 ? bubbles : chatBubbles;
+    }
+
+/** 另一个 lane 占了几条。fitCount/trim 分空间时要用。
+        ⚠️ 输入框算**消息 lane** 的（它就在那条里），别两边都扣（那会少算一条）。 */
+    function otherCount(arr) {
+      return arr === bubbles ? chatBubbles.length + (inputOpen ? 1 : 0) : bubbles.length;
     }
 
     /** 头顶**实测**能放下几条（§9.34）：每条至少「一行字 + 上下内边距 + 间隙」。
-        BUBBLE_MAX 只是上限，真留几条看头顶有多少 —— 贴上边、窗口小的时候自动降。
+        上限只是天花板，真留几条看头顶有多少 —— 贴上边、窗口小的时候自动降，
+        **而且要把另一个 lane 已占的条数扣掉**（两摞共享同一片头顶空间）。
         为什么不用「分摊高度」硬撑：分摊下来每条只剩 20px，**字被裁掉半行** ——
         裁半行比少一条难看得多。 */
-    function fitCount() {
+    function fitCount(arr, max) {
       var cr = container.getBoundingClientRect();
       var roomAbove = Math.max(0, Math.round(cr.top - BUBBLE_CHROME_H));
       if (roomAbove < BUBBLE_LINE_H * 2) return 1; // 头顶不够两行 → 走「盖头顶」那档，不分摊
       var per = BUBBLE_MIN_H + BUBBLE_GAP_PX;
-      return Math.max(1, Math.min(BUBBLE_MAX, Math.floor((roomAbove + BUBBLE_GAP_PX) / per)));
+      var fit = Math.floor((roomAbove + BUBBLE_GAP_PX) / per) - otherCount(arr);
+      return Math.max(1, Math.min(max, fit));
     }
 
-    /** 留多了就收最老的（先淡后摘，动画跟 dropBubble 走）。 */
-    function trim() {
-      while (bubbles.length > fitCount()) dropBubble(bubbles[0]);
+    /** 留多了就收最老的（先淡后摘，动画跟 dropBubble 走）。
+        ⚠️ 会话那摞优先收**已完成**的（v1.4）：正在执行的那条一收，用户就看不见谁还在干活了 ——
+        而「已完成」留着也只是历史，丢了不心疼。消息那摞没这个讲究（本来就是过期的）。 */
+    function trim(arr, max) {
+      while (arr.length > fitCount(arr, max)) {
+        var victim = 0;
+        if (arr === bubbles) {
+          for (var i = 0; i < bubbles.length; i++) {
+            if (bubbles[i].getAttribute("data-status") === "done") { victim = i; break; }
+          }
+        }
+        dropBubble(arr[victim]);
+      }
     }
 
     /** 收掉一条：先淡出，动画走完再摘节点（直接 remove 就没有那一下淡出了）。 */
     function dropBubble(el) {
-      if (!el || el.parentNode !== stack) return;
+      if (!el || !el.parentNode) return;
       if (el._timer) {
         clearTimeout(el._timer);
         el._timer = 0;
       }
-      var i = bubbles.indexOf(el);
-      if (i >= 0) bubbles.splice(i, 1);
-el.classList.remove("show", "has-tail");
+      var arr = laneOf(el);
+      var i = arr.indexOf(el);
+      if (i >= 0) arr.splice(i, 1);
+      el.classList.remove("show", "has-tail");
       el.classList.add("gone");
-      stack.classList.toggle("show", !stackEmpty());
+      lanes.classList.toggle("show", !stackEmpty());
       setTimeout(function () {
-if (el.parentNode) el.parentNode.removeChild(el);
+        if (el.parentNode) el.parentNode.removeChild(el);
         ageAll(); // 少了一条 ⇒ 剩下的都往前排一档（变亮一点）
         markTail(); // 底下那条收了，尾巴得挪到现在的最后一条上
         self.clampBubble(); // 条数少了 ⇒ 剩下的能分到更多行，重新分一次高
@@ -1499,23 +1542,34 @@ if (el.parentNode) el.parentNode.removeChild(el);
       }, 200);
     }
 
-/** 尾巴只长在最底下那一条上（气泡栈看着才像一句话的尾巴，而不是一堆箭头）。
+/** 尾巴只长在**最底下**那一条上（看着才像一句话的尾巴，而不是一堆箭头）。
+        哪个 lane 在下面谁带尾巴：消息 lane 空（或输入框开着）时，会话那摞的最底下那条顶上来。
         ⚠️ 输入框开着时不长尾巴：它就贴在输入框正上方，一支箭插在输入框里比没有更怪。 */
     function markTail() {
-      var last = bubbles.length - 1;
+      var chatLast = !inputOpen && chatBubbles.length ? chatBubbles[chatBubbles.length - 1] : null;
       for (var i = 0; i < bubbles.length; i++) {
-        bubbles[i].classList.toggle("has-tail", i === last && !inputOpen);
+        bubbles[i].classList.toggle("has-tail", !chatLast && i === bubbles.length - 1);
+      }
+      for (var j = 0; j < chatBubbles.length; j++) {
+        chatBubbles[j].classList.toggle("has-tail", !!chatLast && j === chatBubbles.length - 1);
       }
     }
 
     /** 越老越退后（§9.34）：最新的满亮，老的一条按档位变淡（文字 + 底色一起）。
-        淡的是 `--fade`，不动 opacity —— opacity 是入场动画用的（.show），抢它就闪。 */
-    var AGE_FADE = [1, 0.72, 0.5, 0.34, 0.22] // 5 档对上 BUBBLE_MAX;
-    function ageAll() {
-      for (var i = 0; i < bubbles.length; i++) {
-        var slot = bubbles.length - 1 - i; // 0 = 最新
-        bubbles[i].style.setProperty("--fade", String(AGE_FADE[slot] == null ? AGE_FADE[AGE_FADE.length - 1] : AGE_FADE[slot]));
+        淡的是 `--fade`，不动 opacity —— opacity 是入场动画用的（.show），抢它就闪。
+        ⚠️ 两摞**各用自己的档位表**：消息 lane 的上限是 CHAT_MAX(3)，拿会话那张 5 档表去
+        索引，第 3 条之后会取到 undefined（= 满亮）—— 于是最老那条反而最亮。 */
+    var AGE_FADE = [1, 0.72, 0.5, 0.34, 0.22]; // 会话 lane：5 档对上 BUBBLE_MAX
+    var CHAT_FADE = [1, 0.66, 0.42]; // 消息 lane：3 档对上 CHAT_MAX
+    function fadeLane(arr, table) {
+      for (var i = 0; i < arr.length; i++) {
+        var slot = arr.length - 1 - i; // 0 = 最新
+        arr[i].style.setProperty("--fade", String(table[slot] == null ? table[table.length - 1] : table[slot]));
       }
+    }
+    function ageAll() {
+      fadeLane(bubbles, AGE_FADE);
+      fadeLane(chatBubbles, CHAT_FADE);
     }
 
 /** FLIP（§9.34）：新的一条进来，老的会**被顶上去** —— 但布局一变就是瞬间到位，
@@ -1526,45 +1580,54 @@ if (el.parentNode) el.parentNode.removeChild(el);
         「被挤上去」，该慢而稳；入场是「新冒出来」，该快。
         时长按**上推多远**缩放：被顶得越高，走得越久（远远的那条一眼能跟上），
         就近的（差 6px）快快让一下就够 —— 一律 0.26s 的话，近的拖着尾巴、远的赶不上。 */
-    function flipFrom(tops) {
-      for (var i = 0; i < tops.length && i < bubbles.length; i++) {
-        var el = bubbles[i];
-        var dy = tops[i] - el.getBoundingClientRect().top;
+    function flipPairs(pairs) {
+      for (var i = 0; i < pairs.length; i++) {
+        var e2 = pairs[i].el;
+        // 正在淡出（gone）的、已经被摘出栈的：别再给它们补一段位移动画
+        if (!e2 || !e2.parentNode || e2.classList.contains("gone")) continue;
+        var dy = pairs[i].top - e2.getBoundingClientRect().top;
         if (!dy) continue; // 本来就没动（第一条 / 高度没变）—— 别白跑一次过渡
         // ⚠️ 第一帧必须**禁掉过渡**：否则「拉回原位」这一步自己也会补一段动画，
         //   两段接起来 = 老的气泡先往下坠一下再上去（实测会闪）。
-        el.style.transition = "none";
-        el.style.transform = "translateY(" + dy + "px)";
-        (function (e2, dist) {
+        e2.style.transition = "none";
+        e2.style.transform = "translateY(" + dy + "px)";
+        (function (node, dist) {
           // 120ms 起步，每 10px 加 30ms，上封 420ms（顶一整条很高时才封顶）
           var ms = Math.min(420, 120 + Math.round(Math.abs(dist) * 3));
           requestAnimationFrame(function () {
-            e2.style.transition = "transform " + (ms / 1000) + "s cubic-bezier(0.22, 0.78, 0.26, 1)";
+            node.style.transition = "transform " + (ms / 1000) + "s cubic-bezier(0.22, 0.78, 0.26, 1)";
             requestAnimationFrame(function () {
-              e2.style.removeProperty("transform");
+              node.style.removeProperty("transform");
               // 过渡走完把内联曲线撤掉（回到样式表的入场曲线）；兜底 ms + 120：
               // 过渡被打断（又来一条）时不留残值。
               var done = function () {
-                e2.style.removeProperty("transition");
+                node.style.removeProperty("transition");
               };
-              e2.addEventListener("transitionend", done, { once: true });
+              node.addEventListener("transitionend", done, { once: true });
               setTimeout(done, ms + 120);
             });
           });
-        })(el, dy);
+        })(e2, dy);
       }
     }
 
-    /** 气泡贴到屏幕边（宠物拖到边角）时把它挪回来，不然半边在屏幕外 = 看着被切了一半。
+    /** 量一遍某摞当前每条的位置（变动前调用，配合 flipPairs）。 */
+    function measureLane(arr) {
+      var out = [];
+      for (var i = 0; i < arr.length; i++) out.push({ el: arr[i], top: arr[i].getBoundingClientRect().top });
+      return out;
+    }
+
+/** 气泡贴到屏幕边（宠物拖到边角）时把它挪回来，不然半边在屏幕外 = 看着被切了一半。
         偏移走 left/bottom（不在 transition 里，改完立刻到位，不会一边补一边抖）。
-        ⚠️ 量的是**整摞**（stack），不是单条：位置是这一摞共同的，夹一次就够。 */
+        ⚠️ 量的是**外框**（lanes = 两条 lane 的并集），不是单条：位置是这一摞共同的，夹一次就够。 */
     self.clampBubble = function () {
       if (stackEmpty()) {
-        stack.style.removeProperty("left");
-        stack.style.removeProperty("bottom");
+        lanes.style.removeProperty("left");
+        lanes.style.removeProperty("bottom");
         return;
       }
-      var r = stack.getBoundingClientRect();
+      var r = lanes.getBoundingClientRect();
       if (!r || !(r.width > 0) || !(r.height > 0)) return;
       var W = window.innerWidth;
       var H = window.innerHeight;
@@ -1583,24 +1646,23 @@ if (el.parentNode) el.parentNode.removeChild(el);
       // 头顶连两行都放不下（正常走不到：站位/拖拽都留 STAGE_PAD_TOP 的台子，roomAbove ≥ 132）
       // → 还是要**封高**（封到 roomAbove），而不是撤掉封高盖到头顶上。位置不许动，
       //   宁可少显示两行：气泡乱跳比字少难看得多。
-      var overlap = roomAbove < BUBBLE_LINE_H * 2;
+var overlap = roomAbove < BUBBLE_LINE_H * 2;
       if (!overlap) {
-        trim(); // 贴到边上 / 窗口变小 ⇒ 头顶不够了，先收几条再分（顺序不能反）
+        trim(bubbles, BUBBLE_MAX); // 贴到边上 / 窗口变小 ⇒ 头顶不够了，先收几条再分（顺序不能反）
+        trim(chatBubbles, CHAT_MAX); // 两摞各收各的（但都看得到对方占了多少）
         // 一摞的话要**分**：N 条 + N−1 个间隙，头顶那点地方平均分给每条。
         // N 已按 fitCount 收敛（留不下的早收了），所以分下来每条至少一行字。
-        var n = bubbles.length + (inputOpen ? 1 : 0);
-        var room = Math.max(BUBBLE_MIN_H, Math.floor((roomAbove - BUBBLE_GAP_PX * Math.max(0, n - 1)) / n));
-        for (var i = 0; i < bubbles.length; i++) {
-          var b = bubbles[i];
-          b.style.maxHeight = room + "px";
-          b.style.webkitLineClamp = String(Math.max(1, Math.min(6, Math.floor((room - 14) / BUBBLE_LINE_H))));
-        }
+        // ⚠️ 两条 lane 共用**同一条**分法：位置/封高算法只许有一份（写两份就会有一处对不上）。
+        var n = bubbles.length + chatBubbles.length + (inputOpen ? 1 : 0);
+        var room = Math.max(BUBBLE_MIN_H, Math.floor((roomAbove - BUBBLE_GAP_PX * Math.max(0, n - 1)) / Math.max(1, n)));
+        capHeight(bubbles, room);
+        capHeight(chatBubbles, room);
+        capRow(inputRow, room);
       } else {
         var tight = Math.max(BUBBLE_MIN_H, roomAbove);
-        for (var j = 0; j < bubbles.length; j++) {
-          bubbles[j].style.maxHeight = tight + "px";
-          bubbles[j].style.webkitLineClamp = String(Math.max(1, Math.floor((tight - 14) / BUBBLE_LINE_H)));
-        }
+        capHeight(bubbles, tight);
+        capHeight(chatBubbles, tight);
+        capRow(inputRow, tight);
       }
       cr = container.getBoundingClientRect(); // 上面被写样式弄脏了？重拿一份干净的（下方 baseL/baseT 用它）
 
@@ -1608,7 +1670,7 @@ if (el.parentNode) el.parentNode.removeChild(el);
       //   文字重新折行，**宽度也跟着变**。拿旧几何算 dx/dy = 把气泡夹在旧位置上
       //   （实测贴右边时探出窗边 40px，而 showBubble 那次「下一帧再夹」也救不回来）。
       //   这里量的是布局，代价可以忽略。
-      r = stack.getBoundingClientRect();
+      r = lanes.getBoundingClientRect();
       if (!r || !(r.width > 0) || !(r.height > 0)) return;
 
       // ⚠️⚠️ 偏移是**绝对**的，不是增量（实测踩过的坑：算增量、写绝对）。
@@ -1629,19 +1691,36 @@ if (el.parentNode) el.parentNode.removeChild(el);
 //   那是把气泡**往下**推回窗内，正好落在宠物脸上（用户口径「气泡位置异常下移」）。
       //   现在的做法：站位/拖拽都留 STAGE_PAD_TOP 的台子 ⇒ 头顶永远有地方，
       //   真到了放不下的时候也是**封高**（上面那个 overlap 分支），不许挪。
-      if (r.bottom > H - 8) wantT = Math.min(wantT, H - 8 - r.height);
+if (r.bottom > H - 8) wantT = Math.min(wantT, H - 8 - r.height);
       var dx = Math.round(wantL - baseL);
       var dy = Math.round(wantT - baseT);
       // 写一样的值没有代价，但每帧都写新值会让浏览器白排一次版
-      if (!dx) stack.style.removeProperty("left");
-      else stack.style.left = "calc(50% + " + dx + "px)";
-      if (!dy) stack.style.removeProperty("bottom");
-      else stack.style.bottom = "calc(100% " + (dy > 0 ? "- " : "+ ") + Math.abs(dy) + "px)";
-      stack.style.removeProperty("top");
+      if (!dx) lanes.style.removeProperty("left");
+      else lanes.style.left = "calc(50% + " + dx + "px)";
+      if (!dy) lanes.style.removeProperty("bottom");
+      else lanes.style.bottom = "calc(100% " + (dy > 0 ? "- " : "+ ") + Math.abs(dy) + "px)";
+      lanes.style.removeProperty("top");
     };
 
-    /**
-     * 冒一条。sticky = 状态还在（宿主每 10s 续期一帧）：全局只留**一条** sticky，
+    /** 给一摞里的每条封高 + 封行数（行数封顶 6，跟样式表那个 -webkit-line-clamp 对齐）。 */
+    function capHeight(arr, room) {
+      for (var i = 0; i < arr.length; i++) {
+        arr[i].style.maxHeight = room + "px";
+        arr[i].style.webkitLineClamp = String(Math.max(1, Math.min(6, Math.floor((room - 14) / BUBBLE_LINE_H))));
+      }
+    }
+
+    /** 输入框那行同样吃封高（它不在任何一摞里，但占的是头顶那块地方）。 */
+    function capRow(row, room) {
+      if (!row) return;
+      row.style.maxHeight = room + "px";
+    }
+
+/**
+     * 冒一条**消息**（碎碎念 / 手打的话 / say / 老宿主的全局状态气泡）。
+     * 走的**消息 lane**（chatStack）—— 它自己一条队列：上限 CHAT_MAX(3) 条、
+     * 自己的计时器、自己过期，不与会话那摞抢位子。
+     * sticky = 状态还在（宿主每 10s 续期一帧）：全局只留**一条** sticky，
      * 新状态来了旧的立刻收摊 —— 状态是「当前是什么」，不是聊天记录。
      */
     self.showBubble = function (text, opts) {
@@ -1651,14 +1730,14 @@ if (el.parentNode) el.parentNode.removeChild(el);
       // sticky（「思考中…」这类状态气泡）全局互斥：任何后续消息（新状态 / 空闲文案 /
       // 手动 say）都顶掉旧的 sticky —— 否则状态回 idle 后那条 sticky 没有计时器，永远挂着。
       // 唯一例外：同一句的续期帧，留着续命（下面 dup 分支处理）。
-      for (var s = bubbles.length - 1; s >= 0; s--) {
-        if (bubbles[s].classList.contains("sticky") && !(opts.sticky === true && bubbles[s].getAttribute("data-text") === t)) {
-          dropBubble(bubbles[s]);
+      for (var s = chatBubbles.length - 1; s >= 0; s--) {
+        if (chatBubbles[s].classList.contains("sticky") && !(opts.sticky === true && chatBubbles[s].getAttribute("data-text") === t)) {
+          dropBubble(chatBubbles[s]);
         }
       }
       // 同一句已经泡着（续期帧 / 重复事件）→ 不再堆一条，直接续命。
       var dup = null;
-      for (var d = 0; d < bubbles.length; d++) if (bubbles[d].getAttribute("data-text") === t) dup = bubbles[d];
+      for (var d = 0; d < chatBubbles.length; d++) if (chatBubbles[d].getAttribute("data-text") === t) dup = chatBubbles[d];
       if (dup) {
         if (opts.sticky === true) dup.classList.add("sticky");
         var dm = Number(opts.ms) || 0;
@@ -1674,30 +1753,32 @@ if (el.parentNode) el.parentNode.removeChild(el);
       b.className = "pet-bubble";
       b.classList.toggle("sticky", opts.sticky === true);
       b.setAttribute("data-text", t);
+      // legacy = v1.1 那条**全局**状态气泡（宿主 v1.4 起改发每会话一条的 session 帧）。
+      // 标上它，第一条 session 帧到的时候就能把重复的那条收掉（见 clearStateBubbles）。
+      if (opts.legacy === true) b.setAttribute("data-legacy", "1");
       // 文案单独占一个节点：以后要在同一条里挂输入框/别的，直接改 bubble.textContent 会把它删掉。
       var span = document.createElement("span");
       span.className = "pet-bubble-text";
       span.textContent = t;
-b.appendChild(span);
+      b.appendChild(span);
       // 插入前量一遍老的位置（FLIP 的 First），插入点在输入框**之上** ——
       // 否则新消息会排到输入框下面，把正在打的字顶走。
-      var tops = [];
-      for (var t = 0; t < bubbles.length; t++) tops.push(bubbles[t].getBoundingClientRect().top);
-      stack.insertBefore(b, inputOpen ? inputRow : null);
-      bubbles.push(b);
+      var before = measureLane(chatBubbles);
+      chatStack.insertBefore(b, inputOpen ? inputRow : null);
+      chatBubbles.push(b);
       // ⚠️⚠️ .pet-bubble 基础样式就是 opacity:0，**只有 .show 才可见**（pet.css）。
       //   成栈那版（3573710）漏了这行 ⇒ 每条消息气泡全透明（用户口径「气泡还是没有」）。
       //   放下一帧补，入场过渡（opacity/transform 0.2s）也才跑得起来；
       //   补之前已经被收掉的（gone）就别再点亮，否则淡出到一半又亮了。
       requestAnimationFrame(function () {
-        if (b.parentNode === stack && !b.classList.contains("gone")) b.classList.add("show");
+        if (b.parentNode === chatStack && !b.classList.contains("gone")) b.classList.add("show");
       });
-markTail();
+      markTail();
       ageAll();
-      trim(); // 头顶放不下的先收掉（宁可少几条，也不要裁半行字）
-      flipFrom(tops);
-      while (bubbles.length > BUBBLE_MAX) dropBubble(bubbles[0]); // 上限保险
-      stack.classList.add("show");
+      trim(chatBubbles, CHAT_MAX); // 头顶放不下的先收掉（宁可少几条，也不要裁半行字）
+      flipPairs(before);
+      while (chatBubbles.length > CHAT_MAX) dropBubble(chatBubbles[0]); // 上限保险
+      lanes.classList.add("show");
       self.clampBubble();
       // 再夹一次：刚 show 出来那下量到的可能是**上一条文案**留下的布局（宽度、行数
       // 都还没按新文案排完）。下一帧再夹一次就稳了 —— 这是布局，不是动画，代价可以忽略。
@@ -1710,7 +1791,141 @@ markTail();
         el._timer = setTimeout(function () { dropBubble(el); }, ms);
       }
     };
-// 「说点什么…」：输入框是气泡栈里**独立的最后一行**（不是塞在某条消息里）——
+
+    /* ================= 会话气泡（v1.4：每个会话一条） =================
+     * 宿主发 {"type":"session",sid,title,status:"running|done",text}，一条会话一条框：
+     *   · **sid 认领**：同一个会话的状态变化是**原地换**（不新冒一条），
+     *     所以「执行中 → 已完成」时气泡不跳位置、也不堆两条。
+     *   · **remove**：会话退出 / 用户点掉已完成的那条 ⇒ 收掉。
+     *   · 怎么退出的：宿主（bus.cjs）一收到那条会话的连接断掉就发 remove。
+     *   · 已完成的那条**可以点**：点一下本地收掉 + 告诉宿主「别再发它」
+     *     （不然下一次补发/续期又塞回来）。
+     * ⚠️ 别跟上面 showBubble 那条全局气泡混：那条是「一句话」，没有身份。
+     */
+    /** 按 sid 找气泡下标（认不出来返回 -1）。 */
+    function bubbleIndexBySid(sid) {
+      for (var i = 0; i < bubbles.length; i++) {
+        if (bubbles[i].getAttribute("data-sid") === sid) return i;
+      }
+      return -1;
+    }
+
+    /** 标题行 + 细节行只建一次（改状态时只改文字，不重建节点 —— 重建几何会跳）。 */
+    function ensureSessionParts(el) {
+      if (el.querySelector(".pet-bubble-head")) return;
+      while (el.firstChild) el.removeChild(el.firstChild);
+      var head = document.createElement("div");
+      head.className = "pet-bubble-head";
+      var title = document.createElement("span");
+      title.className = "pet-bubble-title";
+      head.appendChild(title);
+      var badge = document.createElement("span");
+      badge.className = "pet-bubble-badge";
+      head.appendChild(badge);
+      var body = document.createElement("span");
+      body.className = "pet-bubble-text";
+      el.appendChild(head);
+      el.appendChild(body);
+    }
+
+    /** 会话气泡的内容：标题 + 状态角标（执行中 / 已完成）+ 一行细节。 */
+    function setSessionBubble(el, title, text, done) {
+      ensureSessionParts(el);
+      el.classList.toggle("done", done);
+      el.setAttribute("data-status", done ? "done" : "running");
+      var t = el.querySelector(".pet-bubble-title");
+      var badge = el.querySelector(".pet-bubble-badge");
+      var body = el.querySelector(".pet-bubble-text");
+      if (t) t.textContent = title;
+      if (badge) badge.textContent = done ? "已完成" : "执行中";
+      if (body) {
+        body.textContent = text;
+        // 空正文就藏掉那行（光一个标题 + 角标也是完整的一格；留个空行看着像漏字）
+        body.style.display = text ? "" : "none";
+      }
+    }
+
+    /**
+     * 冒/更新一个会话的气泡。宿主每次状态变化都调它，所以必须幂等：
+     * 已经泡着的那条就原地改（并挪到栈底 —— 最新 = 最亮 = 离宠物最近）。
+     */
+    self.showSessionBubble = function (info) {
+      info = info || {};
+      var sid = String(info.sid == null ? "" : info.sid).trim();
+      if (!sid) return;
+      var title = String(info.title == null ? "" : info.title).trim() || String(info.source || "").trim() || "会话";
+      var text = String(info.text == null ? "" : info.text).trim();
+var done = info.status === "done";
+      var before = measureLane(bubbles); // FLIP 的 First（下面会改 DOM，先量）
+      var at = bubbleIndexBySid(sid);
+      var el;
+      if (at >= 0) {
+        el = bubbles[at];
+        setSessionBubble(el, title, text, done);
+        if (at !== bubbles.length - 1) {
+          stack.insertBefore(el, inputOpen ? inputRow : null);
+          bubbles.splice(at, 1);
+          bubbles.push(el);
+        }
+      } else {
+        el = document.createElement("div");
+        el.className = "pet-bubble pet-bubble-session";
+        el.setAttribute("data-sid", sid);
+        setSessionBubble(el, title, text, done);
+        stack.insertBefore(el, inputOpen ? inputRow : null);
+        bubbles.push(el);
+      }
+      // ⚠️ 与 showBubble 同理：.pet-bubble 基础样式 opacity:0，**只有 .show 才可见**
+      requestAnimationFrame(function () {
+        if (el.parentNode === stack && !el.classList.contains("gone")) el.classList.add("show");
+      });
+markTail();
+      ageAll();
+      trim(bubbles, BUBBLE_MAX); // 头顶放不下的先收（优先收已完成的）
+      flipPairs(before);
+      while (bubbles.length > BUBBLE_MAX) dropBubble(bubbles[0]);
+      lanes.classList.add("show");
+      self.clampBubble();
+      requestAnimationFrame(function () { self.clampBubble(); });
+      pushHitRegion();
+    };
+
+    /** 收掉某个会话的气泡（会话退出 / 用户点掉）。认不出这个 sid 就当没这回事。 */
+    self.removeSessionBubble = function (sid) {
+      var id = String(sid == null ? "" : sid).trim();
+      if (!id) return false;
+      var at = bubbleIndexBySid(id);
+      if (at < 0) return false;
+      dropBubble(bubbles[at]);
+      return true;
+    };
+
+/** 收掉所有 v1.1 那条全局状态气泡（新宿主一条会话一条后，它会重复显示）。
+        那条落在**消息 lane**（showBubble 写的），会话 lane 里也扫一遍——万一是老结构。 */
+    self.clearStateBubbles = function () {
+      var all = chatBubbles.concat(bubbles);
+      for (var i = all.length - 1; i >= 0; i--) {
+        if (all[i].getAttribute("data-legacy") === "1") dropBubble(all[i]);
+      }
+    };
+
+    /** 点一下「已完成」的气泡就收掉它（执行中的那条不给点，也不吃点击）。
+        监听挂在**外框**上：会话 lane 在哪只宠物头顶就点哪只（两条 lane 都在外框里）。 */
+    lanes.addEventListener("click", function (e) {
+      var node = e.target && e.target.closest ? e.target.closest(".pet-bubble-session") : null;
+      if (!node || node.getAttribute("data-status") !== "done") return;
+      var sid = node.getAttribute("data-sid") || "";
+      dropBubble(node);
+      // 告诉宿主「这条我不要了」：不然它的补发/续期会把它塞回来
+      if (sid && window.__petElectron__ && window.__petElectron__.dismissSession) {
+        try { window.__petElectron__.dismissSession(sid); } catch (err) { /* 主进程还没 ready */ }
+      }
+    });
+    // 点气泡不该带动宠物的点击/拖拽（drag 监听在 hit 上，但按在气泡上仍别顺手带着走）
+    lanes.addEventListener("mousedown", function (e) { e.stopPropagation(); });
+    lanes.addEventListener("dblclick", function (e) { e.stopPropagation(); });
+
+// 「说点什么…」：输入框是**消息 lane** 里独立的最后一行（不是塞在某条消息里）——
     // 消息一条条冒，框的位置就不会被上一条文案顶来顶去。Enter 提交，Esc 取消。
     // 提交走主进程 → 宿主 /control（只有主进程手里有 token）。
     var inputRow = document.createElement("div");
@@ -1723,7 +1938,7 @@ markTail();
     // 亮不亮全看 class：写内联 display:none 的话优先级压过 .on{display:block}，框永远出不来
     input.classList.remove("on");
     inputRow.appendChild(input);
-    stack.appendChild(inputRow);
+    chatStack.appendChild(inputRow); // 消息 lane 的最后一行（会话 lane 不放输入框）
 
     /** 输入框开着？（主进程靠这个决定要不要把窗切成可聚焦） */
     var inputOpen = false;
@@ -1736,7 +1951,7 @@ markTail();
       input.value = "";
       input.classList.remove("on");
 inputRow.classList.remove("show", "on");
-      stack.classList.toggle("show", !stackEmpty());
+      lanes.classList.toggle("show", !stackEmpty());
       markTail(); // 框关了，尾巴回到最底下那条
       self.clampBubble();
       pushHitRegion();
@@ -1778,7 +1993,7 @@ inputOpen = true;
       input.classList.add("on"); // ⚠️ 不能写 style.display = ""：样式表里的 display:none
       //    优先级更高，空的内联样式等于「按样式表来」，框还是出不来
 inputRow.classList.add("show", "on");
-      stack.classList.add("show");
+      lanes.classList.add("show");
       markTail(); // 输入框一开，尾巴让位
       self.clampBubble();
       requestAnimationFrame(function () { self.clampBubble(); });
@@ -2560,11 +2775,15 @@ this.destroy = function () {
       self.stopDwell();
       self.clearQueue();
       self.stopMove();
-      // 气泡的淡出计时器也得收，不然宠物没了计时器还在往一个没人看的 DOM 上跑
+// 气泡的淡出计时器也得收，不然宠物没了计时器还在往一个没人看的 DOM 上跑
       for (var bi = 0; bi < bubbles.length; bi++) {
         if (bubbles[bi]._timer) clearTimeout(bubbles[bi]._timer);
       }
+      for (var ci = 0; ci < chatBubbles.length; ci++) {
+        if (chatBubbles[ci]._timer) clearTimeout(chatBubbles[ci]._timer);
+      }
       bubbles.length = 0;
+      chatBubbles.length = 0; // 消息 lane 同样得收（碎碎念 / say 的计时器）
       if (self.overrideTimer) clearTimeout(self.overrideTimer);
       container.remove();
       // force：睡着了也要报（不然形状留在已经删掉的宠物老地方，那儿会点不动也点不出东西）
@@ -2834,9 +3053,12 @@ if (asleep) pet.sleep();
   // ========================================================================
 
   /** 现在该不该闭嘴：agent 忙 / 有人正在输入 / 窗看不见 → 一律不出声。 */
-  function chatBusy() {
+function chatBusy() {
     if (document.hidden) return true;
     if (document.querySelector(".pet-bubble-input.on")) return true;
+    // ⚠️ 别再拿「屏上有会话气泡」当闭嘴理由：碎碎念有**自己的消息 lane**（见「气泡：两条 lane」一节），
+    //   抢不走会话那几条。所以能不能出声只看老的两条：agent 在忙（currentOverrideAnim）、
+    //   有人在打字、窗不可见。
     for (var i = 0; i < pets.length; i++) if (pets[i].currentOverrideAnim) return true;
     return false;
   }
@@ -2911,19 +3133,52 @@ var FIRST_CHATTER_SEC = 12;
     }, sec * 1000);
   }
 
-  /** Apply an event override to all pets */
+/** Apply an event override to all pets */
   function applyEventOverride(anim) {
+    // v1.4：session 帧是「气泡」，不是「动画」—— 拿它去 switchTo 等于每条会话都切一段动画
+    if (!anim || anim === "session") return;
     pets.forEach(function (pet) {
       pet.playOverride(anim, OVERRIDE_DURATION_MS);
     });
   }
 
+  /** 宿主认不认 session 帧？老宿主只会发 v1.1 那条全局气泡 —— 靠这个退回老行为。 */
+  var hostSpeaksSessions = false;
+
+  /**
+   * 会话气泡帧（v1.4）：每个会话一条。
+   *   {"type":"session","sid":"pi#1","title":…,"status":"running|done","text":…}
+   *   {"type":"session","sid":"pi#1","remove":true}   ← 会话退出 / 用户点掉了
+   * 固定长在 pets[0] 头顶：不跟着「最近右键的那只」搬家，否则用户右键一下，
+   * 所有会话的气泡就全搬家去了（看着像“乱跳”）。
+   */
+  function applySessionFrame(obj) {
+    if (!pets.length) return;
+    var sid = String(obj.sid == null ? "" : obj.sid).trim();
+    if (!sid) return;
+    var first = !hostSpeaksSessions;
+    hostSpeaksSessions = true;
+    if (obj.remove === true) {
+      for (var i = 0; i < pets.length; i++) if (pets[i].removeSessionBubble) pets[i].removeSessionBubble(sid);
+      return;
+    }
+    // 宿主换了协议口径（每会话一条）⇒ 把那条重复的全局状态气泡收掉（只收一次）
+    if (first) for (var k = 0; k < pets.length; k++) if (pets[k].clearStateBubbles) pets[k].clearStateBubbles();
+    var target = pets[0];
+    if (target && target.showSessionBubble) {
+      target.showSessionBubble({ sid: sid, source: obj.source, title: obj.title, status: obj.status, text: obj.text });
+    }
+  }
+
   /** Show a bubble (state text or a typed message) on the pet the user is talking to. */
   function applyBubble(obj) {
     if (!pets.length) return;
-    var target = bubbleTarget && bubbleTarget.showBubble ? bubbleTarget : pets[0];
+    // 宿主已经一条会话一条（session 帧）时，这条全局的会跟它重复说同一句话 ⇒ 不画。
+    // 老宿主没有 session 帧（hostSpeaksSessions 一直 false）⇒ 照旧画，不能黑屏。
+    if (obj.sticky === true && hostSpeaksSessions) return;
     if (obj.sticky !== true && !(Number(obj.ms) > 0)) obj.ms = 5000;
-    target.showBubble(obj.text, { ms: obj.ms, sticky: obj.sticky === true });
+    var target = bubbleTarget && bubbleTarget.showBubble ? bubbleTarget : pets[0];
+    target.showBubble(obj.text, { ms: obj.ms, sticky: obj.sticky === true, legacy: obj.sticky === true });
   }
 
 /**
@@ -2992,9 +3247,14 @@ reconnectAttempts = 0;
           applyToolOverride(obj.tool);
           return;
         }
-        if (obj.type === "bubble") {
+if (obj.type === "bubble") {
           // v1.1: state text and anything a human typed. Old windows ignore this frame.
           applyBubble(obj);
+          return;
+        }
+        if (obj.type === "session") {
+          // v1.4: one bubble per session (sid-keyed). Old windows ignore this frame.
+          applySessionFrame(obj);
           return;
         }
         if (obj.type === "positions") {

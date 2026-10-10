@@ -26,32 +26,38 @@ import { readFileSync } from 'node:fs';
 import { homedir, platform } from 'node:os';
 import { join } from 'node:path';
 
-/** 事件名 → 我们要发的帧。多个别名都挂上，谁先来算谁的。 */
-const EVENT_MAP = {
-  'agent/status': (e) => {
-    const s = e?.status ?? e?.state;
-    if (s === 'idle' || s === 'done' || s === 'finished') return { type: 'done' };
-    if (s === 'thinking' || s === 'busy' || s === 'running') return { type: 'thinking' };
-    return null;
-  },
-  'agent/thinking': () => ({ type: 'thinking' }),
-  'agent/start': () => ({ type: 'thinking' }),
-  'agent/done': (e) => ({ type: 'done', summary: e?.summary }),
-  'agent/finish': (e) => ({ type: 'done', summary: e?.summary }),
+/** 事件名 → 我们要发的帧。多个别名都挂上，谁先来算谁的。
+ *  title 带着走（v1.4）：宠物那条会话气泡的标题就是它。
+ *  ⚠️ 得做成**函数**：标题是每个插件实例（apply）自己的，写成模块级常量就拿不到了。 */
+function eventMapFor(title) {
+  return {
+    'agent/status': (e) => {
+      const s = e?.status ?? e?.state;
+      if (s === 'idle' || s === 'done' || s === 'finished') return { type: 'done', title };
+      if (s === 'thinking' || s === 'busy' || s === 'running') return { type: 'thinking', title };
+      return null;
+    },
+    'agent/thinking': () => ({ type: 'thinking', title }),
+    'agent/start': () => ({ type: 'thinking', title }),
+    'agent/done': (e) => ({ type: 'done', summary: e?.summary, title }),
+    'agent/finish': (e) => ({ type: 'done', summary: e?.summary, title }),
 
-  'agent/pre-step': (e) => ({ type: 'thinking', task: pickTask(e) }),
+    'agent/pre-step': (e) => ({ type: 'thinking', task: pickTask(e), title }),
 
-  'tool/call': (e) => ({
-    type: 'tool_call',
-    tool: String(e?.tool ?? e?.toolName ?? e?.name ?? 'other'),
-    detail: pickDetail(e),
-  }),
-  'tool/use': (e) => ({
-    type: 'tool_call',
-    tool: String(e?.tool ?? e?.toolName ?? e?.name ?? 'other'),
-    detail: pickDetail(e),
-  }),
-};
+    'tool/call': (e) => ({
+      type: 'tool_call',
+      tool: String(e?.tool ?? e?.toolName ?? e?.name ?? 'other'),
+      detail: pickDetail(e),
+      title,
+    }),
+    'tool/use': (e) => ({
+      type: 'tool_call',
+      tool: String(e?.tool ?? e?.toolName ?? e?.name ?? 'other'),
+      detail: pickDetail(e),
+      title,
+    }),
+  };
+}
 
 function pickTask(e) {
   const t = e?.task ?? e?.prompt ?? e?.input ?? e?.message;
@@ -112,6 +118,12 @@ export function apply(ctx, config = {}) {
   const source = config.source || 'dsh';
   const autoStart = config.autoStart === true;
   const cli = config.cli || 'pi-pet';
+  /** 会话标题（v1.4：宠物按会话一个一个泡出气泡，标题靠它）。
+      配置里写了 title 就用它；没写就拿工作目录名 —— dsh 事件里没有现成的会话名。 */
+  const sessionTitle =
+    typeof config.title === 'string' && config.title.trim()
+      ? config.title.trim().slice(0, 40)
+      : (process.cwd().split(/[\\/]+/).filter(Boolean).pop() || source);
   const log = (m) => {
     try {
       ctx?.logger?.info?.(`pi-pet: ${m}`);
@@ -151,8 +163,12 @@ export function apply(ctx, config = {}) {
       if (autoStart) setTimeout(startThenConnect, 2000);
       return;
     }
-    sock = ws;
-    ws.addEventListener('open', () => log(`已接入宠物宿主 :${host.port}（端口来自${host.from}）`));
+sock = ws;
+    ws.addEventListener('open', () => {
+      log(`已接入宠物宿主 :${host.port}（端口来自${host.from}）`);
+      // 接上（或重连）就报一次会话标题：重连会拿到新的 sid，不重报宿主那边就没标题了
+      send({ type: 'session', title: sessionTitle });
+    });
     ws.addEventListener('close', () => {
       if (sock === ws) sock = null;
       setTimeout(connect, 3000); // 断线重连，端口不变（宿主会自己续心跳）
@@ -175,7 +191,7 @@ export function apply(ctx, config = {}) {
   };
 
   // 订阅：事件名对不上就退化成无操作（不 throw）
-  for (const [event, map] of Object.entries(EVENT_MAP)) {
+for (const [event, map] of Object.entries(eventMapFor(sessionTitle))) {
     try {
       ctx.on(event, (e) => send(map(e)));
     } catch {

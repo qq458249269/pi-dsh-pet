@@ -71,12 +71,22 @@ async function get(port, path, token) {
 }
 
 const isBubble = (f) => f.startsWith("{\"type\":\"bubble\"");
+/** 会话气泡帧（v1.4：每个会话一条，sid 认领） */
+const isSession = (f) => f.startsWith("{\"type\":\"session\"");
 /** 位置帧（v1.2，不带动画也不带气泡；滤掉以免被当成动画帧计数） */
 const isPositions = (f) => f.startsWith("{\"type\":\"positions\"");
 /** 动画帧（把气泡/位置帧滤掉）：thinking / agent_idle / tool_call / add_pet / shutdown */
-const animFrames = (frames) => frames.filter((f) => !isBubble(f) && !isPositions(f));
+const animFrames = (frames) => frames.filter((f) => !isBubble(f) && !isPositions(f) && !isSession(f));
 const bubbleFrames = (frames) => frames.filter(isBubble).map((f) => JSON.parse(f).text);
 const positionFrames = (frames) => frames.filter(isPositions).map((f) => JSON.parse(f).map);
+/** 会话气泡帧（解包成对象；收掉的那条 remove=true） */
+const sessionFrames = (frames) => frames.filter(isSession).map((f) => JSON.parse(f));
+/**
+ * 「状态序列」= 老协议那部分（动画帧 + v1.1 那条全局气泡）。
+ * ⚠️ v1.4 起会话气泡是**另一条**通道，它变了不代表状态机动了（反之亦然）：
+ *    拿总帧数算「零新帧」会把两者混起来，所以一律只数这一条。
+ */
+const stateFrames = (frames) => frames.filter((f) => !isPositions(f) && !isSession(f));
 
 console.log(`\npi-dsh-pet 冒烟测试  (home=${HOME} port=${PORT})\n`);
 
@@ -158,7 +168,7 @@ const petJs = readFileSync(join(ROOT, "pi", "assets", "pet.js"), "utf8");
 	// ① 收缩盒 + left:50% 时可用宽度只有宠物宽度的一半（231px），写在 max-width 上的
 	//    320/420 根本够不着，长文案就在半路被省略号切掉 —— 必须显式 width: max-content
 	check("气泡显式 width:max-content（否则 max-width 够不着）", /width:\s*max-content/.test(petCss));
-	check("气泡不再 nowrap（一行放不下就换行）", !/white-space:\s*nowrap/.test(petCss));
+check("气泡不再 nowrap（一行放不下就换行）", !/white-space:\s*nowrap/.test((petCss.match(/\.pet-bubble\s*\{[^}]*\}/) || [""])[0]));
 	// ② 漫游/拖拽时每帧都要重报命中区：SetWindowRgn 是按上一次上报的形状裁的，
 	//    不跟着走 = 宠物移走后气泡被裁掉，看着就像「气泡留在原地」
 	check("漫游时上报命中区", /container\.style\.left = mp\.left[\s\S]{0,400}pushHitRegion\(\)/.test(petJs));
@@ -436,23 +446,23 @@ check("重复 thinking 只产生 1 个动画帧", animFrames(win.frames).filter(
 check("气泡是 sticky（不按时消失）", win.frames.some((f) => f.includes('"sticky":true')));
 
 // 再来一次 thinking（文案没变）→ 依然不重播
-const before = win.frames.length;
+const before = stateFrames(win.frames).length;
 await post(PORT, "/event", { type: "thinking", task: "修复登录" }, token);
 await sleep(150);
-check("同状态同文案：零新帧", win.frames.length === before, `新帧 ${JSON.stringify(win.frames.slice(before))}`);
+check("同状态同文案：零新帧", stateFrames(win.frames).length === before, `新帧 ${JSON.stringify(win.frames.slice(before))}`);
 
 // 任务名变了 → 只更新气泡，不动动画
 await post(PORT, "/event", { type: "thinking", task: "修复登录+注册" }, token);
 await sleep(150);
-check("任务名变化：只多一个气泡帧", win.frames.length === before + 1 && bubbleFrames(win.frames).pop() === "「修复登录+注册」思考中…", JSON.stringify(win.frames.slice(before)));
+check("任务名变化：只多一个气泡帧", stateFrames(win.frames).length === before + 1 && bubbleFrames(win.frames).pop() === "「修复登录+注册」思考中…", JSON.stringify(stateFrames(win.frames).slice(before)));
 
 // tool_call：bash → write 都是「写代码组」，中间不该重播
-const b2 = win.frames.length;
+const b2 = stateFrames(win.frames).length;
 await post(PORT, "/event", { type: "tool_call", tool: "bash", detail: "npm test" }, token);
 await sleep(120);
 await post(PORT, "/event", { type: "tool_call", tool: "write" }, token);
 await sleep(150);
-const coding = animFrames(win.frames.slice(b2));
+const coding = animFrames(stateFrames(win.frames).slice(b2));
 check("进入执行中：1 个动画帧", coding.length === 1, JSON.stringify(coding));
 check("写代码组内不重播（bash→write）", coding.filter((f) => f.includes("tool_call")).length === 1);
 check("执行中文案带 detail", bubbleFrames(win.frames).includes("执行中：npm test"), JSON.stringify(bubbleFrames(win.frames).slice(-2)));
@@ -460,16 +470,16 @@ check("执行中文案带 detail", bubbleFrames(win.frames).includes("执行中�
 // done → 回空闲 + 完成气泡
 await post(PORT, "/event", { type: "done", summary: "改完 3 个文件" }, token);
 await sleep(150);
-check("done 回到空闲动画", animFrames(win.frames.slice(b2)).pop() === "agent_idle", JSON.stringify(animFrames(win.frames.slice(b2))));
+check("done 回到空闲动画", animFrames(stateFrames(win.frames).slice(b2)).pop() === "agent_idle", JSON.stringify(animFrames(stateFrames(win.frames).slice(b2))));
 check("完成气泡", bubbleFrames(win.frames).pop() === "完成：改完 3 个文件", JSON.stringify(bubbleFrames(win.frames).slice(-1)));
 
 // ---------------------------------------------------------------- 手动说话
 console.log("\n手动说话…");
-const b3 = win.frames.length;
+const b3 = stateFrames(win.frames).length;
 check("control say 成功", (await post(PORT, "/control", { action: "say", text: "过来玩" }, token)).body.ok === true);
 await sleep(120);
-const sayFrame = JSON.parse(win.frames.slice(b3).find((f) => f.startsWith("{\"type\":\"bubble\"")));
-check("say 只冒泡、不动动画", !!sayFrame && sayFrame.text === "过来玩" && sayFrame.ms > 0 && animFrames(win.frames.slice(b3)).length === 0);
+const sayFrame = JSON.parse(stateFrames(win.frames).slice(b3).find((f) => f.startsWith("{\"type\":\"bubble\"")));
+check("say 只冒泡、不动动画", !!sayFrame && sayFrame.text === "过来玩" && sayFrame.ms > 0 && animFrames(stateFrames(win.frames).slice(b3)).length === 0);
 check("事件通道 say 也通", (await post(PORT, "/event", { type: "say", text: "hi" }, token)).body.ok === true);
 
 // ---------------------------------------------------------------- 位置记忆
@@ -532,15 +542,15 @@ check("位置存的是比例不是像素", /p\.customPos = \{ rx: rescalePos\(/.
 
 // ---------------------------------------------------------------- 暂停
 console.log("\n暂停 / 恢复…");
-const b4 = win.frames.length;
+const b4 = stateFrames(win.frames).length;
 await post(PORT, "/control", { action: "pause" }, token);
 await post(PORT, "/event", { type: "thinking" }, token);
 await sleep(150);
-check("暂停后状态事件被丢弃", win.frames.length === b4, JSON.stringify(win.frames.slice(b4)));
+check("暂停后状态事件被丢弃", stateFrames(win.frames).length === b4, JSON.stringify(stateFrames(win.frames).slice(b4)));
 await post(PORT, "/control", { action: "resume" }, token);
 await post(PORT, "/event", { type: "thinking" }, token);
 await sleep(150);
-check("恢复后又能驱动", win.frames.length > b4);
+check("恢复后又能驱动", stateFrames(win.frames).length > b4);
 
 // ---------------------------------------------------------------- 单只闸门
 console.log("\n单只闸门…");
@@ -584,6 +594,127 @@ check(
 feed.close();
 await sleep(250);
 check("WS 断开后会话状态回落", (await get(PORT, "/state", token)).body.bus.feeds === 0);
+
+// -------------------------------------------------- 每会话一条气泡（v1.4）
+// 需求：多开几个 pi 时，**每个会话一个单独气泡框**，框上写会话标题 + 执行中/已完成；
+// 会话退出（连接断）或用户点掉已完成的那条 ⇒ 移除该气泡。
+// 回归点有三个：① 一条连接 = 一个会话（两个 pi 不许挤成一条）；② 同一会话的状态变化
+//   是**原地换**而不是新冒一条；③ 「点掉」必须同时告诉宿主，否则补发又塞回来。
+// ⚠️ 这一整段用**自己那扇假窗**看帧（win 记着前面所有 /event 的历史帧，混一起看不出变化）。
+console.log("\n每会话一条气泡（sid 认领 / 退出即收 / 点掉即消失）…");
+{
+	const w = fakeWindow(PORT);
+	await w.ready;
+	await sleep(120);
+	const since = (n) => w.frames.slice(n);
+	const mark = () => w.frames.length;
+const live = () => {
+		const m = new Map();
+		// 只看 pi 来源的：假窗接上来时会**补发**宿主现有的**所有**会话气泡
+		// （含前面 /event 那个 src:http 的），混进来就看不出本段的变化了。
+		for (const f of sessionFrames(w.frames)) if (!f.remove && f.source === "pi") m.set(f.sid, f);
+		return m;
+	};
+
+	// 同一 source 连两条 = 两个会话（多开 pi 就是这么来的）
+	const a = new WebSocket(`ws://127.0.0.1:${PORT}/feed?source=pi&token=${encodeURIComponent(token)}`);
+	await new Promise((r) => a.addEventListener("open", r));
+	const b = new WebSocket(`ws://127.0.0.1:${PORT}/feed?source=pi&token=${encodeURIComponent(token)}`);
+	await new Promise((r) => b.addEventListener("open", r));
+	await sleep(100);
+
+	// 只报标题：不改状态、不冒泡（没干活就不占头顶）
+	let n = mark();
+	a.send(JSON.stringify({ type: "session", title: "修复登录" }));
+	await sleep(150);
+	check("只报标题不冒泡（没开始干活）", sessionFrames(since(n)).length === 0, JSON.stringify(since(n)));
+
+	a.send(JSON.stringify({ type: "thinking" }));
+	await sleep(120);
+	a.send(JSON.stringify({ type: "tool_call", tool: "bash", detail: "npm test" }));
+	await sleep(180);
+	const one = [...live().values()];
+	check("第一个会话冒出一条「执行中」气泡", one.length === 1 && one[0].status === "running" && one[0].title === "修复登录" && one[0].text === "npm test", JSON.stringify(one));
+	const sidA = one[0] && one[0].sid;
+	check("气泡带 sid（窗靠它认领）", !!sidA && typeof sidA === "string", JSON.stringify(one));
+
+	// 第二个会话（同一 source 的另一条连接）⇒ **另一条**气泡，不是同一条的更新
+	b.send(JSON.stringify({ type: "session", title: "写文档" }));
+	await sleep(100);
+	b.send(JSON.stringify({ type: "thinking", task: "README" }));
+	await sleep(180);
+	const two = live();
+	const sidB = [...two.keys()].find((s) => s !== sidA);
+	check("两个会话各有一条（sid 不一样）", two.size === 2 && !!sidB, JSON.stringify([...two.values()]));
+	check("第二个会话的标题是自己的", !!sidB && two.get(sidB).title === "写文档", JSON.stringify([...two.values()]));
+
+	// 同一会话的状态变化 = 原地换（sid 一样、条数不变）
+	n = mark();
+	a.send(JSON.stringify({ type: "thinking" }));
+	await sleep(180);
+	check("同一会话改状态不新冒一条（sid 认领）", live().size === 2 && sessionFrames(since(n)).every((f) => f.sid === sidA), JSON.stringify(since(n)));
+
+	// done → 那条变「已完成」，但**留着**（等会话退出或用户点掉）
+	a.send(JSON.stringify({ type: "done", summary: "改完 3 个文件" }));
+	await sleep(180);
+	const doneA = live().get(sidA);
+	check("done → 变「已完成」并保留", doneA && doneA.status === "done" && doneA.text === "改完 3 个文件", JSON.stringify(doneA));
+
+	// 点掉已完成的那条 → 宿主也得忘掉它（不然补发/续期又塞回来）
+	check("dismiss-bubble 成功", (await post(PORT, "/control", { action: "dismiss-bubble", sid: sidA }, token)).body.ok === true);
+	const stAfter = (await get(PORT, "/state", token)).body.bus.sessionBubbles || [];
+	check("点掉后宿主不再留着它", !stAfter.some((x) => x.sid === sidA), JSON.stringify(stAfter));
+	n = mark();
+	a.send(JSON.stringify({ type: "done" }));
+	await sleep(180);
+	check("点掉之后同一个 done 不把它塞回来", !sessionFrames(since(n)).some((f) => f.sid === sidA && !f.remove), JSON.stringify(since(n)));
+	// 下一轮真忙起来 → 气泡重新冒（否则「点一下就再也不出现」）
+	a.send(JSON.stringify({ type: "thinking" }));
+	await sleep(180);
+	check("下一轮开工时气泡重新出现", (live().get(sidA) || {}).status === "running", JSON.stringify([...live().values()]));
+
+	// 窗重连（换窗 / 崩溃重开）→ 逐条补发；再动一下也要能更新到
+	const w2 = fakeWindow(PORT);
+	await w2.ready;
+	await sleep(200);
+const resent = sessionFrames(w2.frames);
+	check("新接上的窗能拿到补发的会话气泡", resent.length >= 2 && resent.every((f) => typeof f.sid === "string"), JSON.stringify(resent));
+	b.send(JSON.stringify({ type: "tool_call", tool: "read", detail: "a.ts" }));
+	await sleep(180);
+	check("补发之后继续更新（还是同一条 sid）", sessionFrames(w2.frames).filter((f) => f.sid === sidB).pop().text === "a.ts", JSON.stringify(sessionFrames(w2.frames)));
+	w2.close();
+	await sleep(80);
+
+	// 会话退出（连接断）⇒ 移除那条气泡，另一条不受影响
+	a.close();
+	await sleep(300);
+	const gone = sessionFrames(w.frames).filter((f) => f.remove && f.sid === sidA);
+	check("会话退出 → 发 remove 收掉那条气泡", gone.length >= 1, JSON.stringify(gone));
+	check("别的会话的气泡不动", !!live().get(sidB), JSON.stringify([...live().values()]));
+	b.close();
+	await sleep(200);
+
+	// 窗侧接线（渲染进程 / preload / 主进程）
+	const petJs = readFileSync(join(ROOT, "pi", "assets", "pet.js"), "utf8");
+	const petCss = readFileSync(join(ROOT, "pi", "assets", "pet.css"), "utf8");
+	const preloadJs = readFileSync(join(ROOT, "pi", "assets", "preload.cjs"), "utf8");
+	const mainJs = readFileSync(join(ROOT, "pi", "assets", "pet-electron.cjs"), "utf8");
+	check("pet.js 认 session 帧（老窗忽略即可）", /obj\.type === "session"[\s\S]{0,200}applySessionFrame\(obj\)/.test(petJs));
+	check("session 帧不能拿去切动画（它是气泡不是状态）", /function applyEventOverride\(anim\)[\s\S]{0,120}anim === "session"/.test(petJs));
+	check("会话气泡按 sid 认领（原地换，不堆条）", /function bubbleIndexBySid\(sid\)/.test(petJs) && /var at = bubbleIndexBySid\(sid\)/.test(petJs));
+	check("退出/点掉都能按 sid 移除", /self\.removeSessionBubble = function/.test(petJs));
+	// ⚠️ 点掉必须**同时**告诉宿主：不然下一次补发/续期又把它塞回来（用户看着像「点了没用」）
+	check("点掉已完成的会通知宿主（dismiss-bubble）", /__petElectron__\.dismissSession\(sid\)/.test(petJs) && /dismissSession: \(sid\) => ipcRenderer\.send\("pet:dismiss-session"/.test(preloadJs) && /ipcMain\.on\("pet:dismiss-session"[\s\S]{0,300}callHost\("dismiss-bubble"/.test(mainJs));
+	// 角标：执行中 / 已完成；执行中的不吃点击，已完成的才能点
+	check("执行中的气泡不吃点击，已完成的可点", /\.pet-bubble-session \{[\s\S]{0,200}pointer-events: none/.test(petCss) && /\.pet-bubble-session\.done \{[\s\S]{0,120}pointer-events: auto/.test(petCss));
+	check("状态角标写死执行中/已完成两个词", /done \? "已完成" : "执行中"/.test(petJs));
+	// 老宿主（只会发 v1.1 全局气泡）不能黑屏：session 帧一个没收到时照旧画那条
+	check("老宿主退路：没收到过 session 帧时仍画全局气泡", /if \(obj\.sticky === true && hostSpeaksSessions\) return;/.test(petJs));
+	// 新宿主下那条全局气泡会跟会话气泡重复说同一句话 ⇒ 收掉（只清一次）
+	check("宿主换口径后清掉重复的全局状态气泡", /if \(first\) for \(var k = 0;[\s\S]{0,120}clearStateBubbles/.test(petJs) && /self\.clearStateBubbles = function/.test(petJs));
+	w.close();
+	await sleep(120);
+}
 
 // ---------------------------------------------------------------- 崩溃红线
 // 窗被 taskkill（= pi-pet restart / --force / 崩溃自愈）时，宿主这边收到的是 TCP RST：
@@ -782,7 +913,7 @@ check("气泡 border-box（max-width 按外框算，夹取才夹得住）", /\.p
 check("气泡宽度只有一个出处（stageSize → --bubble-w → pet.css）", /function stageSize\(/.test(petSrc) && /function applyBubbleWidth\(/.test(petSrc) && /applyBubbleWidth\(s\.w\)/.test(petSrc) && /Math\.round\(winW\) - 16/.test(petSrc) && !/560px/.test(petCss));
 // ⚠️ 宽度**定死**（§9.34）：漫游余量再宽也不会把气泡撑肥 —— 宽度只看窗宽与 BUBBLE_W_MAX。
 check("气泡不跟着漫游余量变胖（定宽，不再按宠物宽长）", !/var around = Math\.max\(420/.test(petSrc) && /function applyBubbleWidth\(winW\) \{\s*\n\s*try \{\s*\n\s*var w = Math\.min/.test(petSrc));
-check("气泡高度由 clampBubble 按头顶空间写（一摞按条数分）", /var roomAbove = Math\.max\(0, Math\.round\(cr\.top - BUBBLE_CHROME_H\)\)/.test(petSrc) && /var room = Math\.max\(BUBBLE_MIN_H, Math\.floor\(\(roomAbove - BUBBLE_GAP_PX/.test(petSrc) && /b\.style\.maxHeight = room \+ "px"/.test(petSrc) && /b\.style\.webkitLineClamp = String\(/.test(petSrc));
+check("气泡高度由 clampBubble 按头顶空间写（两条 lane 共用同一条分法）", /var roomAbove = Math\.max\(0, Math\.round\(cr\.top - BUBBLE_CHROME_H\)\)/.test(petSrc) && /var room = Math\.max\(BUBBLE_MIN_H, Math\.floor\(\(roomAbove - BUBBLE_GAP_PX/.test(petSrc) && /function capHeight\(arr, room\)/.test(petSrc) && /arr\[i\]\.style\.maxHeight = room \+ "px"/.test(petSrc) && /arr\[i\]\.style\.webkitLineClamp = String\(/.test(petSrc) && /capHeight\(bubbles, room\)[\s\S]{0,120}capHeight\(chatBubbles, room\)/.test(petSrc));
 // ⚠️ 头顶挂不下也**不翻到身下**（§9.27，实测回退）：身下只有 bottomPad 60 的余量，
 //   翻下去就是把气泡塞进 60px 的缝里 —— 字被裁掉还压着脚（用户口径「脚下气泡被遮挡了 高度不够」）。
 check("气泡恒在头顶（不翻到身下，§9.25 那套 .below 已删）", !/roomBelow/.test(petSrc) && !/var below/.test(petSrc) && !/classList\.toggle\("below"/.test(petSrc) && !/\.pet-bubble\.below \{/.test(petCss) && !/margin-top: 10px[\s\S]{0,80}transform: translate\(-50%, -6px\)/.test(petCss));
@@ -790,7 +921,7 @@ check("气泡恒在头顶（不翻到身下，§9.25 那套 .below 已删）", !
 //   算增量的话容器一动就只补回一部分，实测左右各欠 40px、怎么夹都夹不准。
 check("夹取偏移按「居中位 + 绝对偏移」算（不是增量，否则拖一次差 40px）", /var baseL = cr\.left \+ \(cr\.width - r\.width\) \/ 2/.test(petSrc) && /dx = Math\.round\(wantL - baseL\)/.test(petSrc) && /var baseT = cr\.top - BUBBLE_GAP - r\.height/.test(petSrc));
 // 高度/换边写完会重新折行、宽度跟着变：拿旧宽度算偏移就是夹在旧位置上（实测差 48px）
-check("写完高度/换边重新量几何再算偏移（量的是整摞）", /r = stack\.getBoundingClientRect\(\);\r?\n\s*if \(!r \|\| !\(r\.width > 0\)/.test(petSrc));
+check("写完高度/换边重新量几何再算偏移（量的是两条 lane 的并集）", /r = lanes\.getBoundingClientRect\(\);\r?\n\s*if \(!r \|\| !\(r\.width > 0\)/.test(petSrc));
 // ⚠️⚠️ 竖向**只往上夹、绝不往下压**（§9.38）：以前 `if (r.top < 8) wantT = 8` 会把气泡
 //   往下按回窗内 —— 正好落在宠物脸上 = 用户口径「气泡文本框位置异常下移」。竖向偏移只保留
 //   「往窗顶推」这一种；头顶真放不下时封高（overlap 分支），不许挪。
@@ -803,21 +934,26 @@ check("纵向夹取只有一份（三处都走 stageKeepIn，§9.38）", /var lo
 check("行数按空间收（空间不够就少几行，而不是把话抽掉）", /Math\.min\(6, Math\.floor\(\(room - 14\) \/ BUBBLE_LINE_H\)\)/.test(petSrc) && /var BUBBLE_LINE_H = 18\.2/.test(petSrc) && /var BUBBLE_MIN_H = 30/.test(petSrc));
 // 「说点什么」输入框是气泡栈里**独立的最后一行**（不再塞在某条消息里，§9.34）：
 //   塞在消息里的话，每来一条新消息就把框顶来顶去，封高时还得给它单独留 44px。
-check("输入框是栈里独立的一行（分头顶空间时把它算进条数）", /var inputRow = document\.createElement\("div"\)/.test(petSrc) && /inputRow\.className = "pet-bubble pet-bubble-row"/.test(petSrc) && /stack\.appendChild\(inputRow\)/.test(petSrc) && /var n = bubbles\.length \+ \(inputOpen \? 1 : 0\)/.test(petSrc));
+check("输入框是**消息 lane** 里独立的一行（分头顶空间时把它算进条数）", /var inputRow = document\.createElement\("div"\)/.test(petSrc) && /inputRow\.className = "pet-bubble pet-bubble-row"/.test(petSrc) && /chatStack\.appendChild\(inputRow\)/.test(petSrc) && /var n = bubbles\.length \+ chatBubbles\.length \+ \(inputOpen \? 1 : 0\)/.test(petSrc));
 // §9.34 气泡**一棳**（不是复用一个框）：每条消息一个节点，最多 3 条，多了收最老的。
 //   为什么不是复用一个框：复用一个框时三条消息互相顶替，看上去就是「文字闪来闪去」。
 console.log("\n气泡一棳（最多 3 条，新者在下）…");
-check("一棳：容器独立，每条消息一个节点", /stack\.className = "pet-bubble-stack"/.test(petSrc) && /var bubbles = \[\]/.test(petSrc) && /bubbles\.push\(b\)/.test(petSrc) && /b\.className = "pet-bubble"/.test(petSrc));
-check("最多同时 5 条（多了把最老的收掉）", /var BUBBLE_MAX = 5/.test(petSrc) && /while \(bubbles\.length > BUBBLE_MAX\) dropBubble\(bubbles\[0\]\)/.test(petSrc));
+check("一摞：外框 + 两条 lane，每条消息一个节点", /lanes\.className = "pet-bubble-lanes"/.test(petSrc) && /stack\.className = "pet-bubble-stack"/.test(petSrc) && /var bubbles = \[\]/.test(petSrc) && /var chatBubbles = \[\]/.test(petSrc) && /chatBubbles\.push\(b\)/.test(petSrc) && /bubbles\.push\(el\)/.test(petSrc) && /b\.className = "pet-bubble"/.test(petSrc));
+check("最多同时 5 条（多了把最老的收掉）", /while \(bubbles\.length > BUBBLE_MAX\) dropBubble\(bubbles\[0\]\)/.test(petSrc));
+check("消息 lane 独立（第二个容器 + 第二个数组 + 自己的上限 3）", /var chatStack = document\.createElement\("div"\)/.test(petSrc) && /chatStack\.className = "pet-bubble-stack pet-chat-stack"/.test(petSrc) && /lanes\.appendChild\(chatStack\)/.test(petSrc) && /var chatBubbles = \[\]/.test(petSrc) && /var CHAT_MAX = 3/.test(petSrc) && /while \(chatBubbles\.length > CHAT_MAX\) dropBubble\(chatBubbles\[0\]\)/.test(petSrc));
+check("碎碎念恢复：有没有会话气泡都不闭嘴（只看 agent 忙 / 有人在打字 / 窗不可见）", !/pet-bubble-session\[data-status/.test(petSrc) && /function chatBusy\(\)[\s\S]{0,400}currentOverrideAnim/.test(petSrc));
+check("两 lane 各自的退后档位表（拿错表索引，最老那条会反而满亮）", /var AGE_FADE = \[1, 0\.72, 0\.5, 0\.34, 0\.22\]/.test(petSrc) && /var CHAT_FADE = \[1, 0\.66, 0\.42\]/.test(petSrc) && /function fadeLane\(arr, table\)/.test(petSrc) && /fadeLane\(bubbles, AGE_FADE\)[\s\S]{0,80}fadeLane\(chatBubbles, CHAT_FADE\)/.test(petSrc));
 // ⚠️ 上限不等于真能留几条：头顶 150 的台子，每条至少「一行字 + 内边距 + 间隙」= 34px，
 //   分摊下来放不下 5 条。硬分的结果是每条只剩 20px = **字被裁掉半行**（难看得多）。
 //   所以真留几条由 fitCount() 按头顶实测空间算，放不下就收最老的。
-check("能留几条按头顶实测空间收（宁可少几条，不裁半行字）", /function fitCount\(\)[\s\S]{0,400}return Math\.max\(1, Math\.min\(BUBBLE_MAX, Math\.floor\(\(roomAbove \+ BUBBLE_GAP_PX\) \/ per\)\)\)/.test(petSrc) && /function trim\(\)[\s\S]{0,120}while \(bubbles\.length > fitCount\(\)\) dropBubble\(bubbles\[0\]\)/.test(petSrc) && /var BUBBLE_MIN_H = 30/.test(petSrc) && /var room = Math\.max\(BUBBLE_MIN_H,/.test(petSrc));
-check("头顶变小（贴边 / 缩窗）也会收，不只在入栈时收", /if \(!overlap\) \{\s*\n\s*trim\(\);/.test(petSrc));
+check("能留几条按头顶实测空间收（两条 lane 共享头顶 ⇒ 扣掉另一条已占的）", /function fitCount\(arr, max\)[\s\S]{0,400}return Math\.max\(1, Math\.min\(max, fit\)\)/.test(petSrc) && /var fit = Math\.floor\(\(roomAbove \+ BUBBLE_GAP_PX\) \/ per\) - otherCount\(arr\)/.test(petSrc) && /function trim\(arr, max\)[\s\S]{0,400}while \(arr\.length > fitCount\(arr, max\)\)/.test(petSrc) && /var BUBBLE_MIN_H = 30/.test(petSrc) && /var room = Math\.max\(BUBBLE_MIN_H,/.test(petSrc));
+// v1.4：头顶不够时优先收**已完成**的（正在执行的那条一收，就看不见谁还在干活了）
+check("收栈优先收已完成的会话气泡（执行中的留着）", /function trim\(arr, max\)[\s\S]{0,400}getAttribute\("data-status"\) === "done"/.test(petSrc));
+check("头顶变小（贴边 / 缩窗）也会收，不只在入栈时收（两条 lane 各收各的）", /if \(!overlap\) \{\s*\n\s*trim\(bubbles, BUBBLE_MAX\);[\s\S]{0,160}trim\(chatBubbles, CHAT_MAX\);/.test(petSrc));
 check("新的在下面、老的上推（看着像滚动）", /\.pet-bubble-stack \{[\s\S]{0,400}flex-direction: column/.test(petCss) && /gap: 4px/.test(petCss));
 check("收栈：淡出 200ms 后摘节点，计时器跟节点走（不泄）", /function dropBubble\(el\)[\s\S]{0,400}clearTimeout\(el\._timer\)[\s\S]{0,600}setTimeout\(function \(\) \{[\s\S]{0,120}removeChild\(el\)/.test(petSrc) && /el\._timer = setTimeout\(function \(\) \{ dropBubble\(el\); \}, ms\)/.test(petSrc));
 check("同文案不重堆（宿主 10s 续帧）、sticky 全局只留一条", /getAttribute\("data-text"\) === t/.test(petSrc) && /classList\.contains\("sticky"\)[\s\S]{0,160}dropBubble/.test(petSrc));
-check("尾巴只给最底下那条（否则三泡三支箭）", /function markTail\(\)[\s\S]{0,200}classList\.toggle\("has-tail", i === last && !inputOpen\)/.test(petSrc) && /\.pet-bubble\.has-tail::after/.test(petCss));
+check("尾巴只给最底下那条（两 lane 里靠下那条的；输入框开着时让位）", /function markTail\(\)[\s\S]{0,600}classList\.toggle\("has-tail", !chatLast && i === bubbles\.length - 1\)/.test(petSrc) && /classList\.toggle\("has-tail", !!chatLast && j === chatBubbles\.length - 1\)/.test(petSrc) && /\.pet-bubble\.has-tail::after/.test(petCss));
 // §9.34 追加：老者退后（--fade 三档）+ 新的一条进来时老的**滑**上去（FLIP，不是跳）
 check("越老越退后（--fade 5 档对上 BUBBLE_MAX，只淡字与底色不碰 opacity）",
 	/var AGE_FADE = \[1, 0\.72, 0\.5, 0\.34, 0\.22\]/.test(petSrc) &&
@@ -828,10 +964,13 @@ check("越老越退后（--fade 5 档对上 BUBBLE_MAX，只淡字与底色不�
 check("上推时长随距离缩放（顶得越高走得越久，封 420ms）", /var ms = Math\.min\(420, 120 \+ Math\.round\(Math\.abs\(dist\) \* 3\)\)/.test(petSrc) && /"transform " \+ \(ms \/ 1000\) \+ "s cubic-bezier\(0\.22, 0\.78, 0\.26, 1\)"/.test(petSrc) && /setTimeout\(done, ms \+ 120\)/.test(petSrc));
 check("上推曲线与入场分开（入场快、上推慢而稳）", /\.pet-bubble \{[\s\S]{0,3000}transform 0\.2s cubic-bezier\(0\.16, 0\.84, 0\.44, 1\)/.test(petCss) && !/transition: opacity 0\.18s ease, transform 0\.18s ease;/.test(petCss));
 check("档位变淡能过渡（底色用 background-color，渐变另层）", /background-color: rgba\(26, 28, 36, calc\(0\.96 \* var\(--fade, 1\)\)\)/.test(petCss) && /background-image: linear-gradient\(180deg, rgba\(255, 255, 255, 0\.05\)/.test(petCss) && /background-color 0\.2s ease/.test(petCss));
-check("新消息插在输入框**之上**（排到框下面会把正在打的字顶走）", /stack\.insertBefore\(b, inputOpen \? inputRow : null\)/.test(petSrc));
-check("夹取量的是整棳，写在容器上（位置跟着整棳走）", /var r = stack\.getBoundingClientRect\(\)/.test(petSrc) && /stack\.style\.left = "calc\(50% \+ " \+ dx \+ "px\)"/.test(petSrc) && /stack\.style\.removeProperty\("left"\)/.test(petSrc));
-check("宠物没了就把气泡计时器也收掉", /this\.destroy = function \(\)[\s\S]{0,900}bubbles\.length = 0/.test(petSrc));
-check("栈空了摘 .show（否则空的容器也占命中区）", /function stackEmpty\(\)/.test(petSrc) && /stack\.classList\.toggle\("show", !stackEmpty\(\)\)/.test(petSrc));
+check("新消息插在输入框**之上**（排到框下面会把正在打的字顶走）", /chatStack\.insertBefore\(b, inputOpen \? inputRow : null\)/.test(petSrc));
+check("会话气泡也插在输入框之上（输入框在消息 lane 底下那一行）", /stack\.insertBefore\(el, inputOpen \? inputRow : null\)/.test(petSrc));
+check("夹取量的是整摞（两条 lane 的并集），偏移写在外框上", /var r = lanes\.getBoundingClientRect\(\)/.test(petSrc) && /lanes\.style\.left = "calc\(50% \+ " \+ dx \+ "px\)"/.test(petSrc) && /lanes\.style\.removeProperty\("left"\)/.test(petSrc) && /self\.bubbleEl = lanes/.test(petSrc)
+);
+check("宠物没了就把两条 lane 的计时器都收掉", /this\.destroy = function \(\)[\s\S]{0,1200}bubbles\.length = 0[\s\S]{0,400}chatBubbles\.length = 0/.test(petSrc));
+check("两 lane 都空了摘 .show（否则空的容器也占命中区）", /function stackEmpty\(\)[\s\S]{0,200}chatBubbles\.length === 0/.test(petSrc) && /lanes\.classList\.toggle\("show", !stackEmpty\(\)\)/.test(petSrc));
+check("外框 CSS：两条 lane 上下排（会话在上、消息在下）", /\.pet-bubble-lanes \{[\s\S]{0,600}flex-direction: column/.test(petCss) && /\.pet-bubble-lanes\.show/.test(petCss) && !/\.pet-bubble-stack \{[\s\S]{0,120}position: absolute/.test(petCss));
 // 气泡刚 show 出来那下量到的是旧布局：下一帧要再夹一次，否则右缘探出窗边被切（实测 38px）
 check("气泡下一帧再夹一次（刚 show 时量的是上一段文案的布局）", /requestAnimationFrame\(function \(\) \{ self\.clampBubble\(\); \}\)/.test(petSrc));
 check("窗一变就重新夹气泡（高度/宽度都变了）", /window\.addEventListener\("resize"[\s\S]{0,600}clampBubbles\(\)/.test(petSrc));

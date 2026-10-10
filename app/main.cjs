@@ -155,7 +155,7 @@ const HELP = `pi-pet ${VERSION} — 桌面宠物宿主（独立应用）
   status                                                现状（宿主/窗/生产者）
   stop                                                  关窗并退宿主
   restart [--size small|normal|large]                   换一扇窗，不重启服务
-  feed <thinking|agent_start|agent_idle|tool_call|done|say> [tool|文本] [--text T] [--task T] [--detail T] [--summary T]
+feed <thinking|agent_start|agent_idle|tool_call|done|say> [tool|文本] [--text T] [--task T] [--detail T] [--summary T] [--title T]
   say "文本" [--ms 6000]                              让宠物说一句话（只冒泡）
   add [size]                                            加一只（maxPets > 1 才有效）
   port                                                  只打印端口
@@ -354,8 +354,14 @@ async function cmdStatus(flags) {
 	}
 	out(`  窗：pid ${state.windowPid || 0}  状态 ${state.windowState}  重启 ${state.restarts || 0} 次  ${health && health.windowConnected ? "（已连上）" : "（未连上）"}`);
 	out(`  生产者：${health ? health.feeds : "?"} 个会话  窗客户端：${health ? health.clients : "?"} 个`);
-	if (health && health.feedsBySource && Object.keys(health.feedsBySource).length) {
+if (health && health.feedsBySource && Object.keys(health.feedsBySource).length) {
 		for (const [k, v] of Object.entries(health.feedsBySource)) out(`    - ${k} × ${v}`);
+	}
+	// 每会话一条的气泡：谁在执行中、谁跑完了（v1.4）
+	if (health && Array.isArray(health.sessionBubbles) && health.sessionBubbles.length) {
+		for (const b of health.sessionBubbles) {
+			out(`    · ${b.title} ${b.status === "done" ? "已完成" : "执行中"}${b.text ? `：${b.text}` : ""}（${b.sid}）`);
+		}
 	}
 	out(`  意图：${JSON.stringify(readCtrl())}`);
 	if (health && health.pkg && path.resolve(String(health.pkg)) !== path.resolve(PKG_ROOT)) {
@@ -483,11 +489,12 @@ async function withHost(need, fn) {
 
 async function cmdFeed(positional, flags) {
 	const type = positional[0];
-	if (!type) {
+if (!type) {
 		out("用法：pi-pet feed <thinking|agent_start|agent_idle|done|say|shutdown> [tool|文本]");
 		out("     pi-pet feed tool_call bash");
 		out('     pi-pet feed thinking --text="修复登录"     （带任务名 → 气泡会写「「修复登录」思考中…」）');
 		out('     pi-pet feed done --text="改完 3 个文件"      （完成气泡）');
+		out('     pi-pet feed thinking --title="修复登录"     （会话标题 → 宠物按会话一个一个泡）');
 		out('     pi-pet say "过来玩"                         （只冒泡，不改状态）');
 		return 2;
 	}
@@ -503,7 +510,8 @@ async function cmdFeed(positional, flags) {
 			if (type === "tool_call") body.tool = rest[0];
 			else if (type === "add_pet" && SIZES.includes(rest[0])) body.size = rest[0];
 		}
-		for (const k of ["text", "task", "detail", "summary", "ms"]) {
+// title = 会话标题（v1.4）：宠物按会话一个一个泡气泡，气泡上写它
+		for (const k of ["text", "task", "detail", "summary", "title", "ms"]) {
 			if (flags[k] !== undefined) body[k] = flags[k];
 		}
 		const res = await httpJson(ctx.port, "POST", ENDPOINTS.event, body, ctx.token);
@@ -511,9 +519,10 @@ async function cmdFeed(positional, flags) {
 			out(`✗ 没发出去：${describeRes(res)}`);
 			return 1;
 		}
-		const bits = [type];
+const bits = [type];
 		if (body.tool) bits.push(`(${body.tool})`);
 		if (body.text) bits.push(`「${body.text}」`);
+		if (body.title) bits.push(`标题「${body.title}」`);
 		out(`✓ ${bits.join(" ")} → 窗（${res.body.sent} 个客户端）`);
 		return 0;
 	});

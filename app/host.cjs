@@ -398,6 +398,11 @@ busHooks.paused = () => readCtrl().paused === true;
 				return { ok: true, detail: "换一扇窗（多余的只随旧窗一起没）" };
 case "say":
 				return bus.say(arg.text, Number(arg.ms) || 0);
+			case "dismiss-bubble": {
+				// 点掉一条「已完成」的会话气泡（v1.4）。窗侧点一下就调这个 ——
+				// 宿主要是不记这一下，下一次补发/续期又会把那条塞回来。
+				return bus.dismissSessionBubble(arg.sid);
+			}
 			case "power-save": {
 				// 省电模式：把动画冻在当前帧（不产生新帧 → 不抢别的窗口的合成预算）。
 				// 落盘 ctrl.json：换窗、重启都还保持着，直到用户自己关掉。
@@ -480,7 +485,7 @@ const map = rememberPosition(id, arg.rx, arg.ry, arg.w, arg.h);
 					ok: false,
 error: `未知 action：${action}`,
 					hint:
-"可用：shutdown | restart-window | add-pet | drop-pets | say | pause | resume | " +
+"可用：shutdown | restart-window | add-pet | drop-pets | say | dismiss-bubble | pause | resume | " +
 						(POWER_SAVE_ENABLED ? "power-save | " : "") +
 						"hide-window | show-window | set-ctrl | set-position | check-update | do-update | " +
 						"state | release-lock",
@@ -581,6 +586,8 @@ error: `未知 action：${action}`,
 			state.feedsBySource = s.feedsBySource;
 			state.petState = s.state;
 			state.busySessions = s.busySessions;
+			// 每会话一条的气泡也写进 state.json：`pi-pet status` 看得到谁在执行中
+			state.sessionBubbles = s.sessionBubbles;
 			state.restarts = win.getRestarts();
 			state.windowPid = win.getPid();
 			state.electron = win.electronBin() || "";

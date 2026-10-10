@@ -44,6 +44,20 @@
  *               由右键菜单的「省电模式」切，落盘 ctrl.json（换窗、重启都还在），
  *               窗接上来时补发一次。老窗不认识这帧（当普通字符串事件也无害）。
  *
+ * ── v1.4 增量（向后兼容：老窗收到会直接忽略）────────────────────
+ *   下行 → 窗： {"type":"session","sid":"pi#1","source":"pi","title":"修复登录",
+ *                "status":"running","text":"执行中：npm test"}
+ *               {"type":"session","sid":"pi#1","remove":true}
+ *               **每个会话一条**气泡（v1.1 那条全局 sticky 气泡只给老窗继续用）：
+ *               sid 是宿主给会话分配的稳定 id，title 是会话标题（生产者给，没有就退到来源名），
+ *               status = running（执行中）/ done（已完成）。remove = 收掉（会话退出、
+ *               用户点掉已完成的那条）。窗接上来时按会话逐条补发。
+ *   上行 ← 生产者：{"type":"session","title":"修复登录"}
+ *               只报标题（不改状态、不冒泡）；thinking / tool_call / done / idle
+ *               也都能带 title，顺手把这一轮的任务名报上来。
+ *   之所以另起一帧而不是给 bubble 加字段：bubble 是「一句话」，没有身份 —— 按 sid
+ *   认领才能做到「各会话各一条、更新原地换、退出即收」。
+ *
  * ── 未来 v2（envelope）─────────────────────────────────────────
  *   若要带 source/session/ts，正确做法是 pet.js 的 onmessage 先 JSON.parse，
  *   认不出对象再退回按裸字符串处理（向后兼容），而不是让服务端单方面改格式。
@@ -92,9 +106,33 @@ const EVENTS = {
 	bubble: "bubble",
 /** 下行给窗的位置帧（v1.2）：记住上次拖到哪儿，下次启动还在那儿 */
 	positions: "positions",
-	/** 下行给窗的省电帧（v1.3）：冻住动画，别再跟别的窗口抢合成预算 */
+/** 下行给窗的省电帧（v1.3）：冻住动画，别再跟别的窗口抢合成预算 */
 	power: "power",
+	/** 下行给窗的**会话**气泡帧（v1.4）：每个会话一条，带 sid 与状态 */
+	session: "session",
 };
+
+/** 会话气泡的状态（v1.4）。窗侧认这两个值：running=执行中，done=已完成（可点掉）。 */
+const SESSION_STATUS = { running: "running", done: "done" };
+
+/**
+ * 会话气泡的**细节行**文案（v1.4）。
+ * ⚠️ 与 stateText 不是一回事：那条气泡的角标已经写着「执行中 / 已完成」了，
+ *    正文再写一遍「执行中：」就是同一句话说两遍。所以这里只给**细节**：
+ *    思考 → 「思考中…」；执行 → detail/tool；完成 → summary（没给就空行）。
+ */
+function sessionText(state, { detail = "", tool = "", summary = "" } = {}) {
+switch (state) {
+		case "thinking":
+			return "思考中…";
+		case "done":
+			return summary ? summary : "";
+		case "coding":
+			return detail || tool || "干活中…";
+		default:
+			return summary || "";
+	}
+}
 
 /** 窗侧的尺寸档位，与 pet.js 的 SIZE_MAP 对齐。 */
 const SIZES = ["small", "normal", "large"];
@@ -208,22 +246,29 @@ function parseIncoming(raw) {
 	}
 	if (!raw || typeof raw !== "object") return null;
 
-	const type = str(raw.type);
+const type = str(raw.type);
+	// v1.4：会话标题。**只报标题**（不改状态、不冒泡）—— 生产者在 session_start
+	// 时报一次，之后这一串 thinking / tool_call 都会自动带上它。
+	const title = clampText(raw.title || raw.session);
 	switch (type) {
 		case EVENTS.agentStart:
 		case EVENTS.thinking:
-			return { type: EVENTS.thinking, task: clampText(raw.task || raw.text) };
+			return { type: EVENTS.thinking, task: clampText(raw.task || raw.text), title };
 		case EVENTS.toolCall:
 			return {
 				type: EVENTS.toolCall,
 				tool: str(raw.tool),
 				detail: clampText(raw.detail),
 				task: clampText(raw.task),
+				title,
 			};
 		case EVENTS.done:
-			return { type: EVENTS.done, summary: clampText(raw.summary || raw.text) };
+			return { type: EVENTS.done, summary: clampText(raw.summary || raw.text), title };
 		case EVENTS.agentIdle:
-			return { type: EVENTS.agentIdle, summary: clampText(raw.summary) };
+			return { type: EVENTS.agentIdle, summary: clampText(raw.summary), title };
+		case EVENTS.session:
+			// 只认「报标题」；remove 是**下行**（宿主→窗）的字段，生产者发它没有意义。
+			return { type: EVENTS.session, title };
 		case EVENTS.say:
 			return { type: EVENTS.say, text: clampText(raw.text, 80), ms: Number(raw.ms) || 0 };
 		case EVENTS.addPet:
@@ -238,6 +283,32 @@ function parseIncoming(raw) {
 /** 拼一个气泡帧（下行 → 窗）。`sticky` = 状态还在，宿主会持续续期。 */
 function bubbleFrame(text, { sticky = false, ms = 0 } = {}) {
 	return JSON.stringify({ type: EVENTS.bubble, text: clampText(text, 80), sticky, ms: ms > 0 ? ms : 0 });
+}
+
+/**
+ * 拼一条**会话**气泡帧（v1.4，下行 → 窗）。
+ * 键序别动：`{"type":"session"` 是各端（窗 / 测试 / 文档）认这帧的前缀。
+ * sid 必须是宿主分配的那个稳定 id —— 窗靠它把「新状态」认成同一条气泡（原地换），
+ * 而不是每次都新冒一条。
+ */
+function sessionFrame({ sid, source = "", title = "", status = SESSION_STATUS.running, text = "" } = {}) {
+	const id = String(sid == null ? "" : sid).trim().slice(0, 64);
+	if (!id) return null;
+	return JSON.stringify({
+		type: EVENTS.session,
+		sid: id,
+		source: clampText(source, 24),
+		title: clampText(title, 40),
+		status: status === SESSION_STATUS.done ? SESSION_STATUS.done : SESSION_STATUS.running,
+		text: clampText(text, 80),
+	});
+}
+
+/** 收掉一条会话气泡（会话退出 / 用户点掉已完成那条）。 */
+function sessionGoneFrame(sid) {
+	const id = String(sid == null ? "" : sid).trim().slice(0, 64);
+	if (!id) return null;
+	return JSON.stringify({ type: EVENTS.session, sid: id, remove: true });
 }
 
 /**
@@ -285,7 +356,8 @@ module.exports = {
 	VERSION,
 	ROLE,
 	ENDPOINTS,
-	EVENTS,
+EVENTS,
+	SESSION_STATUS,
 	SIZES,
 	MAX_PETS_CEILING,
 	TEXT_MAX,
@@ -295,6 +367,9 @@ module.exports = {
 	envelope,
 	parseIncoming,
 bubbleFrame,
+	sessionText,
+	sessionFrame,
+	sessionGoneFrame,
 	positionsFrame,
 	powerFrame,
 	sanitizePositions,

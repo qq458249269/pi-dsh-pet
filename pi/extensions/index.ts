@@ -177,10 +177,34 @@ async function ensureHost(startTimeoutMs = 12000): Promise<HostInfo | null> {
 /* ============================== producer feed ============================== */
 
 type Frame =
-  | { type: 'thinking'; task?: string }
-  | { type: 'tool_call'; tool: string; detail?: string; task?: string }
-  | { type: 'done'; summary?: string }
+  | { type: 'thinking'; task?: string; title?: string }
+  | { type: 'tool_call'; tool: string; detail?: string; task?: string; title?: string }
+  | { type: 'done'; summary?: string; title?: string }
+  | { type: 'session'; title: string }
   | { type: 'say'; text: string; ms?: number };
+
+/** 这个会话叫什么（宠物按会话一个一个泡出来，标题就靠它）。猜不到就留空 —— 宿主会退到来源名。 */
+let sessionTitle = '';
+
+/**
+ * 会话标题尽量取人话：显式标题 → 工作目录名 → 'pi'。
+ *
+ * ⚠️ 各版本 pi 的 session_start 事件形状不一样（有没有 title / session / cwd 都见过），
+ * 所以这里逐个字段猜，宁可少取也不能抛 —— 抛了整个扩展就没了，宠物直接不冒泡。
+ */
+function pickTitle(event: any, ctx: any): string {
+  const candidates = [event?.title, event?.name, event?.session?.title, event?.session?.name, ctx?.title, ctx?.session?.title];
+  for (const c of candidates) {
+    if (typeof c === 'string' && c.trim()) return c.trim().slice(0, 40);
+  }
+  const cwd = event?.cwd ?? event?.workspace ?? event?.session?.cwd ?? ctx?.cwd;
+  if (typeof cwd === 'string' && cwd.trim()) {
+    const parts = cwd.trim().split(/[\\/]+/).filter(Boolean);
+    const last = parts[parts.length - 1];
+    if (last) return last.slice(0, 40);
+  }
+  return 'pi';
+}
 
 let sock: WebSocket | null = null;
 let sockHost: HostInfo | null = null;
@@ -213,6 +237,9 @@ function connect(host: HostInfo, notify?: (msg: string) => void): void {
   sock = ws;
   ws.addEventListener('open', () => {
     everConnected = true;
+    // 接上（或重连）就先把会话标题报一次：**重连会拿到新的 sid**，不重报的话
+    // 宿主那边新会话的标题就是空的（退回来源名）。
+    if (sessionTitle) send({ type: 'session', title: sessionTitle });
     if (retry) {
       clearTimeout(retry);
       retry = null;
@@ -268,13 +295,21 @@ export default function (pi: ExtensionAPI) {
     console.log(`[pi-dsh-pet] ${msg}`);
   };
 
-  pi.on('session_start', async (_event, ctx) => {
+  pi.on('session_start', async (event: any, ctx: any) => {
     const host = await ensureHost();
     if (!host) {
       notify(ctx, '没能拉起宠物宿主（pi-pet start 失败？）— /pet-status 看诊断', 'error');
       return;
     }
     connect(host, (m) => notify(ctx, m));
+    // 报一次会话标题（v1.4）：宠物按会话一个一个泡出气泡，标题就靠这一帧。
+    // 只报标题不改状态 —— 真的开始干活时（thinking/tool_call）才会冒气泡。
+    try {
+      sessionTitle = pickTitle(event, ctx);
+    } catch {
+      sessionTitle = 'pi';
+    }
+    send({ type: 'session', title: sessionTitle });
     // The window is intentionally NOT auto-opened here: the standalone app owns
     // its own window lifetime, and opening it from every pi session used to be
     // the source of "pet popped up again" complaints. Use /pet.
@@ -297,12 +332,12 @@ export default function (pi: ExtensionAPI) {
   /* ---- pi events → frames (v1.1 shapes; the host dedupes repeats) ---- */
 
   pi.on('agent_start', () => {
-    send({ type: 'thinking' });
+    send({ type: 'thinking', title: sessionTitle || undefined });
   });
 
   // pi 的 turn_start 只有 turnIndex，没有任务文本；任务名交给宿主那侧猜（/pet-say 可手填）
   pi.on('turn_start', () => {
-    send({ type: 'thinking' });
+    send({ type: 'thinking', title: sessionTitle || undefined });
   });
 
   // tool_call 给的是 toolName + input（bash 是 {command}，read/edit/write 是 {path}…）
@@ -313,11 +348,16 @@ export default function (pi: ExtensionAPI) {
       typeof input === 'string'
         ? input
         : (input?.command ?? input?.path ?? input?.filePath ?? input?.pattern ?? input?.description);
-    send({ type: 'tool_call', tool, detail: detail === undefined ? undefined : String(detail) });
+    send({
+      type: 'tool_call',
+      tool,
+      detail: detail === undefined ? undefined : String(detail),
+      title: sessionTitle || undefined,
+    });
   });
 
   pi.on('agent_settled', () => {
-    send({ type: 'done' });
+    send({ type: 'done', title: sessionTitle || undefined });
   });
 
   /* ---- commands ---- */

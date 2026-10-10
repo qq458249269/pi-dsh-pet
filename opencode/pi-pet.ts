@@ -179,10 +179,33 @@ async function ensureHost(startTimeoutMs = 12000): Promise<HostInfo | null> {
 /* ============================== producer feed ============================== */
 
 type Frame =
-  | { type: 'thinking'; task?: string }
-  | { type: 'tool_call'; tool: string; detail?: string; task?: string }
-  | { type: 'done'; summary?: string }
+  | { type: 'thinking'; task?: string; title?: string }
+  | { type: 'tool_call'; tool: string; detail?: string; task?: string; title?: string }
+  | { type: 'done'; summary?: string; title?: string }
+  | { type: 'session'; title: string }
   | { type: 'say'; text: string; ms?: number };
+
+/** 会话标题（v1.4：宠物按会话一个一个泡出气泡，标题靠它）。没定就退到 'opencode'。 */
+let sessionTitle = 'opencode';
+
+/**
+ * 从 opencode 的事件里刨会话标题：session.info 里带 title 的就用它，
+ * 否则用目录名（多个 opencode 同时开时，标题一样就分不出谁是谁了）。
+* 形状对不上就静默退到默认 —— 插件不能因为猜标题而崩。
+ */
+function pickTitle(event: any): string {
+  const info = event?.properties?.info;
+  const candidates = [info?.title, event?.properties?.title, info?.name];
+  for (const c of candidates) {
+    if (typeof c === 'string' && c.trim()) return c.trim().slice(0, 40);
+  }
+  const dir = info?.directory ?? info?.worktree ?? info?.cwd;
+  if (typeof dir === 'string' && dir.trim()) {
+    const last = dir.trim().split(/[\\/]+/).filter(Boolean).pop();
+    if (last) return last.slice(0, 40);
+  }
+  return 'opencode';
+}
 
 let sock: WebSocket | null = null;
 let retry: ReturnType<typeof setTimeout> | null = null;
@@ -210,9 +233,11 @@ function connect(host: HostInfo, notify?: (msg: string) => void): void {
     scheduleReconnect(notify);
     return;
   }
-  sock = ws;
+sock = ws;
   ws.addEventListener('open', () => {
     everConnected = true;
+    // 接上（或重连）就报一次会话标题：重连会拿到新的 sid，不重报宿主那边就没标题了
+    send({ type: 'session', title: sessionTitle });
     if (retry) {
       clearTimeout(retry);
       retry = null;
@@ -270,24 +295,26 @@ function pickDetail(input: any): string | undefined {
 function onBusEvent(event: any): void {
   try {
     const info = event?.properties?.info;
+    const t = pickTitle(event);
+    if (t) sessionTitle = t;
     if (event?.type === 'message.updated') {
       // 一条 assistant 消息从 created 到 completed 期间只播一次「思考中」
       if (info?.role === 'assistant' && info?.time?.created && !info?.time?.completed && !announced.has(info.id)) {
         announced.add(info.id);
-        send({ type: 'thinking' });
+        send({ type: 'thinking', title: sessionTitle });
       }
       return;
     }
     if (event?.type === 'message.part.updated') {
       const part = event?.properties?.part;
       if (part?.type === 'tool' && part?.state?.status === 'running') {
-        send({ type: 'tool_call', tool: String(part.tool || 'other'), detail: pickDetail(part.state.input) });
+        send({ type: 'tool_call', tool: String(part.tool || 'other'), detail: pickDetail(part.state.input), title: sessionTitle });
       }
       return;
     }
     if (event?.type === 'session.idle') {
       announced.clear(); // 下一条 assistant 消息要能再播「思考中」
-      send({ type: 'done' });
+      send({ type: 'done', title: sessionTitle });
     }
   } catch {
     /* 一个畸形事件不该把桌宠插件带崩 */

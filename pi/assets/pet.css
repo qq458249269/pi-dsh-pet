@@ -55,29 +55,40 @@
 }
 
 
-/* Speech bubbles — a **stack** floating above the pet (§9.34): every message is its
-   own .pet-bubble, the newest at the bottom, at most 3 at a time. Lives inside
-   .pet-container, so it follows drag/position for free. */
-.pet-bubble-stack {
+/* Speech bubbles — **two lanes** in one outer box (§9.34 + v1.4):
+   .pet-bubble-lanes (outer, anchored above the pet) contains
+     · .pet-bubble-stack        → 会话 lane：每个会话一条（执行中/已完成），留到会话退出或点掉
+     · .pet-chat-stack          → 消息 lane：**独立队列**（碎碎念 / 手打的话 / say），
+                                  自己的上限 3、自己的计时器、自己的过期，不与会话抢位子。
+   Both grow upward with the newest at the **bottom** (closest to the pet), like a chat log.
+   Lives inside .pet-container, so it follows drag/position for free. */
+.pet-bubble-lanes {
   position: absolute;
   bottom: 100%;
   left: 50%;
-  /* 贴到屏幕边时 JS 把整摞夹回来：直接改 left/bottom 的 calc 值（这两个属性没写进
+  /* 贴到屏幕边时 JS 把**整个外框**夹回来：直接改 left/bottom 的 calc 值（这两个属性没写进
      transition，改完立刻到位 —— 要是用 transform 夹，0.18s 的过渡会让它一路抖）。
      不夹的话会有一半跑到屏幕外，看着就像「被切了一半」。 */
   transform: translateX(-50%);
   margin-bottom: 10px;
   display: flex;
-  flex-direction: column;   /* 新的在下面 → 老的一条被顶上去，像滚动的对话 */
+  flex-direction: column;   /* 会话 lane 在上，消息 lane 在下（贴着宠物） */
   align-items: center;
-gap: 4px;
+  gap: 6px;                 /* 两条 lane 之间的缝 */
   pointer-events: none;
   z-index: 2;
   opacity: 0;
   transition: opacity 0.18s ease;
 }
-.pet-bubble-stack.show {
+.pet-bubble-lanes.show {
   opacity: 1;
+}
+.pet-bubble-stack {
+  display: flex;
+  flex-direction: column;   /* 新的在下面 → 老的一条被顶上去，像滚动的对话 */
+  align-items: center;
+  gap: 4px;
+  pointer-events: none;
 }
 .pet-bubble {
   position: relative;
@@ -123,6 +134,58 @@ opacity: 0;
 }
 /* 跟着外层居中：span 是 -webkit-box 的直接子项，得自己再对一次 */
 .pet-bubble > span { text-align: center; }
+
+/* ---- 会话气泡（v1.4：每个会话一条，sid 认领、原地换状态）----
+   形状：标题行（会话标题 + 状态角标）+ 一行细节。角标一眼分出「还在跑」与「跑完了」，
+   而**跑完的那条可以点掉**（见下面的 pointer-events）—— 「点击已完成气泡可移除」就是它。 */
+.pet-bubble-session {
+  pointer-events: none; /* 执行中的那条不吃点击（点它没意义） */
+  text-align: left;
+  -webkit-box-align: start;
+}
+.pet-bubble-session > span { text-align: left; }
+.pet-bubble-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 0 0 2px;
+  min-width: 0;
+}
+.pet-bubble-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 600;
+}
+.pet-bubble-badge {
+  flex: 0 0 auto;
+  padding: 1px 6px;
+  border-radius: 8px;
+  font-size: 11px;
+  line-height: 1.5;
+  /* 跟着 --fade 一起淡（越老越退后），别让角标永远是满亮的那一块 */
+  color: rgba(120, 190, 255, calc(0.95 * var(--fade, 1)));
+  background: rgba(120, 190, 255, calc(0.16 * var(--fade, 1)));
+  border: 1px solid rgba(120, 190, 255, calc(0.32 * var(--fade, 1)));
+}
+/* 已完成：角标换成静态的绿灰调，框也可点（点一下收掉它） */
+.pet-bubble-session.done {
+  pointer-events: auto;
+  cursor: pointer;
+}
+.pet-bubble-session.done .pet-bubble-badge {
+  color: rgba(150, 220, 170, calc(0.95 * var(--fade, 1)));
+  background: rgba(120, 200, 150, calc(0.14 * var(--fade, 1)));
+  border-color: rgba(120, 200, 150, calc(0.3 * var(--fade, 1)));
+}
+/* 悬停给个「能点」的反馈：不加的话用户不知道这条可以点掉 */
+.pet-bubble-session.done:hover {
+  background-color: rgba(46, 52, 66, calc(0.96 * var(--fade, 1)));
+  border-color: rgba(150, 220, 170, calc(0.45 * var(--fade, 1)));
+}
 
 .pet-bubble.show {
   opacity: 1;
@@ -209,7 +272,7 @@ padding: 6px;
 @media (prefers-reduced-motion: reduce) {
   .pet-video,
   .pet-bubble,
-  .pet-bubble-stack {
+  .pet-bubble-lanes {
     transition: none;
   }
 }

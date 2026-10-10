@@ -27,11 +27,21 @@
  *     · 窗重连时立刻补发当前状态（不必等下一个事件才动起来）
  *
  *   这同时解决多会话：A 会话结束、B 还在写代码 → 宠物继续写代码，而不是跟着 A 变待机。
+ *
+ * ── 会话气泡（v1.4）：每个会话一条，不是全局一条 ──────────────────
+ *   以前只有一条 sticky 气泡讲「全局状态」：多开两个 pi 时，谁在干活只能靠猜，
+ *   而且一条只能挂一个会话。现在每条 /feed 连接 = 一个会话（sid），各有各的一条气泡：
+ *     窗 ← {"type":"session","sid":…,"title":…,"status":"running|done","text":…}
+ *     窗 ← {"type":"session","sid":…,"remove":true}     （会话退出 / 用户点掉已完成那条）
+ *   「一条一连接」是刻意的：同一来源的多条连接本来就是多个会话（多开 pi），
+ *   按 source 归一的话它们会挤成一条，断一条还会把别人的状态一起带走。
+ *   老窗不认识这两帧（当普通字符串事件忽略），v1.1 那条全局 sticky 气泡**照发** ——
+ *   新旧窗看的是同一份状态。
  */
 
 "use strict";
 
-const { ENDPOINTS, EVENTS, SIZES, parseIncoming, bubbleFrame, positionsFrame, powerFrame } = require("./protocol.cjs");
+const { ENDPOINTS, EVENTS, SIZES, SESSION_STATUS, parseIncoming, bubbleFrame, sessionText, sessionFrame, sessionGoneFrame, positionsFrame, powerFrame } = require("./protocol.cjs");
 const { log } = require("./paths.cjs");
 
 /** 一个「agent 正在忙」的最长持续时间：超过就当会话卡住，强制放回空闲动画。 */
@@ -107,6 +117,21 @@ function createBus(hooks = {}) {
 	const feedSockets = new Map();
 	/** 每个来源的当前状态：id → { id, source, state, group, tool, at, transport } */
 	const sessions = new Map();
+	/**
+	 * 每个会话一条气泡（v1.4）：sid → { sid, source, title, status, text, at }。
+	 * 为什么不在窗侧拼：同一个来源可以连好几条（多开 pi），宿主才知道谁是谁 ——
+	 * 窗只认 sid，靠它「原地换状态」而不是每次都新冒一条。
+	 */
+	const sessionBubbles = new Map();
+	/** sid 序号：同一来源的第几条连接（`pi#1` / `pi#2` …），又短又唯一。 */
+	const sidSeq = new Map();
+
+	/** 下一条 /feed 连接该拿的 sid。sid 同时当会话 id 与气泡的归属键。 */
+	function nextSid(source) {
+		const n = (sidSeq.get(source) || 0) + 1;
+		sidSeq.set(source, n);
+		return `${source}#${n}`;
+	}
 
 	/** 窗当前被驱动的状态键（null = 还没发过任何状态）。 */
 	let currentKey = null;
@@ -160,7 +185,89 @@ let lastDone = null;
 		const st = sessions.get(id);
 		sessions.delete(id);
 		if (st && st.state !== STATE.IDLE) log(`会话 ${st.source} 离开（还在忙碌）→ 重算窗状态`);
+		// 会话没了，它那条气泡也就没有意义了（用户口径：「会话退出就收掉那条气泡」）
+		removeSessionBubble(id);
 		return st;
+	}
+
+	/* ===================== 会话气泡（v1.4：每个会话一条） ===================== */
+
+	/** 会话标题：生产者报了就用它，没报就退到来源名（pi / dsh / opencode…）。 */
+	function sessionTitleOf(st) {
+		const t = String((st && st.title) || "").trim();
+		if (t) return t;
+		const src = String((st && st.source) || "").trim();
+		return src || "会话";
+	}
+
+	/**
+	 * 建/更新一条会话气泡并广播。**没变就不发**（跟 drive() 一个道理）：
+	 * 上游每 2s 重发一次同状态事件，气泡不能跟着每 2s 抖一帧。
+	 */
+	function upsertSessionBubble(st, { status = SESSION_STATUS.running, text = "", title = "" } = {}) {
+		const sid = st && st.id;
+		if (!sid) return false;
+		const prev = sessionBubbles.get(sid);
+		const next = {
+			sid,
+			source: String((st && st.source) || (prev && prev.source) || ""),
+			title: String(title || sessionTitleOf(st)),
+			status: status === SESSION_STATUS.done ? SESSION_STATUS.done : SESSION_STATUS.running,
+			text: String(text || ""),
+			at: Date.now(),
+		};
+		if (prev && prev.title === next.title && prev.status === next.status && prev.text === next.text) return false;
+		sessionBubbles.set(sid, next);
+		const frame = sessionFrame(next);
+		if (frame) broadcast(frame);
+		log(`会话气泡 → ${next.title} ${next.status === SESSION_STATUS.done ? "已完成" : "执行中"}：${next.text}（${next.sid}）`);
+		return true;
+	}
+
+	/** 收掉一条会话气泡（会话退出 / 判死 / 用户点掉）。 */
+	function removeSessionBubble(sid, { silent = false } = {}) {
+		if (!sessionBubbles.has(sid)) return false;
+		sessionBubbles.delete(sid);
+		const frame = sessionGoneFrame(sid);
+		if (!silent && frame) broadcast(frame);
+		return true;
+	}
+
+	/**
+	 * 用户点掉一条**已完成**的气泡（窗侧 → /control dismiss-bubble）。
+	 * 顺手把会话标成「这一轮别再冒」：不然宿主下一次全量补发/续期又会把它塞回来。
+	 * 下一轮真忙起来时（syncSessionBubble 里 busy 那条）标记清掉，气泡重新冒。
+	 */
+	function dismissSessionBubble(sid) {
+		const id = String(sid == null ? "" : sid).trim();
+		if (!id) return { ok: false, error: "缺 sid" };
+		if (!sessionBubbles.has(id)) return { ok: false, error: "没有这条会话气泡（可能已经自己收了）" };
+		removeSessionBubble(id);
+		const st = sessions.get(id);
+		if (st) st.dismissed = true;
+		log(`会话气泡被点掉（${id}）`);
+		return { ok: true, detail: "已移除该会话气泡" };
+	}
+
+	/**
+	 * 状态事件 → 会话气泡。
+	 *   busy（thinking / tool_call）→ 执行中，文案带着在干什么
+	 *   空闲 / done              → 已完成（**一直留着**，直到会话退出或用户点掉）
+	 * 两条硬规矩：
+	 *   ① 一直没干过活的会话不冒泡（刚接上来就 idle 的会话不用占头顶）
+	 *   ② 收掉的（dismissed）这一轮不再冒，除非又真的开始忙了
+	 */
+	function syncSessionBubble(st, ev) {
+		const busy = ev.type !== EVENTS.done && ev.type !== EVENTS.agentIdle;
+		if (busy) {
+			st.bubbled = true;
+			st.dismissed = false; // 又开工了：上一条「已完成」被点掉也不作数
+			const text = sessionText(st.state, st);
+			return upsertSessionBubble(st, { status: SESSION_STATUS.running, text });
+		}
+		if (!st.bubbled || st.dismissed) return false;
+		// 角标已经写着「已完成」，正文只给 summary（没给就是空行，窗侧会藏掉那行）
+		return upsertSessionBubble(st, { status: SESSION_STATUS.done, text: sessionText("done", { summary: ev.summary || "" }) });
 	}
 
 	/**
@@ -297,25 +404,44 @@ let lastDone = null;
 			log(`已暂停响应，丢弃状态事件 ${ev.type}（来源 ${source}）`);
 			return { ok: true, sent: 0, stateOnly: true, changed: false, paused: true };
 		}
+
+		// v1.4：只报标题（「我的会话叫什么」）。不改状态也不冒泡 ——
+		//   记下来，后面这一串 thinking / tool_call 的气泡标题就用它。
+		if (ev.type === EVENTS.session) {
+			if (!ev.title) return { ok: true, sent: 0, stateOnly: true, changed: false };
+			const st = touch(id, { title: ev.title, source });
+			const shown = sessionBubbles.get(id);
+			// 气泡已经在屏上了：改名得立刻生效（否则屏上还是旧标题）
+			if (shown) upsertSessionBubble(st, { status: shown.status, text: shown.text, title: ev.title });
+			log(`会话 ${id} 标题 → ${ev.title}`);
+			return { ok: true, sent: 0, stateOnly: true, changed: false, title: ev.title };
+		}
+
+		// 标题：生产者给了就存下来（这一轮之后的气泡都叫它）
+		const titlePatch = ev.title ? { title: ev.title } : {};
+		let st;
 		if (ev.type === EVENTS.agentIdle || ev.type === EVENTS.done) {
 			// done 携带完成文案；普通 idle 不携带
-			touch(id, { state: STATE.IDLE, group: null, tool: null, source, summary: ev.summary || "" });
+			st = touch(id, { state: STATE.IDLE, group: null, tool: null, source, summary: ev.summary || "", ...titlePatch });
 		} else if (ev.type === EVENTS.thinking) {
-			touch(id, { state: STATE.THINKING, group: null, tool: null, source, task: ev.task || "", summary: "" });
+			st = touch(id, { state: STATE.THINKING, group: null, tool: null, source, task: ev.task || "", summary: "", ...titlePatch });
 		} else {
-			touch(id, {
+			st = touch(id, {
 				state: STATE.CODING,
 				group: TOOL_GROUP[ev.tool] || "other",
 				tool: ev.tool || "",
 				detail: ev.detail || "",
 				source,
 				summary: "",
+				...titlePatch,
 			});
 		}
 
 		// done 不走 idle 那个默认文案，而是「完成：…」
 		if (ev.type === EVENTS.done) lastDone = { summary: ev.summary || "", at: Date.now() };
 		else if (ev.type === EVENTS.thinking) lastDone = null;
+		// 每会话一条气泡（v1.4）：与动画去重**互不相干** —— 一条会话冒泡不该牵动画
+		syncSessionBubble(st, ev);
 		const changed = drive();
 		return { ok: true, sent: changed ? windowClients.size : 0, stateOnly: true, changed, state: currentKey };
 	}
@@ -328,6 +454,7 @@ let lastDone = null;
 			if (st.state !== STATE.IDLE && now - st.at > STALE_BUSY_MS) {
 				log(`会话 ${st.source} 忙碌超时（${Math.round((now - st.at) / 1000)}s 没动静，可能被硬杀了）→ 丢弃`);
 				sessions.delete(id);
+				removeSessionBubble(id); // 判死的会话，气泡也一并收掉（不然那条「执行中」永远挂着）
 				reaped++;
 			}
 		}
@@ -359,11 +486,17 @@ const positions = hooks.positions || (() => ({}));
 			if (p === ENDPOINTS.ws) {
 				windowClients.add(conn);
 				log(`窗接上了（当前 ${windowClients.size} 个客户端）`);
-				// 补发当前状态与气泡：窗重连（换窗 / 崩了重开）后立刻就是对的
-				if (currentMessage) {
-					conn.send(currentMessage);
-					if (currentBubble) conn.send(bubbleFrame(currentBubble, { sticky: currentKey !== STATE.IDLE }));
+				// 补发当前状态：窗重连（换窗 / 崩了重开）后立刻就是对的
+				if (currentMessage) conn.send(currentMessage);
+				// 每会话一条的气泡也要逐条补发（v1.4）：换窗 / 窗崩了重开时，
+				// 「谁在执行中、谁已完成」得原样回来，不能只剩一句全局状态文案。
+				// ⚠️ 排在旧那条全局气泡**之前**：新窗按到达顺序认协议口径，先看到
+				//   session 帧就不会先把重复的那条画出来（pet.js 的 applyBubble）。
+				for (const b of sessionBubbles.values()) {
+					const frame = sessionFrame(b);
+					if (frame) conn.send(frame);
 				}
+				if (currentMessage && currentBubble) conn.send(bubbleFrame(currentBubble, { sticky: currentKey !== STATE.IDLE }));
 				// 位置也要补发：换窗（右键「换一只」/restart）后回到上次拖的地方，而不是默认角落。
 				// 老窗不认识这帧（pet.js 的 onmessage 对未知 type 直接忽略）——兼容。
 				const saved = positions();
@@ -380,11 +513,13 @@ if (saved && Object.keys(saved).length) conn.send(positionsFrame(saved));
 			}
 
 			if (p === ENDPOINTS.feed) {
-				// 同一来源可以有多条连接（多会话同标签），状态按 source 归一
-				const id = `ws:${source}`;
+				// ⚠️ 一条连接 = 一个会话（v1.4 改的）：以前按 source 归一（`ws:pi`），
+				//   多开几个 pi 就挤成一条，气泡也只有一条。现在每条连接一个 sid
+				//   （`pi#1` / `pi#2`…），各有各的气泡，断一条也只收那一条。
+				const id = nextSid(source);
 				feedSockets.set(conn, { id, source });
-				if (!sessions.has(id)) touch(id, { state: STATE.IDLE, source });
-				log(`会话接入事件汇聚（当前 ${feedSockets.size} 个连接，来源 ${source}）`);
+				touch(id, { state: STATE.IDLE, source, transport: "ws" });
+				log(`会话 ${id} 接入事件汇聚（当前 ${feedSockets.size} 个连接，来源 ${source}）`);
 				conn.on("message", (data, isBinary) => {
 					if (isBinary) return;
 					try {
@@ -395,12 +530,10 @@ if (saved && Object.keys(saved).length) conn.send(positionsFrame(saved));
 				});
 				conn.on("close", () => {
 					feedSockets.delete(conn);
-					// 这条来源的**所有**连接都没了才清掉它的状态（多连接时别把别人踢下线）
-					const stillHere = [...feedSockets.values()].some((s) => s.id === id);
-					if (!stillHere) {
-						dropSession(id);
-						drive();
-					}
+					// sid 是一连接一专属的，所以这条断了就一定是这个会话没了：
+					// 状态回落 + 它的气泡收掉（用户口径：「会话退出就移除该气泡」）
+					dropSession(id);
+					drive();
 					log(`会话离开（剩 ${feedSockets.size} 个连接）`);
 					onStateChange();
 				});
@@ -422,6 +555,13 @@ if (saved && Object.keys(saved).length) conn.send(positionsFrame(saved));
 			stateSeq: seq,
 			bubble: currentBubble,
 			busySessions: busySessions.map((s) => ({ source: s.source, state: s.state, tool: s.tool, ms: Date.now() - s.at })),
+			sessionBubbles: [...sessionBubbles.values()].map((b) => ({
+				sid: b.sid,
+				source: b.source,
+				title: b.title,
+				status: b.status,
+				text: b.text,
+			})),
 		};
 	}
 
@@ -444,9 +584,13 @@ say,
 		stats,
 		reapStaleSessions,
 		getStateKey: () => currentKey,
+		sessionBubbles,
+		dismissSessionBubble,
 		reset: () => {
 			sessions.clear();
 			feedSockets.clear();
+			sessionBubbles.clear();
+			sidSeq.clear();
 			currentKey = null;
 			currentMessage = null;
 currentBubble = null;
