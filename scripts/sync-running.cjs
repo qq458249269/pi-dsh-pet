@@ -15,6 +15,7 @@
 
 const fs = require("node:fs");
 const path = require("node:path");
+const { spawnSync } = require("node:child_process");
 
 const ROOT = path.resolve(__dirname, "..");
 
@@ -103,6 +104,85 @@ function walk(rel, target, tally) {
 	for (const name of fs.readdirSync(src)) walk(path.join(rel, name), target, tally);
 }
 
+/* ================= 同步完：别把宿主那份的 git 拓脏 ================= */
+
+/** 跑一条 git（cwd = 宿主那份检出），拿 {code, stdout, stderr}；跑不了返回 null。 */
+function git(dir, args, timeoutMs = 30000) {
+	const r = spawnSync("git", args, { cwd: dir, timeout: timeoutMs, encoding: "utf8", windowsHide: true });
+	if (r.error) return null;
+	return { code: r.status, stdout: String(r.stdout || ""), stderr: String(r.stderr || "") };
+}
+
+/** 这份检出工作区脏不脏（有本地改动/未跟踪文件）。不是 git 检出就当不是。 */
+function isDirty(dir) {
+	const r = git(dir, ["status", "--porcelain"]);
+	return !!(r && r.code === 0 && r.stdout.trim().length);
+}
+
+/** 工作区里一个文件的 blob hash（跟 git index 无关，就是「现在这份内容」）。 */
+function blobOf(dir, rel) {
+	const r = git(dir, ["hash-object", "--", rel], 8000);
+	return r && r.code === 0 ? r.stdout.trim() : "";
+}
+
+/** 远端某个 ref 上那个文件的 blob hash。 */
+function remoteBlobOf(dir, ref, rel) {
+	const r = git(dir, ["rev-parse", "--verify", "--quiet", `${ref}:${rel}`], 8000);
+	return r && r.code === 0 ? r.stdout.trim() : "";
+}
+
+/**
+ * 同步完把「工作区被拓脏」的后果收掉。
+ *
+ * 为什么要管：更新器（app/updater.cjs 的 apply）**故意**不碰脏工作区
+ * —— `git status --porcelain` 非空就拒绝自动更（用户提示「有本地改动，先 commit 或 stash」）。
+ * 而 sync 的本质就是把开发那份的文件**写进**宿主那份检出 ⇒ 每次同步都把它拓脏 ⇒
+ * 自动更新从此一直失败（症状：明明 push 了，宿主却说「没更成：有本地改动」）。
+ *
+ * 怎么收：这些内容**远端已经有了**（= 已经 push 过）时，把那份检出的 HEAD **快进**到远端。
+ *   文件内容已经逐字核对过（一样），所以快进不改任何文件内容，只是让 git 认它干净 ⇒ 更新恢复。
+ * ⚠️⚠️ 为什么不是 `git checkout -- <files>`（曾经的写法，错）：
+ *   checkout 是从 **index/HEAD** 还原的，而此刻 HEAD 恰恰是**旧的**那份 ⇒ 一 checkout
+ *   就把刚同步进来的新代码**打回旧版**（sync 的意义当场没了），而且还得等下次更新才补回来。
+ *   「让工作区干净且内容不变」在 git 里只有一条路：把 HEAD 也带到那份内容去 = fast-forward。
+ *
+ * 还对不上（改了还没 push）就**不动**：这时候本来就该先 push，更新走 git。
+ */
+async function unblockUpdates(target, copied) {
+	if (!copied.length) return null;
+	if (!fs.existsSync(path.join(target, ".git"))) return null; // 不是 git 检出，管不着
+	if (!isDirty(target)) return null; // 没拓脏就不用收
+	// 只看**这次同步动过的**文件：别人早先留在那儿的老改动不归我们擦
+	const changed = copied.filter((rel) => fs.existsSync(path.join(target, rel)));
+	if (!changed.length) return null;
+	const upstream = git(target, ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"], 8000);
+	const ref = upstream && upstream.code === 0 ? upstream.stdout.trim() : "";
+	if (!ref) return { ok: false, note: "那份检出没有上游分支，自动更新要手动处理" };
+	// 先 fetch：本地那个 ref 可能还没见过最新的 push
+	git(target, ["fetch", "--quiet", ref], 45000);
+	const same = changed.filter((rel) => blobOf(target, rel) && blobOf(target, rel) === remoteBlobOf(target, ref, rel));
+	if (same.length !== changed.length) {
+		const diff = changed.filter((rel) => !same.includes(rel));
+		return {
+			ok: false,
+			note:
+				`那份检出有 ${changed.length} 个本地改动，内容**还没 push**（${diff.slice(0, 3).join("、")}${diff.length > 3 ? "…" : ""}）—— ` +
+				`先 push，再在那份检出里 git reset --hard ${ref}，自动更新才恢复`,
+		};
+	}
+	// 内容都在远端了 ⇒ 把 HEAD 快进过去（文件内容不变，工作区变干净）
+	const ff = git(target, ["merge", "--ff-only", "--quiet", ref], 30000);
+	if (!ff || ff.code !== 0) {
+		const why = ((ff && (ff.stderr || ff.stdout)) || "").split("\n")[0];
+		return {
+			ok: false,
+			note: `那份检出和 ${ref} 分叉了（本地有别的提交），快不过去：要更得先在那份检出里 git pull --rebase ${ref} —— ${why}`,
+		};
+	}
+	const head = git(target, ["rev-parse", "--short", "HEAD"], 8000);
+	return { ok: true, count: same.length, head: head ? head.stdout.trim() : "" };
+}
+
 (async () => {
 	const h = await health();
 	if (!h) {
@@ -123,4 +203,11 @@ function walk(rel, target, tally) {
 	console.log(`  更新 ${tally.copied.length} 个文件，${tally.same} 个本来就一样`);
 	for (const f of tally.copied.slice(0, 20)) console.log(`    ~ ${f}`);
 	if (tally.copied.length) console.log("  接着：node bin/pi-pet.cjs restart（换一扇窗才会重新加载 pet.js）");
+	// 把那份检出收干净（不然自动更新会以「有本地改动」为由拒绝）
+	const un = await unblockUpdates(target, tally.copied);
+	if (un && un.ok) {
+		console.log(`  那份检出已快进到 ${un.head}（${un.count} 个文件内容未变，工作区干净 → 自动更新不再被拦）`);
+	} else if (un && un.note) {
+		console.log(`  ⚠ ${un.note}`);
+	}
 })();

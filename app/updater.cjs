@@ -352,10 +352,19 @@ async function apply() {
 	const info = await detect();
 	if (info.mode === "git") {
 		if (await dirty(info.dir)) {
+			// ⚠️ 脏工作区绝大多数不是用户手改的，是 `npm run sync` 把开发那份推进来拓脏的
+			//   （更新器故意不碰脏工作区，见文件头）。所以提示里得说清**怎么处理**：
+			//   内容已经 push 过 ⇒ `git reset --hard <上游>` 就收干净（内容不会变）；
+			//   还没 push ⇒ 先 push（sync-running.cjs 现在会自动收，前提是内容已在远端）。
+			const up = await run("git", ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"], { cwd: info.dir, timeoutMs: 8000 });
+			const ref = up && up.code === 0 ? up.stdout.trim() : "";
+			const fix = ref
+				? `多半是 npm run sync 推进去的：若这些内容已经 push 过，在那份检出里 git reset --hard ${ref} 收干净即可（内容不变）`
+				: "多半是 npm run sync 推进去的：若这些内容已经 push 过，在那份检出里 git reset --hard 收干净即可（内容不变）";
 			return {
 				ok: false,
 				mode: "git",
-				note: "这个检出里有本地改动，先 commit 或 stash 了再更新（别让更新盖掉你的改动）",
+				note: `这个检出里有本地改动，先 commit 或 stash 了再更新（别让更新盖掉你的改动）。${fix}`,
 			};
 		}
 		const before = await shortSha(info.dir, "HEAD");

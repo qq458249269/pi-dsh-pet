@@ -821,7 +821,19 @@ check("装法认得出来（本仓库是 git 检出）", chk.update.mode === "gi
 check("/state 里也带得上一份更新信息", typeof (await get(PORT, "/state", token)).body.state.update === "object");
 
 check("更新只认 --ff-only（不要自动 merge）", /pull", "--ff-only/.test(updSrc));
-check("工作区脏就拒绝自动更（别冲掉用户的本地改动）", /dirty\(info\.dir\)[\s\S]{0,400}有本地改动/.test(updSrc));
+check("工作区脏就拒绝自动更（别冲掉用户的本地改动）", /dirty\(info\.dir\)[\s\S]{0,1200}有本地改动/.test(updSrc));
+// 同一个脏东西的维护版：提示里得说清“怎么处理”。脏的根子大多数不是用户手改的，
+// 而是 npm run sync 把开发那份推进去拓脏的（sync 把文件写进那个检出 → 更新器拒绝自动更）。
+check("脏工作区的提示说清处理方法（多半是 sync 推的）", /npm run sync[\s\S]{0,300}git reset --hard/.test(updSrc) && /git reset --hard \$\{ref\}/.test(updSrc));
+// 根因治本：sync 把内容推进去之后，若这些内容远端已经有了（= 已经 push 过），
+//   就把那份检出的 HEAD 快进到远端（文件内容一个字节不变，只是让 git 认它干净）。还没 push 就只提示。
+const syncSrc = readFileSync(join(ROOT, "scripts", "sync-running.cjs"), "utf8");
+// ⚠⚠⚠ 机制对了，不是“把文件 checkout 回来”：checkout 是从 **HEAD** 还原的，而此刻 HEAD 恰好是旧的那份 → 一 checkout 就把刚同步进来的新代码打回旧版。
+//   「内容不变 + 工作区干净」在 git 里只有一条路：把 HEAD 也快进到那份内容。
+check("sync 同步后把那份检出快进到远端（不是 checkout 把新代码打回去）", /async function unblockUpdates/.test(syncSrc) && /hash-object/.test(syncSrc) && /rev-parse", "--verify", "--quiet"/.test(syncSrc) && /"merge", "--ff-only", "--quiet", ref/.test(syncSrc) && !/"checkout", "--"/.test(syncSrc));
+check("快进失败（分叉）时给人话而不自己动手", /--rebase/.test(syncSrc) && /分叉了/.test(syncSrc));
+check("sync 只核对自己推过的那几个文件（别以名执行宽松的路径）", /changed = copied.filter/.test(syncSrc) && /same = changed.filter/.test(syncSrc));
+check("sync 内容还没 push 时给出恢复命令（而不是静默拒绝）", /还没 push/.test(syncSrc) && /git reset --hard \$\{ref\}/.test(syncSrc));
 check("git 模式认远端分支而不是写死 origin/main", /rev-parse", "--abbrev-ref", "--symbolic-full-name", "@\{u\}"/.test(updSrc));
 check("npm 非全局装只报告不代劳", /info\.global[\s\S]{0,600}只报告不代劳/.test(updSrc));
 check("自动检查有开关（PI_PET_NO_UPDATE / 间隔 / 延迟）", /PI_PET_NO_UPDATE/.test(updSrc) && /PI_PET_UPDATE_GAP_MS/.test(updSrc) && /PI_PET_UPDATE_DELAY_MS/.test(updSrc));
