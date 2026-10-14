@@ -364,6 +364,9 @@ var FRAME_WAIT_MS = 220;
    */
 var TIMING_DEFAULT = { minPlayMs: 7600, idleDwellMs: 11000 };
 
+  /** 睡觉动作原地循环多久（用户口径「睡动作播 15 秒」）。写 0 = 不额外加时。 */
+  var SLEEP_DEFAULT_MS = 15000;
+
   function readTiming(raw) {
     var t = raw && typeof raw === "object" ? raw : {};
     function num(key, def) {
@@ -374,6 +377,7 @@ var TIMING_DEFAULT = { minPlayMs: 7600, idleDwellMs: 11000 };
     return {
       minPlayMs: num("minPlayMs", TIMING_DEFAULT.minPlayMs),
 idleDwellMs: num("idleDwellMs", TIMING_DEFAULT.idleDwellMs),
+      sleepMs: num("sleepMs", SLEEP_DEFAULT_MS),
     };
   }
 
@@ -412,6 +416,9 @@ idleDwellMs: num("idleDwellMs", TIMING_DEFAULT.idleDwellMs),
   }
   function idleDwellMs() {
     return config && config.timing ? config.timing.idleDwellMs : TIMING_DEFAULT.idleDwellMs;
+  }
+  function sleepMs() {
+    return config && config.timing ? config.timing.sleepMs : SLEEP_DEFAULT_MS;
   }
 
   var CORNERS = ["top-left", "top-right", "bottom-left", "bottom-right"];
@@ -480,6 +487,32 @@ idleDwellMs: num("idleDwellMs", TIMING_DEFAULT.idleDwellMs),
       throw new Error("animations.moves structure invalid");
     }
     if (!Array.isArray(a.categories)) throw new Error("animations.categories missing");
+    // 分类归一化：weight / kind / group 都是**可选**的，写错/漏写都不该把宠物变空白，
+    // 也不能让 NaN 权重把抽签整条链带歪（config 是从磁盘/宿主来的，算输入边界）。
+    var KINDS = { eat: 1, play: 1, rest: 1, work: 1, think: 1, misc: 1 };
+    a.categories = a.categories.filter(function (c) { return c && typeof c === "object"; }).map(function (c) {
+      var w = Number(c.weight);
+      if (!isFinite(w) || w < 0) c.weight = 0;
+      if (!KINDS[c.kind]) c.kind = "misc";
+      // group: 数字或 [最少, 最多] → 归一成 [min, max]。**吃/玩没写就默认成组**
+      // （用户口径「吃和玩的动画成组播放」：漏写也不该退回成一段一段乱跳）；
+      // 别的分类没写 = 一段一段来。写错了（0 / 反了 / 不是数）就当没写。
+      var g = c.group, lo = NaN, hi = NaN;
+      if (Array.isArray(g)) { lo = Number(g[0]); hi = Number(g[1] === undefined ? g[0] : g[1]); }
+      else if (isFinite(Number(g))) { lo = hi = Number(g); }
+      if (!isFinite(lo) || !isFinite(hi) || lo < 1 || hi < lo) {
+        lo = hi = (c.kind === "eat" || c.kind === "play") ? 2 : 1;
+      }
+      c.group = [Math.round(lo), Math.round(hi)];
+      c.actions = Array.isArray(c.actions)
+        ? c.actions.filter(function (n) { return typeof n === "string" && n.trim() !== ""; })
+        : [];
+      return c;
+    });
+    // 睡觉名单：只留非空名字（素材在不在由 switchTo 兜底，跟别的动作一个待遇）
+    a.sleep = Array.isArray(a.sleep)
+      ? a.sleep.filter(function (n) { return typeof n === "string" && n.trim() !== ""; })
+      : [];
 
     // weights
     var w = raw.animationWeights;
@@ -540,6 +573,35 @@ return { pets: pets, animations: a, animationWeights: w, timing: readTiming(raw.
     return eligible[eligible.length - 1];
   }
 
+  /**
+   * 成组播放（吃/玩）：定下分类的那一步顺手用 planGroup 把这一组剩下的动作排进队列，
+   * pickNext 一段一段演完才重抽 —— 连着演完 N 段，中间不插待机也不换分类。
+   */
+
+  /** 睡觉动作？名单在 config.animations.sleep（见 assertClientConfig 的归一化）。 */
+  function isSleepAnim(name) {
+    var a = config && config.animations;
+    return !!(a && Array.isArray(a.sleep) && name && a.sleep.indexOf(name) >= 0);
+  }
+
+  /**
+   * 分类抽签之后排组：抽中带 group 的分类（吃/玩）时，把这一组剩下的动作排进 rest 队列。
+   * 队列里不连着重复同一段（pick 排除了刚排过的那条）。
+   */
+  function planGroup(cat, first, rest) {
+    var g = cat && Array.isArray(cat.group) ? cat.group : null;
+    if (!g || !cat.actions.length) return rest;
+    var n = randomBetween(g[0], g[1]) - 1;
+    var last = first;
+    for (var i = 0; i < n; i++) {
+      var next = pick(cat.actions, last);
+      if (next === last && cat.actions.length < 2) break;
+      rest.push(next);
+      last = next;
+    }
+    return rest;
+  }
+
   function rollKind(roll, w) {
     var topEnd = (w.idle + w.turn + w.move) / 100;
     if (roll < w.idle / 100) return "idle";
@@ -548,10 +610,11 @@ return { pets: pets, animations: a, animationWeights: w, timing: readTiming(raw.
     return "action";
   }
 
+  /** 抽一段随机动作。cat 一并带回去（调用方要按它排成组队列）。 */
   function pickCategoryAction(categories, idlePool, facing, current) {
     var cat = pickWeightedCategory(categories, facing);
-    if (!cat) return { id: "FALLBACK", name: pick(idlePool, current) };
-    return { id: cat.id, name: pick(cat.actions, current) };
+    if (!cat) return { id: "FALLBACK", kind: "misc", cat: null, name: pick(idlePool, current) };
+    return { id: cat.id, kind: cat.kind || "misc", cat: cat, name: pick(cat.actions, current) };
   }
 
   // ========================================================================
@@ -1245,7 +1308,8 @@ var halfW = this.size / 2;
     this.playedAt = 0;               // playing 开始播放的时刻（0 = 还没播过）
     this.queued = null;              // 被最小播放时长挡下来的切换请求 {anim, once}
     this.queuedTimer = null;
-    this.dwellTimer = null;          // 待机停留计时器
+    this.dwellTimer = null;          // 待机停留计时器（睡觉动作的循环计时也走它）
+    this.groupQueue = [];            // 成组播放排队中（吃/玩：一组演完才重抽）
     this.destroyed = false;
     this.asleep = false;             // 冻住（见 4.7）
     this.asleepNext = null;          // 冻住期间「该演哪一段」，醒来补上
@@ -2085,6 +2149,10 @@ inputRow.classList.add("show", "on");
         var old = self.frontIdx === 0 ? videoA : videoB;
         target.classList.add("is-front");
         old.classList.remove("is-front");
+// 旧的那条**彻底停下**：它身上还挂着上一段的 onended，放到自然结束会再触发一次
+        // handleEnded —— 链子凭空多走一格（待机/睡觉都被从中间砍掉），而且白白多解一份码。
+        // 往后它只是后台缓冲，下次 switchTo 会重新赋 src 并 play（见开头的 target.paused 判断）。
+        try { old.pause(); old.onended = null; } catch (e) { /* 停不下来也别卡换手 */ }
         self.frontIdx = self.frontIdx === 0 ? 1 : 0;
         self.pending = null;
 self.playing = next;   // 屏幕上真正在放的（判定「演到哪了」只看它）
@@ -2218,30 +2286,36 @@ var buffered = function () {
     // 也就是「一段待机呼吸刚结束就有 90% 概率跳去演随机动作」—— 屏幕上的宠物几乎
     // 没有真正停下来的时候，观感就是「待机时间太短」。这里让待机那一段原地续播
     // idleDwellMs 再往下走；期间用户一动（点/拖/状态帧）立刻收摊。
+    // ⚠️ 同一套计时器也接「睡觉动作循环 sleepMs」（playChain 传 ms 进来）。
+    //    skipVideo：换手还没提交时 front 还是上一段，别去碰它的 loop/play。
     this.canDwell = function (name) {
       if (self.currentOverrideAnim || dragState.active || self.dragging) return false;
       if (idleDwellMs() <= 0) return false;
       return config.animations.idle.indexOf(name) >= 0;
     };
 
-    this.startDwell = function (name) {
+    this.startDwell = function (name, ms, skipVideo) {
       if (self.destroyed) return;
       if (self.dwellTimer) clearTimeout(self.dwellTimer);
       self.anim = name;
       self.once = false; // 停留期间循环放
+      var hold = Number(ms);
+      if (!isFinite(hold) || hold <= 0) hold = idleDwellMs();
       // 直接让**当前这一条**视频继续循环，不换 src —— 换 src 会从第一帧重来，
       // 那又是一次「跳回去」。待机呼吸这类素材本来就是循环片，续播看不出接缝。
-      var front = self.frontIdx === 0 ? videoA : videoB;
-      try {
-        front.loop = true;
-        front.onended = null;
-        // 冻住时别偷跑：不然待机停留会把暂停的视频重新放起来（等于没睡）
-        if (!self.asleep) {
-          var p = front.play();
-          if (p && p.catch) p.catch(function () {});
+      if (!skipVideo) {
+        var front = self.frontIdx === 0 ? videoA : videoB;
+        try {
+          front.loop = true;
+          front.onended = null;
+          // 冻住时别偷跑：不然待机停留会把暂停的视频重新放起来（等于没睡）
+          if (!self.asleep) {
+            var p = front.play();
+            if (p && p.catch) p.catch(function () {});
+          }
+        } catch (e) {
+          /* 续播失败也别把链子卡住：下面的计时器照样接上 */
         }
-      } catch (e) {
-        /* 续播失败也别把链子卡住：下面的计时器照样接上 */
       }
       self.playedAt = Date.now();
       self.dwellTimer = setTimeout(function () {
@@ -2250,7 +2324,7 @@ var buffered = function () {
         self.once = true;
         self.seq++;
         self.pickNext();
-      }, idleDwellMs());
+      }, hold);
     };
 
     this.stopDwell = function () {
@@ -2282,9 +2356,17 @@ var buffered = function () {
     };
 
     // ---- Animation chain: pick next ----
+    //
+    // 成组播放（吃/玩）：定下分类的那一步已经用 planGroup 把这一组剩下的动作排进了
+    // self.groupQueue，这里**先把这一组演完**再重抽 —— 中间不插待机、不换分类。
+    // 不这么做的话「刚咬一口雪糕就去放风筝」，看着就是乱跳（用户口径：成组、要有连续性）。
     this.pickNext = function () {
       var anims = config.animations;
       var weights = config.animationWeights;
+      if (self.groupQueue.length) {
+        self.playChain(self.groupQueue.shift());
+        return;
+      }
       var roll = Math.random();
       var k = rollKind(roll, weights);
       var kind, next;
@@ -2302,6 +2384,7 @@ var buffered = function () {
           kind = act.id;
           next = act.name;
           self.anim = next;
+          planGroup(act.cat, next, self.groupQueue);
         } else {
           kind = "MOVE";
           next = "(move)";
@@ -2311,10 +2394,30 @@ var buffered = function () {
         kind = act2.id;
         next = act2.name;
         self.anim = next;
+        planGroup(act2.cat, next, self.groupQueue);
+      }
+      self.playChain(next);
+    };
+
+    /**
+     * 链子放一段动作。
+     * 睡觉动作（config.animations.sleep）**原地循环 sleepMs（默认 15s）**再接下一段 ——
+     * 用户口径「睡动作播时间长一些」：这些片子的变化本来就很小，放三秒就醒等于没睡。
+     * 其余动作放完由 handleEnded 接下一段。
+     */
+    this.playChain = function (name) {
+      if (!name) return;
+      self.anim = name;
+      self.seq++;
+      if (isSleepAnim(name) && sleepMs() > 0) {
+        self.once = false;              // 睡觉是「停在那儿」，循环放
+        self.switchTo(name, false);     // loop = true 由 switchTo 换手时设好
+        // 只借 startDwell 的计时器（skipVideo：换手还没提交，此刻 front 还是上一段）
+        self.startDwell(name, sleepMs(), true);
+        return;
       }
       self.once = true;
-      self.seq++;
-      self.switchTo(next, true);
+      self.switchTo(name, true);
     };
 
     var handleEnded = function () {
@@ -2729,6 +2832,7 @@ self.customPos = { rx: (rc.left + halfW) / W1, ry: (rc.top + halfH) / H1, w: W1,
     this.playOverride = function (animName, durationMs) {
       self.stopDwell(); // 状态帧来了：待机停留让位
       self.stopMove();
+      self.groupQueue.length = 0; // 状态帧按住期间不演别的，成组也就没必要续了
       if (self.overrideTimer) clearTimeout(self.overrideTimer);
       self.currentOverrideAnim = animName; // always update so re-entry picks latest state
       // Don't interrupt a click-response that's playing during override
@@ -2754,13 +2858,20 @@ self.customPos = { rx: (rc.left + halfW) / W1, ry: (rc.top + halfH) / H1, w: W1,
       }
     };
 
+    /** 收回状态帧：回到待机呼吸，之后由链子接着演随机动作。agent_idle 帧直接走这里。 */
+    this.resetToChain = resetToChain;
+
     function resetToChain() {
       if (self.overrideTimer) clearTimeout(self.overrideTimer);
       self.overrideTimer = null;
+      var had = self.currentOverrideAnim;
       self.currentOverrideAnim = null;
       self.overrideActive = null;
       self.clickFromOverride = false;
       self.stopMove();
+      // 手上本来就没有状态帧（agent_idle 顺路来的）→ 什么都不用做：宠物正演到一半的
+      // 动作不该因为「其实一直很闲」被砍回待机（连续性）。
+      if (!had) return;
       // Return to idle, then pickNext will fire on ended
       if (config.animations.idle.length) {
         self.anim = pick(config.animations.idle);
@@ -2853,25 +2964,39 @@ this.destroy = function () {
     "thinking": "深度思考碎碎念",
   };
 
-  /** Tool name → animation mapping */
+  /**
+   * 工具 → 工作动画（工作类动作，见 assets/config.jsonc 的 kind: work）。
+   * ⚠️ 认不出的工具**不换动画**（见 applyToolOverride）：思考/工作时宠物就该一直
+   *   干着手上的活，中途插一段别的看着就是「分心」。
+   */
   var TOOL_ANIM_MAP = {
     "bash": "写代码",
     "code": "写代码",
-    "grep": "搜寻中",    // fallback
     "read": "写代码",
     "edit": "写代码",
     "write": "写代码",
-    "find": "搜寻中",
+    "grep": "轻快记录",
+    "find": "轻快记录",
+    "fd": "轻快记录",
+    "glob": "轻快记录",
   };
 
-  /** How long overrides stay before returning to normal chain */
-  var OVERRIDE_DURATION_MS = 5000;
+  /**
+   * 状态帧（思考 / 干活）按住多久。
+   * ⚠️ 这是**兜底**上限，不是「每 5s 重播一次」：宿主对同一个状态只发一帧（去重），
+   *   所以这里的时长得盖住一整轮思考 —— 不然 agent 还在想，宠物已经自己跳去演别的了
+   *   （用户口径「思考和工作时不要播放其他动画」）。
+   *   真正收摊靠宿主那条 agent_idle 帧（见 ws.onmessage）；150s > 宿主的
+   *   STALE_BUSY_MS（120s，bus.cjs 会把卡住的会话判死并补发 idle），所以正常永远
+   *   是 idle 帧先到，这个数只在宿主没动静时兼底。
+   */
+  var OVERRIDE_DURATION_MS = 150000;
 
   /** Menu labels: animation name → what the user sees in the right-click menu */
   var STATE_LABEL = {
     "深度思考碎碎念": "思考中",
     "写代码": "写代码中",
-    "搜寻中": "搜索中",
+    "轻快记录": "搜索中",
   };
 
   /** Human-readable current state (for the right-click menu) */
@@ -3199,15 +3324,14 @@ if (powerSave) goSleep();
       pets.forEach(function (pet) {
         pet.playOverride(anim, OVERRIDE_DURATION_MS);
       });
-    } else {
-      // Unknown tool: pick a random action
-      if (config && config.animations.categories.length) {
-        var act = pickCategoryAction(config.animations.categories, config.animations.idle, "left", "");
-        pets.forEach(function (pet) {
-          pet.playOverride(act.name, OVERRIDE_DURATION_MS);
-        });
-      }
+      return;
     }
+    // 认不出的工具：**不换动画**。以前这里是「随机抽一个分类动作」—— agent 还在干活，
+    // 宠物却跳去放风筝/吃东西，工作状态就漏了（用户口径：工作时只演工作）。
+    // 手上已经有状态动画就让它接着演（顺便把兼底时限按回去）；连状态都没有就什么都不做。
+    pets.forEach(function (pet) {
+      if (pet.currentOverrideAnim) pet.playOverride(pet.currentOverrideAnim, OVERRIDE_DURATION_MS);
+    });
   }
 
   // ========================================================================
@@ -3270,7 +3394,8 @@ if (obj.type === "bubble") {
       if (anim) {
         applyEventOverride(anim);
 } else if (msg === "agent_idle") {
-        // pets return to chain naturally via override timeout
+        // 明确回到空闲：立刻收回状态帧（状态帧按住到 agent_idle 为止，见 OVERRIDE_DURATION_MS）
+        pets.forEach(function (pet) { pet.resetToChain(); });
         startChatter(); // 刚忙完，重新开始计「无聊」（不然可能马上就冒一句）
       } else if (msg === "add_pet") {
         addPet();

@@ -83,7 +83,8 @@ function stateText(state, { task = "", tool = "", detail = "", summary = "" } = 
  * pet.js 的 TOOL_ANIM_MAP 决定，宿主不重复那份映射。分组与 pet.js 保持一致：
  *   写代码组：bash / read / edit / write / code
  *   搜寻组  ：grep / find / fd / glob
- *   其余    ：各自成一组（换工具 = 换状态 = 允许重播）
+ *   其余    ：各自成一组（换工具 = 换状态）。⚠️ 窗侧对**认不出的工具不换动画**
+ *   （干活时宠物一直干着手上的活），所以这些分组只影响气泡文案与去重，不影响画面。
  */
 const TOOL_GROUP = {
 	bash: "code",

@@ -371,7 +371,9 @@ npm run gen:anim -- my-anim # 只生成某一个预设
 
 ### 加一段新动画
 
-编辑 `scripts/gen-anim.cjs` 的 `PRESETS`，加一条就行 —— 没有别的注册步骤：
+编辑 `scripts/gen-anim.cjs` 的 `PRESETS`，加一条就行 —— 素材生成这边没有别的注册步骤；
+**但生成完必须在 `assets/config.jsonc` 里给它归一类**，否则它不会被播（见下面
+「🚫 硬规则：加了动画必须分类」）：
 
 ```js
 my-anim: {
@@ -436,15 +438,18 @@ FFMPEG_PATH=/path/to/ffmpeg node scripts/mp4-to-webm.cjs …    # ffmpeg 不在 
 node scripts/mp4-to-webm.cjs "D:\Users\yxh\Downloads\生成图片.mp4" 夜晚躺在床上睡觉
 #    → assets/thumb/夜晚躺在床上睡觉.webm（640×360，等比居中，两侧透明）
 
-# 2. 更新校验清单（sha256）并全量自检
+# 2. **分类**：把名字挂进 assets/config.jsonc 的某一类（吃/玩/休息/工作/思考），
+#    否则宠物不会播它 —— 见下面「🚫 硬规则：加了动画必须分类」
+
+# 3. 更新校验清单（sha256）并全量自检（自检里就包含「每个素材都有归属」）
 node scripts/check-assets.cjs --write && npm test
 
-# 3. 图库预览图（320×180）跟着换，否则 README 里摆的还是变形那张
+# 4. 图库预览图（320×180）跟着换，否则 README 里摆的还是变形那张
 node_modules/ffmpeg-static/ffmpeg.exe -y -i assets/thumb/夜晚躺在床上睡觉.webm \
   -vf "fps=12,scale=320:180:flags=lanczos,split[a][b];[a]palettegen=max_colors=128[p];[b][p]paletteuse=dither=bayer" \
   -loop 0 assets/preview/ye-wan-tang-chuang-shang-shui-jiao.gif
 
-# 4. 推给在跑的那份 + 换窗
+# 5. 推给在跑的那份 + 换窗
 npm run sync && node bin/pi-pet.cjs restart
 ```
 
@@ -502,11 +507,32 @@ alpha 通道时才下结论，否则明说「量不了」。**验收得用 Chrom
 | `animations.turn[]` | 走到边缘掉头 |
 | `animations.clicks[]` | 单击随机回一个（5 个一循环） |
 | `animations.hover[]` | 鼠标悬停 |
-| `animations.categories[].actions[]` | 按 `weight` 抽小动作（`小动作`/`玩耍`/`吃什么`/`时节`/`文字`） |
+| `animations.categories[].actions[]` | 按 `weight` 抽小动作，按 `kind` 分语义：`eat` 吃 / `play` 玩 / `rest` 休息 / `work` 工作 / `think` 思考 / `misc` 其它 |
+| `animations.categories[].group` | 成组播放：抽中这一类就连着演 N 段（`[最少, 最多]`）。吃/玩默认 `[2,3]`/`[2,4]`，其余默认 1 |
+| `animations.sleep[]` | 睡觉动作：原地循环 `timing.sleepMs`（默认 15s）再演下一段 |
+| `animations.parked[]` | **当前不播**但已分类的素材（例：漫游关闭时那几段走路片）。想开就挪去 `moves.actions` |
 
-所以加一段素材 = **两步**：`mp4-to-webm.cjs` 落文件 → 在 config 里把名字挂到上面某一栏。
-挂好后还要做两件收尾（否则 CI 会红）：`node scripts/check-assets.cjs --write` 更新
-`assets/thumb.sha256` 清单，以及在下面「动画预览」图库里补一行。
+所以加一段素材 = **三步**：`mp4-to-webm.cjs` 落文件 → 在 config 里把名字挂到上面某一栏 →
+`npm test` 确认没红。
+
+### 🚫 硬规则：加了动画**必须分类**
+
+`assets/thumb/` 里每一个 `.webm` 都必须在 `assets/config.jsonc` 里有**且仅有一处**归属
+（`idle` / `turn` / `drag` / `clicks` / `moves.actions` / 某个 `categories[].actions` /
+`parked`；`hover` 与 `sleep` 是**复用**，不算第二次分类）。`npm test` 逐条盯：
+
+- 「每个素材都有归属」—— 落了文件没进 config（宠物躺在仓库里当一张图）
+- 「每个动作只归一处」—— 同一段挂了两个分类（抽签逻辑说不清它演到哪算完）
+- 「每个动作名都有素材」—— config 里的名字打错（窗会放空白，只能靠看门狗接回待机）
+- 「工具/思考动画名都有素材且在干活/思考分类里」—— 状态帧播到不存在的素材
+  （以前就有一个不存在的「搜寻中」，干活时宠物直接空白）
+- 「分类 weight 合计 = 100 − idle − turn − move」「每个动作只归一处」—— 抽签权重不能漂
+
+新素材走一遍：`gen-anim.cjs` 落 `assets/thumb/` → 选一类挂进 `categories`
+（`kind` 决定语义：`eat` 吃 / `play` 玩 / `rest` 休息 / `work` 工作 / `think` 思考 /
+`misc` 其它；吃/玩会**成组连播**，睡觉类记得同时加进 `sleep`）→ `node scripts/check-assets.cjs --write`
+更新 sha256 清单 → 下面图库补一行 → `npm test`。
+
 
 ### 动画预览（图库 = 调用说明）
 

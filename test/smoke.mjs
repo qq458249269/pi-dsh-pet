@@ -238,6 +238,78 @@ console.log("\n待机动画节奏（不切一半 / 待机别太短）…");
 check("timing 段不再有 idleSleepMs（空闲不自动冻）", !/idleSleepMs/.test(cfg) && !/idleSleepMs/.test(petJs.replace(/^.*原 timing\.idleSleepMs.*$/m, "")));
 }
 
+// ------------------------------------------------ 动画分类（吃/玩/休息/工作/思考）
+// 用户口径五条：① 动作按语义分类；② 思考和工作时**不播别的**；③ 吃和玩成组播放；
+// ④ 注意连续性和逻辑性；⑤ 没切换就循环播（睡觉动作原地循环 15s）。
+// 这一段查两样东西：config 里那份分类表本身站不站得住（真解析，不靠正则猜），
+// 以及 pet.js 的播放逻辑还接没接上这几条。
+console.log("\n动画分类（吃/玩成组 · 思考工作独占 · 睡觉 15s）…");
+{
+	const petJs = readFileSync(join(ROOT, "pi", "assets", "pet.js"), "utf8");
+	const rawCfg = readFileSync(join(ROOT, "assets", "config.jsonc"), "utf8");
+	const cfg = JSON.parse(
+		rawCfg.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:])\/\/.*$/gm, "$1"),
+	);
+	const cats = cfg.animations.categories;
+	const byKind = Object.fromEntries(cats.map((c) => [c.kind, c]));
+	const assets = new Set(
+		readdirSync(join(ROOT, "assets", "thumb"))
+			.filter((f) => f.endsWith(".webm"))
+			.map((f) => f.slice(0, -".webm".length)),
+	);
+	const actions = cats.flatMap((c) => c.actions);
+
+	// ① 五个语义分类都在，且吃/玩两个有成组播放
+	check("分类表有吃/玩/休息/工作/思考五类", ["eat", "play", "rest", "work", "think"].every((k) => byKind[k]));
+	check("吃和玩成组播放（group ≥ 2）", byKind.eat.group[1] >= 2 && byKind.play.group[1] >= 2);
+	check("分类 weight 合计 = 100 − idle − turn − move", cats.reduce((s, c) => s + c.weight, 0) === 100 - cfg.animationWeights.idle - cfg.animationWeights.turn - cfg.animationWeights.move, String(cats.reduce((s, c) => s + c.weight, 0)));
+	check("每个动作名都有素材（打错名字 = 宠物变空白）", actions.every((n) => assets.has(n)), actions.filter((n) => !assets.has(n)).join(", "));
+	check("动作不重名（同一段只属于一个分类）", new Set(actions).size === actions.length);
+
+	// ⑤ 睡觉动作：名单独立成段，且都是真实素材 + 都归在休息类
+	check("睡觉名单 15s（timing.sleepMs）", cfg.timing.sleepMs === 15000);
+	check("睡觉动作都在休息分类里", cfg.animations.sleep.every((n) => byKind.rest.actions.includes(n)), cfg.animations.sleep.join(", "));
+
+	// ① 加了素材就必须分类：93 个 webm 每个都得有归属（池子 / 分类 / 停用），
+	//    且只能归一处。这一条就是「加动画后必须分类」的 CI 铆钉。
+	const claim = new Map(); // 名字 → 归到哪个桶
+	const dup = [];
+	const claimAll = (bucket, names) =>
+		names.forEach((n) => {
+			if (claim.has(n)) dup.push(`${n}（${claim.get(n)} 与 ${bucket}）`);
+			else claim.set(n, bucket);
+		});
+	claimAll("idle", cfg.animations.idle);
+	claimAll("turn", cfg.animations.turn);
+	claimAll("drag", cfg.animations.drag);
+	claimAll("clicks", cfg.animations.clicks);
+	claimAll("moves", cfg.animations.moves.actions.map((a) => a.name));
+	claimAll("parked", cfg.animations.parked || []);
+	cats.forEach((c) => claimAll(c.id, c.actions));
+	const orphan = [...assets].filter((n) => !claim.has(n));
+	check("每个素材都有归属（加了动画就得分类）", orphan.length === 0, orphan.join(", "));
+	check("每个动作只归一处", dup.length === 0, dup.join(", "));
+	// hover 是**复用**已有动作（悬停就播某个点击回应），不算第二次分类
+	check("hover 里的动作都已有归属", (cfg.animations.hover || []).every((n) => claim.has(n)), (cfg.animations.hover || []).filter((n) => !claim.has(n)).join(", "));
+
+	// 状态动画（工具/思考）也一样：有素材、且已经在某一类里（曾经有过不存在的「搜寻中」）
+	const mapBlock = (name) => new RegExp(`var ${name} = \\{[\\s\\S]*?\\};`).exec(petJs)?.[0] || "";
+	const valuesOf = (block) => [...block.matchAll(/:\s*"([^"]+)"/g)].map((m) => m[1]);
+	const toolAnims = valuesOf(mapBlock("TOOL_ANIM_MAP"));
+	check("工具动画名都有素材（写错名字 = 干活时宠物放空白）", toolAnims.every((n) => assets.has(n)), toolAnims.filter((n) => !assets.has(n)).join(", "));
+	check("工具动画都在干活/思考分类里", toolAnims.every((n) => byKind.work.actions.includes(n) || byKind.think.actions.includes(n)), toolAnims.join(", "));
+	const thinkAnims = valuesOf(mapBlock("EVENT_ANIM_MAP"));
+	check("思考帧动画名都有素材且已分类", thinkAnims.every((n) => assets.has(n) && claim.has(n)), thinkAnims.join(", "));
+
+	// ②③④ 播放逻辑：成组队列 → 演完才重抽；睡觉原地循环；状态帧独占
+	check("吃/玩成组：planGroup 排队列 + pickNext 先演完队列", /function planGroup\(/.test(petJs) && /planGroup\(act2\.cat, next, self\.groupQueue\)/.test(petJs) && /if \(self\.groupQueue\.length\) \{\s*self\.playChain\(self\.groupQueue\.shift\(\)\)/.test(petJs));
+	check("睡觉动作原地循环 sleepMs 再接下一段", /isSleepAnim\(name\) && sleepMs\(\) > 0/.test(petJs) && /self\.startDwell\(name, sleepMs\(\), true\)/.test(petJs));
+	check("think/work 是 work 分类里的动作（状态动画与分类一致）", ["深度思考碎碎念"].every((n) => byKind.think.actions.includes(n)) && ["写代码", "轻快记录"].every((n) => byKind.work.actions.includes(n)));
+	check("工作/思考按住到 agent_idle 为止（不再 5s 就自己跑掉）", /OVERRIDE_DURATION_MS = 150000/.test(petJs));
+	check("认不出的工具不插随机动作", /认不出的工具/.test(petJs) && !/Unknown tool: pick a random action/.test(petJs));
+	check("agent_idle 立刻收回状态帧", /msg === "agent_idle"\) \{\s*\/\/[^\n]*\n\s*pets\.forEach\(function \(pet\) \{ pet\.resetToChain\(\); \}\)/.test(petJs));
+}
+
 // ------------------------------------------------ 聊天 & 碎碎念（§9.30）
 // 两条需求合在这里：双击能聊天（输入框 → 回一句）、闲着没人理时自己碎碎念。
 // 回归点有三个：① 碎碎念在 agent 忙/有人打字时必须闭嘴（不然盖掉状态气泡）；
