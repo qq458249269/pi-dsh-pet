@@ -28,7 +28,6 @@ const path = require("node:path");
 const { spawn } = require("node:child_process");
 
 const { ELECTRON_SCRIPT, PATHS, PKG_ROOT, log } = require("./paths.cjs");
-const { pidAlive } = require("./single.cjs");
 
 /** 窗连上以后多久算「连上了」：首次拉 Electron 可能要十几秒。 */
 const WINDOW_GRACE_MS = Number(process.env.PI_PET_WINDOW_GRACE_MS || 20_000);
@@ -36,6 +35,25 @@ const WINDOW_GRACE_MS = Number(process.env.PI_PET_WINDOW_GRACE_MS || 20_000);
 const WINDOW_LOST_MS = Number(process.env.PI_PET_WINDOW_LOST_MS || 20_000);
 /** 重启节流：刚起就崩别疯狂重拉。 */
 const RELAUNCH_MIN_GAP_MS = Number(process.env.PI_PET_RELAUNCH_GAP_MS || 15_000);
+
+/**
+ * 自愈判定（纯函数：数进来、布尔出去 —— `test/fused.mjs` 直接钉这台判据）。
+ *
+ * 窗在不在**以有没有 WS 客户端为准，不看 pid**：pid 活着、渲染进程崩了的「僵窗」
+ * 照样一个客户端也连不上，而且比 pid 真死掉更隐蔽 —— 实测僵 13 分钟，宿主一句日志
+ * 都没有，直到手动 `restart-window` 才恢复。所以这里只认两个事实：
+ *   · 连上过又丢了 → 丢线超过 `lostMs` 就算没了；
+ *   · **从没连上过**（seenAt = 0）→ 从拉起那刻起算，超过 `graceMs` 才算
+ *     （冷启动 Electron 要十几秒，别自己打断自己）。
+ * `gapMs` 是节流：真连不上时每 max(graceMs, gapMs) 才换一扇，不会变成拉起洪水。
+ */
+function windowDecision({ connected, now, startedAt, seenAt, launchedAt, graceMs, lostMs, gapMs }) {
+	if (connected) return false;
+	if (now - startedAt <= graceMs) return false; // 刚拉起来：先给宽限期
+	if (now - launchedAt <= gapMs) return false; // 刚换过：别连着换
+	const quietMs = seenAt ? now - seenAt : now - startedAt;
+	return quietMs > (seenAt ? lostMs : graceMs);
+}
 
 /** 是不是跑在打包好的 exe 里（electron 运行时且不是 `electron .` 直跑）。 */
 function isPackaged() {
@@ -311,19 +329,20 @@ function createWindowManager(ctx) {
 	}
 
 	/**
-	 * 自愈判定。窗在不在**以有没有 WS 客户端为准**（比 pid 可靠）。
-	 * 三个条件同时满足才重拉：没客户端 + 超过宽限期 + 超过丢失判定期 + 距上次拉起够久。
+	 * 自愈判定：窗在不在只看客户端（判据在 `windowDecision`，理由见那里）。
 	 */
 	function needsRelaunch(connected) {
-		if (connected) {
-			lastSeenAt = Date.now();
-			return false;
-		}
-		const sinceSeen = lastSeenAt === 0 ? Infinity : Date.now() - lastSeenAt;
-		const childGone = !child || child.exitCode !== null || !pidAlive(pid);
-		const pastGrace = Date.now() - startedAt > WINDOW_GRACE_MS;
-		const pastLost = sinceSeen > WINDOW_LOST_MS;
-		return childGone && pastGrace && pastLost && Date.now() - lastLaunchAt > RELAUNCH_MIN_GAP_MS;
+		if (connected) lastSeenAt = Date.now();
+		return windowDecision({
+			connected,
+			now: Date.now(),
+			startedAt,
+			seenAt: lastSeenAt,
+			launchedAt: lastLaunchAt,
+			graceMs: WINDOW_GRACE_MS,
+			lostMs: WINDOW_LOST_MS,
+			gapMs: RELAUNCH_MIN_GAP_MS,
+		});
 	}
 
 	return {
@@ -339,4 +358,4 @@ function createWindowManager(ctx) {
 	};
 }
 
-module.exports = { createWindowManager, resolveElectronBin, launchCwd, WINDOW_GRACE_MS, WINDOW_LOST_MS, RELAUNCH_MIN_GAP_MS };
+module.exports = { createWindowManager, resolveElectronBin, launchCwd, windowDecision, WINDOW_GRACE_MS, WINDOW_LOST_MS, RELAUNCH_MIN_GAP_MS };

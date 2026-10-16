@@ -568,8 +568,11 @@ error: `未知 action：${action}`,
 						writeState(state);
 					}
 				} else {
-					log("窗没了（keepAlive）→ 重新拉起");
-					win.launch(c.size || cfg.size, state.port);
+					log("窗没了 / 僵了（keepAlive）→ 换一扇窗");
+					// ⚠️ 必须走 `restart`（先 taskkill 再拉），不能 `launch`：僵窗的 pid 还活着，
+					//   直接再拉一只的话，新旧两扇窗抢同一个 electron profile，新的那扇连页面都
+					//   加载不出来（现场就是「窗客户端一直是 0」那个现场）。
+					win.restart(c.size || cfg.size, state.port, () => readCtrl().desired !== false);
 				}
 			} else if (state.windowState !== "starting" && state.windowState !== "connected") {
 				state.windowState = "no-window";

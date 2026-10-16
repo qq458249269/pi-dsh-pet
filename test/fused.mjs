@@ -232,6 +232,23 @@ const petMain = readFileSync(path.join(ROOT, "pi", "assets", "pet-electron.cjs")
 check("独立窗进程仍由 argv 触发（--pi-pet-window 那条路保留）", /process\.argv\.includes\("--pi-pet-window"\)/.test(petMain));
 check("同进程下 window-all-closed 不退（服务要留着）", /else \{\s*\/\/ ⚠️ Electron 的默认行为[\s\S]{0,300}window-all-closed[\s\S]{0,120}e\.preventDefault\(\)/.test(petMain));
 
+// 自愈判据（双进程那条路的「僵窗」）：pid 活着、渲染进程崩了的窗一个客户端也连不上，
+// 宿主必须自己换一扇（实测僵 13 分钟没人管，直到手动 restart-window）
+{
+	const { windowDecision } = req(path.join(ROOT, "app", "window.cjs"));
+	const GRACE = 20_000;
+	const LOST = 20_000;
+	const GAP = 15_000;
+	const dec = (o) => windowDecision({ startedAt: 0, seenAt: 0, launchedAt: 0, graceMs: GRACE, lostMs: LOST, gapMs: GAP, ...o });
+	check("窗从没连上、过了宽限期 → 该换（pid 活不活着都不问）", dec({ connected: false, now: GRACE + 1 }) === true);
+	check("刚拉起来（宽限期内）→ 不换", dec({ connected: false, now: GRACE - 1 }) === false);
+	check("刚换过（节流期内）→ 不换", dec({ connected: false, now: GRACE + 1, launchedAt: GRACE }) === false);
+	check("有客户端 → 不换", dec({ connected: true, now: GRACE + 600_000 }) === false);
+	check("连上过又丢了、丢线超时长 → 该换", dec({ connected: false, seenAt: GRACE, now: GRACE + LOST + 1 }) === true);
+	check("连上过又丢了、还没超丢线时长 → 不换", dec({ connected: false, seenAt: GRACE + 5_000, now: GRACE + 5_000 + LOST - 1 }) === false);
+	check("判据里不许再看 pid（僵窗的 pid 恰恰是活的）", !/pidAlive/.test(readFileSync(path.join(ROOT, "app", "window.cjs"), "utf8")));
+}
+
 Module._load = origLoad;
 console.log(`\n${failures.length === 0 ? "全部通过" : "有失败"}：${pass} 通过 / ${failures.length} 失败`);
 if (failures.length) {
