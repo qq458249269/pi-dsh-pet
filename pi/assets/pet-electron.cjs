@@ -11,7 +11,7 @@
  *   ② 全屏意味着它跟**每一扇**窗都相交，Windows 于是没法把任何后台窗口判成
  *      「被遮住了」，那些窗口就一直满速画，没人帮它们降频。
  *   所以：窗 = 宠物的小舞台（pet.js 那边按窗口尺寸算漫游/气泡夹取，不变），
- *   想把宠物放到屏幕别处就**搬窗**（拖宠物 = 搬窗，见 pet:window-move）。
+ *   想把宠物放到屏幕别处就**搬窗**（拖宠物 = 搬窗，见 pet:window-drag-start）。
  *
  * 鼠标命中：窗里大部分是空的，但**只有宠物那块能被点到**（别处的点击要落到下面的窗口上）。
  *   Windows/Linux 用 setShape() 把整窗的命中区裁成宠物的包围盒，渲染进程每次动一动
@@ -766,100 +766,82 @@ try {
     applyBounds(w, h);
   });
 
-  // 拖宠物 = 搬窗。dx/dy 是**屏幕坐标**里「从本次按下那下」算起的位移（不是每帧增量）：
-  // 增量的话窗被夹在屏幕边时，宠物会越拖越落后于光标，松手才「啪」地弹回来。
-  // ⚠️⚠️ 必须是**屏幕**位移（渲染进程拿 e.screenX/e.screenY 算），不能是 clientX/Y：
-  //   clientX/Y 是**窗内**坐标 = 光标屏幕位置 - 窗原点，而窗正跟着拖拽一起动 ——
-  //   每读到的 clientX 已经把「上一帧窗走过的距离」扣掉了。当成「从按下那下算起的绝对
-  //   位移」用，每次就只补一半：匀速拖 300px 窗只走 150px（跟手比 0.50，还一格一格抖）。
-  //   实测（真光标直线拖 300px，窗落点 5ms 采样）见 DESIGN.md §9.20。
-  let windowDrag = null;
-  ipcMain.on("pet:window-move", (_event, m = {}) => {
-    if (win.isDestroyed()) return;
-    const dx = num(m.dx, 0);
-    const dy = num(m.dy, 0);
-    if (!dx && !dy) return;
-if (!windowDrag) {
-// getPosition() 在窗没映射时会给 [NaN, NaN]（见上面 stagePos 的注释）→ 用自己记的。
-      // ⚠️ currentPos() 返回的是 stagePos **本身**，要挂 w/h 就得先拷一份，别把
-      //   两个用途（窗落点 / 本次拖拽的尺寸缓存）搅在同一个对象上。
-      const cs0 = contentSize();
-      windowDrag = Object.assign({}, currentPos(), { w: cs0.w, h: cs0.h });
-    }
-// 宠物在窗里的位置（渲染进程量好的）：用它选显示器（宠物跟着窗走，得按宠物落哪块屏算）
-    const il = num(m.left, 0);
-    const it = num(m.top, 0);
-    const want = { x: windowDrag.x + dx, y: windowDrag.y + dy };
-    const d = screen.getDisplayNearestPoint({ x: want.x + il + 20, y: want.y + it + 20 });
-    const w = d.workArea;
-    // ⚠️ 夹的是**整扇窗**进这块屏的工作区，不是「宠物别出屏」（早先夹的是后者：窗可以
-    //   挂到屏外 il-6，宠物就能贴屏幕边，代价是窗有一截在屏外 —— 而气泡是按**窗**夹的
-    //   （clampBubble 不知道屏幕），于是窗挂出去多少、气泡就在屏外看不见多少：
-    //   实测窗顶挂出 120px 时，110px 的气泡有 90px 在屏外（§9.22）。
-    //   代价要知道：宠物离屏边至少「它在窗里贴着的那条边」那么多（左右 200、顶上 150），
-    //   拖到边上就顶住了 —— 这是「留白是宠物的禁区」这个选择的必然结果（§9.23）。
-const cs = { w: num(windowDrag.w, 0), h: num(windowDrag.h, 0) };
-    if (!cs.w || !cs.h) return; // 窗的尺寸都量不到就别搬：算出来的落点不可信
-    const loX = w.x;
-    const hiX = w.x + w.width - cs.w;
-    const loY = w.y;
-    const hiY = w.y + w.height - cs.h;
-    // 窗比屏还宽/高时区间会翻过来（lo > hi）：这时靠上/靠左摆，别让 min/max 选到反的一头
-    const pos = {
-      x: Math.round(loX > hiX ? loX : Math.min(Math.max(want.x, loX), hiX)),
-      y: Math.round(loY > hiY ? loY : Math.min(Math.max(want.y, loY), hiY)),
-    };
-    // 已经被夹在屏幕边上时 want 还在变、pos 却不动：这种「搬不动」的 move 全部丢掉。
-    // 不丢也不会错，但是白白的 SetWindowPos + DWM 重合成，而且在边上会跟系统的
-    // 窗口动画抢位置 —— 看上去就是拖着宠物在屏幕边上「哆嗦」。
-    if (pos.x === stagePos.x && pos.y === stagePos.y) return;
-win.setPosition(pos.x, pos.y);
-    rememberPos(pos);
-    nudgeRepaint(); // 搬完家重画一次（见 nudgeRepaint）
-  });
-
-  // 松手：记下窗的落点，下次启动还在这儿
-  ipcMain.on("pet:window-drag-end", () => {
-    if (!windowDrag || win.isDestroyed()) {
-      windowDrag = null;
-      return;
-    }
-    windowDrag = null;
-    writeStagePos(home, currentPos());
-  });
-
-  // ---- 屏幕工作区：推给渲染进程一份（§9.25）----
+  // ---- 拖宠物 = 搬整扇窗（位移由**主进程按系统光标**算）----
   //
-  // 拖宠物时「能不能贴到屏幕边」是两个自由度的事：屏幕位置 = 窗的位置 + 宠物在窗里的位置。
-  // 主进程只管第一个（把整扇窗夹在屏内，§9.23），第二个自由度主进程看不见 ——
-  // 于是窗一夹住，宠物就停在离屏边「它在窗里贴着的那条边」那么远（头顶 150、底下 60、
-  // 左右 32），也就是「拖到边上还差一大块、贴不上」。
-  // 修法在渲染进程（pet.js 的 slideTo）：拿这份工作区算出窗被夹住的**差额**，
-  // 把差额挪到宠物在窗里的位置上。**不新增每帧 IPC**，只在这里推一次列表。
-  function pushDisplays() {
-    if (win.isDestroyed() || !webContentsSend) return;
-    let list = [];
-    try {
-      list = screen.getAllDisplays().map((d) => ({
-        bounds: { x: d.bounds.x, y: d.bounds.y, width: d.bounds.width, height: d.bounds.height },
-        workArea: { x: d.workArea.x, y: d.workArea.y, width: d.workArea.width, height: d.workArea.height },
-      }));
-    } catch {
-      return; // 量不到就保持上一次那份
+  // 渲染进程只在「按下阈值到了」和「松手」时报两声，中间**一帧 IPC 都不发**：
+  // 主进程每 16ms 读一次 `screen.getCursorScreenPoint()`（系统光标坐标，全局的，
+  // 跟窗的位置、跟渲染进程收不收得到事件都无关），
+  // 窗左上 = 按下时的窗左上 + （现在的光标 − 按下时的光标）。
+  //
+  // ⚠️⚠️ 别改回「渲染进程按 pointermove 报位移」（老做法，三个坑都实测过）：
+  //   ① 甩得快时光标冲出窗、冲出屏幕，事件断了 —— 松手那一下收不到 = **放不下来**；
+  //   ② 窗被夹在「当前那块屏的工作区」里 ⇒ **跨屏拖不过去**（碰到屏边就顶住）；
+  //   ③ pointermove 跟着鼠标轮询率走（125~1000Hz），还得自己合帧。
+  // 光标是绝对的：甩多快都不丢、跨屏随便过、也不吃渲染进程的帧率。
+  const DRAG_TICK_MS = 16; // 跟一帧一个量级（旧做法是 rAF 合帧）：再快只是多耗 DWM 合成预算
+  let dragTimer = null;
+  let dragBase = null; // { x, y, cx, cy, w, h } 按下那一刻的窗左上 + 光标 + 窗尺寸
+
+  /** 所有显示器**工作区的并集**：跨屏拖拽必须按它夹（按单块屏夹就过不去）。 */
+  function unionWorkArea() {
+    let u = null;
+    for (const d of screen.getAllDisplays()) {
+      const r = d.workArea;
+      u = u
+        ? {
+            x1: Math.min(u.x1, r.x),
+            y1: Math.min(u.y1, r.y),
+            x2: Math.max(u.x2, r.x + r.width),
+            y2: Math.max(u.y2, r.y + r.height),
+          }
+        : { x1: r.x, y1: r.y, x2: r.x + r.width, y2: r.y + r.height };
     }
-    webContentsSend("pet:displays", list);
+    return u;
   }
-  for (const ev of ["display-added", "display-removed", "display-metrics-changed"]) {
-    try {
-      screen.on(ev, pushDisplays);
-    } catch {
-      /* 平台/版本没这个事件：忽略 */
-    }
+  /** 整扇窗别跑出屏幕（并集口径）：投影/副屏拔掉之后也不会丢在看不见的地方。
+   *  ⚠️ 窗尺寸用拖拽开始时缓存的（每 tick 都问 getContentBounds 就是每秒 60 次白问）。 */
+  function keepOnScreen(pos) {
+    const u = unionWorkArea();
+    const w = dragBase.w || STAGE.w;
+    const h = dragBase.h || STAGE.h;
+    if (!u) return { x: Math.round(pos.x), y: Math.round(pos.y) };
+    return {
+      x: Math.round(Math.min(Math.max(pos.x, u.x1), Math.max(u.x1, u.x2 - w))),
+      y: Math.round(Math.min(Math.max(pos.y, u.y1), Math.max(u.y1, u.y2 - h))),
+    };
   }
-  // 渲染进程一订阅就要一份（did-finish-load 那次推送早于 pet.js 的 init，会漏掉）
-  ipcMain.on("pet:displays-get", (e) => {
-    if (win && !win.isDestroyed() && e.sender === win.webContents) pushDisplays();
+  function dragTick() {
+    if (!dragBase || win.isDestroyed()) return stopDrag();
+    const c = screen.getCursorScreenPoint();
+    const pos = keepOnScreen({ x: dragBase.x + c.x - dragBase.cx, y: dragBase.y + c.y - dragBase.cy });
+    // 位置没变就别搬：白白的 SetWindowPos + 一次 DWM 重合成
+    if (pos.x === stagePos.x && pos.y === stagePos.y) return;
+    win.setPosition(pos.x, pos.y);
+    rememberPos(pos);
+    nudgeRepaint();
+  }
+  function stopDrag() {
+    if (dragTimer) clearInterval(dragTimer);
+    dragTimer = null;
+    dragBase = null;
+  }
+  ipcMain.on("pet:window-drag-start", () => {
+    if (win.isDestroyed()) return;
+    stopDrag();
+    const c = screen.getCursorScreenPoint();
+    const p = currentPos();
+    const cs = contentSize();
+    dragBase = { x: p.x, y: p.y, cx: c.x, cy: c.y, w: cs.w, h: cs.h };
+    dragTimer = setInterval(dragTick, DRAG_TICK_MS);
   });
+  // 松手：停表 + 记下窗的落点，下次启动还在这儿
+  ipcMain.on("pet:window-drag-end", () => {
+    if (!dragTimer) return;
+    dragTick(); // 最后一帧必须落地：16ms 的采样间障里还有一小段行程，不然松手会差几像素
+    stopDrag();
+    if (!win.isDestroyed()) writeStagePos(home, currentPos());
+  });
+  win.on("closed", stopDrag);
 
   // 加载完 5s 还没拿到包围盒 = 渲染进程没起来（配置拉失败、pet.js 报错…）。
   // 这时候宁可让整窗不可命中，也别让它当一整块矩形拦在屏幕最上层：
@@ -867,7 +849,6 @@ win.setPosition(pos.x, pos.y);
   //（整块透明窗把下面所有窗口的点击全吃掉，必须把鼠标移出那块 1×1 才恢复）。
   // 「整窗不收鼠标事件」只有 setIgnoreMouseEvents(true) 这一条路。
   win.webContents.once("did-finish-load", () => {
-    pushDisplays(); // 渲染进程一上来就要有工作区（贴边靠它，§9.25）
     setTimeout(() => {
       if (gotRegion || shapeBroken || win.isDestroyed()) return;
       console.error("[pi-dsh-pet] 5s 内没收到命中区（渲染进程没起来？）→ 整窗穿透，别挡屏幕");

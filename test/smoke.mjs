@@ -943,21 +943,37 @@ check("do-update 不会用空串盖掉刚查到的版本/提交", /if \(!s\[k\]\
 console.log("\n舞台窗（只包住宠物，不是全屏）…");
 check("主进程不再按屏幕大小开窗", !/workAreaSize/.test(elecSrc));
 check("窗落点落在工作区里（默认右下角 + 记住上次）", /workArea/.test(elecSrc) && /stage\.json/.test(elecSrc));
-check("拖宠物 = 搬窗（位移从按下那下算起）", /queueWinMove\(dx, dy\)/.test(petSrc) && /windowDrag\.x \+ dx/.test(elecSrc));
-// ⚠️ 位移必须是**屏幕**坐标：clientX/Y 是窗内坐标，而窗正跟着拖拽一起动，
-//   拿它算「从按下那下算起的位移」= 光标位移 - 窗已走的位移 → 每次只跟上一半
-//   （实测跟手比 0.50，窗还一格一格抖。见 DESIGN.md §9.20）。
-check("搬窗位移用屏幕坐标（不是窗内 clientX —— 那样只跟一半）", /var p = screenPoint\(e\)[\s\S]{0,200}var dx = p\.x - dragState\.psx/.test(petSrc) && /queueWinMove\(dx, dy/.test(petSrc) && !/queueWinMove\(e\.clientX/.test(petSrc));
+// 拖 = **整扇窗跟着系统光标走**：位移归主进程（它每 16ms 读一次 screen.getCursorScreenPoint()），
+//   渲染进程只在拖起来那一下报一声、松手报一声 —— 一帧位移 IPC 都没有。
+//   ⚠️ 别改回「pointermove 报位移」：甩得快时光标冲出窗/屏，事件断了就收不到松手
+//   （症状：放不下来）；跨屏也会被单块屏的工作区夹住。
+check("拖宠物 = 搬整扇窗（渲染进程只报开始/松手，不发位移）",
+	/startWindowDrag: \(\) => ipcRenderer\.send\("pet:window-drag-start"\)/.test(preloadSrc) &&
+	/var startWinDrag = \(window\.__petElectron__ && window\.__petElectron__\.startWindowDrag\) \|\| null/.test(petSrc) &&
+	!/queueWinMove|settleWinMove|slideTo\(/.test(petSrc) &&
+	!/pet:window-move|moveWindow/.test(petSrc + preloadSrc + elecSrc));
+check("主进程按**系统光标**搬窗（跟事件、跟窗内坐标都无关）",
+	/screen\.getCursorScreenPoint\(\)/.test(elecSrc) &&
+	/dragBase = \{ x: p\.x, y: p\.y, cx: c\.x, cy: c\.y, w: cs\.w, h: cs\.h \}/.test(elecSrc) &&
+	/dragBase\.x \+ c\.x - dragBase\.cx/.test(elecSrc));
+check("阈值到了才开表（普通点击不启动拖拽表）", /if \(startWinDrag\) startWinDrag\(\)/.test(petSrc) && /Math\.hypot\(dx, dy\) < DRAG_THRESHOLD/.test(petSrc));
+check("跨屏能拖过去：夹的是所有显示器工作区的**并集**（按单块屏夹就顶住）",
+	/function unionWorkArea\(/.test(elecSrc) && /screen\.getAllDisplays\(\)/.test(elecSrc) &&
+	/Math\.max\(u\.x1, u\.x2 - w\)/.test(elecSrc) && !/getDisplayNearestPoint\(\{ x: want\.x/.test(elecSrc));
+check("松手有四条兜底（pointerup/pointercancel/blur/lostpointercapture 都通向同一条路）",
+	/function releaseDrag\(\)/.test(petSrc) &&
+	/window\.addEventListener\("pointerup", releaseDrag\)/.test(petSrc) &&
+	/hit\.addEventListener\("lostpointercapture", releaseDrag\)/.test(petSrc) &&
+	/window\.addEventListener\("blur", releaseDrag\)/.test(petSrc));
+check("拖拽期间宠物在窗里**不动**（动画落点、气泡位置都不漂）",
+	!/inset: \{ left: r\.left/.test(petSrc) && !/d\.win0/.test(petSrc) && /if \(dragState\.active\) return;/.test(petSrc));
 check("按下时记下屏幕坐标基准点（psx/psy）", /psx: ps\.x[\s\S]{0,40}psy: ps\.y/.test(petSrc) && /function screenPoint\(e\)/.test(petSrc));
 check("screenX/Y 拿不到时退回 client（别把拖拽弄死）", /Number\.isFinite\(sx\) && Number\.isFinite\(sy\)/.test(petSrc) && /return \{ x: Number\(e\.clientX\) \|\| 0, y: Number\(e\.clientY\) \|\| 0 \}/.test(petSrc));
-check("主进程/preload 都写明 dx/dy 是屏幕位移", /屏幕坐标/.test(elecSrc) && /屏幕坐标/.test(preloadSrc) && /屏幕坐标/.test(petSrc));
-// ⚠️ 夹的是**整扇窗**进屏，不是「宠物别出屏」（§9.23）：早先夹的是后者（窗挂到屏外
-//   il-6，宠物能贴屏幕边），而气泡只按**窗**夹 ⇒ 窗挂出去多少就有多少气泡在屏外看不见。
-check("搬窗时把**整扇窗**夹在屏幕工作区内（窗挂出去多少就有多少气泡看不见）", /const loX = w\.x;[\s\S]{0,200}const hiX = w\.x \+ w\.width - cs\.w/.test(elecSrc) && !/w\.x - il \+ 6/.test(elecSrc) && !/w\.y - it \+ 6/.test(elecSrc));
-check("搬窗的窗尺寸按拖拽开始时缓存一次（别每帧问 getContentBounds）", /windowDrag = Object\.assign\(\{\}, currentPos\(\), \{ w: cs0\.w, h: cs0\.h \}\)/.test(elecSrc));
+check("preload / 主进程都写明位移归主进程按系统光标算", /startWindowDrag/.test(preloadSrc) && /getCursorScreenPoint/.test(preloadSrc) && /getCursorScreenPoint/.test(elecSrc));
+check("拖拽开始时把窗尺寸缓存下来（别每 tick 问 getContentBounds）", /w: cs\.w, h: cs\.h \}/.test(elecSrc) && !/function keepOnScreen[\s\S]{0,200}contentSize\(\)/.test(elecSrc));
 check("搬完记住落点", /pet:window-drag-end/.test(elecSrc) && /endWinDrag\(\)/.test(petSrc));
 check("渲染进程报舞台尺寸（宠物 + 气泡）", /reportWindowSize\(\)/.test(petSrc) && /pet:window-size/.test(elecSrc));
-check("preload 三个新口都齐", /setWindowSize/.test(preloadSrc) && /moveWindow/.test(preloadSrc) && /endWindowDrag/.test(preloadSrc));
+check("preload 三个新口都齐", /setWindowSize/.test(preloadSrc) && /startWindowDrag/.test(preloadSrc) && /endWindowDrag/.test(preloadSrc));
 // 症状2（用户口径）：「移除 padding 和强制尺寸吧，对显示没有任何改善，较宽的动画还是显示不全」。
 //   实测：左右留白抬到 200（§9.22）后窗 622→862，动画一点没变大 —— size=900 时窗 1300 宽，
 //   贴右上角后动画右边离窗边只剩 marginX=24px、左边空 376px，看着就是被窗边切了一角。
@@ -1014,7 +1030,7 @@ check("头顶放不下时**封高**而不是撤掉封高盖到头上（§9.38）
 // ⚠️⚠️ 纵向夹取**只有一份**（§9.38）：站位恢复 / 拖拽 / 量完可见框重夹 都走 stageKeepIn。
 //   §9.28 那版把拖拽那两处改成 0 起夹、站位却还是 150 ⇒ 拖到屏幕上边松手记住 ry≈0，
 //   下次启动按 150 一夹，宠物凭空下移一截（用户口径「位置并非放下的准确位置」）。
-check("纵向夹取只有一份（三处都走 stageKeepIn，§9.38）", /var loY = STAGE_PAD_TOP/.test(petSrc) && /function stageKeepIn[\s\S]{0,1200}var loY = STAGE_PAD_TOP/.test(petSrc) && /stageKeepIn\(inkLeft - inkOff \+ safe\.off, top, safe\.w, halfH \* 2\)/.test(petSrc) && /stageKeepIn\(d\.base\.x \+ safe\.off \+ \(want\.x - at\.x\), d\.base\.y \+ \(want\.y - at\.y\), safe\.w, halfH \* 2\)/.test(petSrc) && /stageKeepIn\(cp\.rx \* window\.innerWidth - inkHalf/.test(petSrc) && !/Math\.max\(d\.base\.y \+ \(want\.y - at\.y\), 0\)/.test(petSrc) && !/Math\.max\(top, 0\), maxTop/.test(petSrc));
+check("纵向夹取只有一份（两处都走 stageKeepIn，§9.38）", /var loY = STAGE_PAD_TOP/.test(petSrc) && /function stageKeepIn[\s\S]{0,1200}var loY = STAGE_PAD_TOP/.test(petSrc) && /stageKeepIn\(inkLeft - inkOff \+ safe\.off, top, safe\.w, halfH \* 2\)/.test(petSrc) && /stageKeepIn\(cp\.rx \* window\.innerWidth - inkHalf/.test(petSrc) && !/Math\.max\(top, 0\), maxTop/.test(petSrc));
 check("行数按空间收（空间不够就少几行，而不是把话抽掉）", /Math\.min\(6, Math\.floor\(\(room - 14\) \/ BUBBLE_LINE_H\)\)/.test(petSrc) && /var BUBBLE_LINE_H = 18\.2/.test(petSrc) && /var BUBBLE_MIN_H = 30/.test(petSrc));
 // 「说点什么」输入框是气泡栈里**独立的最后一行**（不再塞在某条消息里，§9.34）：
 //   塞在消息里的话，每来一条新消息就把框顶来顶去，封高时还得给它单独留 44px。
@@ -1077,17 +1093,9 @@ check("横向站位贴边（不许再留常数 STAGE_PAD_X，那截会砍掉漫�
 // 漫游行程 = max(maxDist + 2×margin) − 2×留白，窗宽再加上它：窗太窄时 planMove 直接
 //   return null（动画根本不播），这就是「动画在左右被限制住」。
 check("窗宽按漫游行程给足（maxDist 走得到，动画不播不了）", /function roamRoom\(sidePad\)/.test(petSrc) && /maxDist = Math\.max\(maxDist, md\)/.test(petSrc) && /margin = Math\.max\(margin, mg\)/.test(petSrc) && /Math\.ceil\(maxDist \+ 2 \* margin - 2 \* pad\)/.test(petSrc) && /var w = maxW \+ sidePad \* 2 \+ roamRoom\(sidePad\)/.test(petSrc));
-// 贴边的第二个自由度：窗被屏幕边夹住时，差额原样加到宠物在窗内的偏移上（不新增每帧 IPC）
-check("贴边差额走宠物在窗内的偏移（slideTo，不靠每帧 IPC）", /function slideTo\(/.test(petSrc) && /var want = \{ x: d\.win0\.x \+ dx, y: d\.win0\.y \+ dy \}/.test(petSrc) && /clampBubbles\(\);[\s\S]{0,120}pushHitRegion\(\)/.test(petSrc) && /function workAreaNear\(/.test(petSrc));
-check("主进程把工作区推给渲染进程（贴边滑移要知道屏边在哪）", /function pushDisplays\(/.test(elecSrc) && /ipcMain\.on\("pet:displays-get"/.test(elecSrc) && /screen\.getAllDisplays\(\)/.test(elecSrc) && /onDisplays: \(cb\)/.test(readFileSync(join(ROOT, "pi", "assets", "preload.cjs"), "utf8")) && /onDisplays\(function \(list\) \{ setDisplays\(list\); \}\)/.test(petSrc));
-// 换屏/改分辨率也要重推：不然多屏拔掉一块之后还按老屏边滑（会滑到屏外）
-check("显示器变化就重推工作区（added / removed / metrics-changed 都要）", /for \(const ev of \["display-added", "display-removed", "display-metrics-changed"\]\)/.test(elecSrc) && /screen\.on\(ev, pushDisplays\)/.test(elecSrc));
-// ⚠️ init() 得排在 reportWindowSize() 之后：did-finish-load 那次推送早于配置加载完，
-//   没这一手订阅的话 onDisplays 一个工作区都收不到，贴边滑移整段不触发（实测：拖不动）。
-check("订阅工作区排在报尺寸之后（否则收不到 did-finish-load 那次）", /reportWindowSize\(\);[\s\S]{0,300}onDisplays\(function \(list\)/.test(petSrc));
-// win0 = 屏幕坐标 − 窗内坐标。写成 `ps.x − (clientX − rect.left)` 就等于「假设光标按在
-//   容器正中」：探针按在命中框中心（比容器中心偏 10px）时，左边就差 10px、贴边停在 302。
-check("拖拽基准 win0 = 屏幕坐标减窗内坐标（别拿容器偏移推算）", /win0: \{ x: Math\.round\(ps\.x - e\.clientX\), y: Math\.round\(ps\.y - e\.clientY\) \}/.test(petSrc));
+// 贴边的那层「窗内滑移」（slideTo）整体拿掉了：拖拽期间宠物在窗里**一点都不动**，
+//   位置固定 ⇒ 动画落点、气泡位置都不会跟着漂。代价：窗被屏幕边夹住时宠物贴不到最边上。
+check("拖拽期间窗内不动（slideTo 已删，不留半个自由度）", !/slideTo|workAreaNear|displayList/.test(petSrc));
 // 窗比「宠物 + 两侧留白」还窄时区间会翻过来（多开时窗按最大的那只算）：
 //   这时取中间值，不然照样贴边、同样没头顶。
 check("窗太窄时留白区间取中间（不翻车成贴边）", /if \(hiX < loX\) loX = hiX = Math\.max\(0, \(W - inkW\) \/ 2\)/.test(petSrc) && /if \(hiY < loY\) loY = hiY = Math\.max\(0, \(H - stageH\) \/ 2\)/.test(petSrc));
@@ -1162,25 +1170,20 @@ check("resize 必重报命中区（force：布局变了形状不能留在老地�
 check("主进程窗一变就把形状重裁一遍（记着上一次的形状）", /win\.on\("resize",[\s\S]{0,120}resyncShape\(\)/.test(elecSrc) && /function resyncShape\(\)/.test(elecSrc) && /lastShape = list/.test(elecSrc));
 check("重裁不会被去重吃掉（shapeKey 清掉，下一次照裁）", /function resyncShape\(\)[\s\S]{0,300}shapeKey = ""/.test(elecSrc));
 
-// ------------------------------------------------ 拖不许抖、不许有阻力
-// 症状：拖宠物时「像被拽着走」（明显阻力）+ 抖。
-// 病根：pointermove 的频率是**鼠标轮询率**（125~1000Hz），每一次都 ipc → setPosition
-// → 一次 SetWindowPos + 一次 DWM 重合成。窗追不上光标就是阻力，补帧参差就是抖。
-// 修法：渲染进程用 rAF **一帧最多搬一次**（只留最新位置），松手时把最后一帧落地；
-// 主进程把「已经被屏幕边夹住、其实没动」的 move 丢掉。
-console.log("\n拖拽不许抖 / 不许有阻力…");
-check("搬窗走 rAF 合帧（不是每个 pointermove 都搬）", /function queueWinMove[\s\S]{0,320}requestAnimationFrame\(flushWinMove\)/.test(petSrc));
-check("合帧只留最新位置（旧的丢掉，不会排队追）", /movePending = \{ dx: dx, dy: dy \}[\s\S]{0,200}if \(!moveRaf\) moveRaf/.test(petSrc));
-check("位移仍然从按下那下算起（合帧不累积误差）", /var p = screenPoint\(e\)[\s\S]{0,900}var dx = p\.x - dragState\.psx[\s\S]{0,1400}queueWinMove\(dx, dy\)/.test(petSrc));
-// ⚠️⚠️ 窗内位移（slideTo）也必须合帧（§9.38）：pointermove 跟着鼠标轮询率走（125~1000Hz），
-//   贴边时每一帧都要写样式 + 夹气泡（强制同步布局）⇒ 渲染进程被拖死 = 拖到边框发抖。
-check("窗内位移也合帧（slideTo 不在 pointermove 里立即跑）", /function flushWinMove\(\)[\s\S]{0,400}slideTo\(m\.dx, m\.dy\)/.test(petSrc) && !/pointermove[\s\S]{0,1200}\n\s*slideTo\(dx, dy\)/.test(petSrc));
-// ⚠️⚠️ 松手那一帧不能丢：settleWinMove（→ slideTo）必须在 dragState.active=false **之前**
-check("松手先落地最后一帧，再清 dragState.active", /var wasDragging = dragState\.dragging;[\s\S]{0,700}settleWinMove\(\);[\s\S]{0,200}dragState\.active = false/.test(petSrc));
+// ------------------------------------------------ 拖不许拖丢、不许拖不过屏
+// 症状：① 甩得快时松手放不下来（事件断在窗外）；② 跨屏拖不过去（被单块屏夹住）。
+// 病根：位移是从**渲染进程**逐事件报的，光标一出窗事件就断；夹取又是按「当前那块屏」。
+// 修法：位移改由主进程按**系统光标**算（全局坐标，跟事件无关，也不吃鼠标轮询率），
+//   夹取改成所有显示器工作区的**并集**；松手在渲染进程补四条兜底。
+console.log("\n拖拽不许拖丢 / 跨屏能过…");
+check("拖拽位移归主进程（渲染进程一个位移 IPC 都不发）", !/moveWindow|"pet:window-move"/.test(petSrc) && /setInterval\(dragTick, DRAG_TICK_MS\)/.test(elecSrc));
+check("采样跟一帧一个量级（不是每 pointermove 一次）", /DRAG_TICK_MS = 16/.test(elecSrc));
+check("主进程丢掉「其实没动」的搬窗", /pos\.x === stagePos\.x && pos\.y === stagePos\.y\) return/.test(elecSrc));
+// ⚠️⚠️ 松手那一帧不能丢：采样间隔里还有一小段行程，停表前得再 tick 一次。
+check("松手先补一次 tick，再停表记落点", /dragTick\(\); \/\/ 最后一帧必须落地[\s\S]{0,200}stopDrag\(\);[\s\S]{0,200}writeStagePos\(home, currentPos\(\)\)/.test(elecSrc));
 // ⚠️⚠️ 拖拽期间不许别人再夹位置（换动画 commit / 量完可见框都会调 refitInk）：
 //   两边都写 container.style 就是各夹各的 = 一格一格哆嗦 + 落点被中途改写。
-check("refitInk 拖拽期间让位（不跟 slideTo 抢 container.style）", /this\.refitInk = function \(\) \{\s*\n\s*if \(dragState\.active\) return;/.test(petSrc));
-check("松手时把最后一帧落地", /settleWinMove\(\)[\s\S]{0,120}endWinDrag\(\)/.test(petSrc));
+check("refitInk 拖拽期间让位（不跟拖拽抢 container.style）", /this\.refitInk = function \(\) \{\s*\n\s*if \(dragState\.active\) return;/.test(petSrc));
 check("主进程丢掉「其实没动」的搬窗", /pos\.x === stagePos\.x && pos\.y === stagePos\.y\) return/.test(elecSrc));
 
 // ------------------------------------------------ 窗不许塌成一条缝（32x39 残骸窗）
@@ -1192,7 +1195,7 @@ check("主进程丢掉「其实没动」的搬窗", /pos\.x === stagePos\.x && p
 // 摆完当场量一次，没摆成要看得见。
 console.log("\n窗不许塌成残骸（NaN 落点 / 静默 setBounds）…");
 check("落点自己记一份，不全信 getPosition()", /let stagePos = \{ x: Math\.round\(start\.x\), y: Math\.round\(start\.y\) \}/.test(elecSrc) && /function currentPos\(\)[\s\S]{0,400}return \{ x: stagePos\.x, y: stagePos\.y \}/.test(elecSrc) && /function rememberPos\(pos\)[\s\S]{0,300}Number\.isFinite\(x\)/.test(elecSrc));
-check("搬窗/记落点都不再直接用 getPosition()", !/win\.getPosition\(\)\[0\]/.test(elecSrc) && /windowDrag = Object\.assign\(\{\}, currentPos\(\)/.test(elecSrc) && /writeStagePos\(home, currentPos\(\)\)/.test(elecSrc));
+check("搬窗/记落点都不再直接用 getPosition()", !/win\.getPosition\(\)\[0\]/.test(elecSrc) && /dragBase = \{ x: p\.x, y: p\.y/.test(elecSrc) && /writeStagePos\(home, currentPos\(\)\)/.test(elecSrc));
 check("喂给 setBounds 的坐标都过有限性检查", /function clampToDisplay[\s\S]{0,400}Number\.isFinite/.test(elecSrc) && /function applyBounds[\s\S]{0,700}Number\.isFinite\(bounds\.x\)/.test(elecSrc));
 check("摆完当场核对，没摆成就打日志", /窗没摆成（要 \$\{width\}x\$\{height\}/.test(elecSrc));
 check("move / resize 事件同步落点（resize 还要把形状重裁一遍）", /win\.on\("move", \(_e, b\) => rememberPos\(b\)\)/.test(elecSrc) && /win\.on\("resize", \(_e, b\) => \{[\s\S]{0,80}rememberPos\(b\);[\s\S]{0,80}resyncShape\(\);/.test(elecSrc));

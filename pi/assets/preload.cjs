@@ -5,10 +5,9 @@
  *   setPassthrough  鼠标是否在命中框上（**仅在老 Electron（无 setShape）时生效**）
  *   setHitRegion    把整窗的命中区裁成宠物的包围盒（正常路径，见主进程注释）
  *   setWindowSize   舞台窗要多大（渲染进程知道配置里最大的宠物 + 气泡要多少地方）
- *   moveWindow      搬整扇窗（拖宠物 = 搬窗，见文件头「别改回全屏」）
+ *   startWindowDrag 拖起来了：主进程开始按系统光标搬整扇窗（见文件头「别改回全屏」）
  *   endWindowDrag   松手：让主进程记住窗的落点
- *   onDisplays      各显示器的工作区（贴边靠它，§9.25）
- *   openMenu        右键菜单（菜单项的动作走宿主控制面，主进程负责弹）
+
 *   say / onAskSay  手动输入气泡：主进程叫出输入框 → 渲染进程提交 → 主进程调宿主
  *   dismissSession  点掉一条「已完成」的会话气泡（v1.4）→ 主进程调宿主 /control dismiss-bubble
  *   savePosition    拖拽落点记忆（→ 宿主 /control set-position → home/positions.json）
@@ -28,36 +27,13 @@ contextBridge.exposeInMainWorld("__petElectron__", {
    * "bottom" = 往下长（老行为）。宠物在屏幕上的位置两种都不变。
    */
   setWindowSize: (w, h) => ipcRenderer.send("pet:window-size", { w: Number(w) || 0, h: Number(h) || 0 }),
-  /** 搬窗：dx/dy 是**屏幕坐标**里「从本次按下那下」算起的位移（设备无关像素，
-   *  与 getPosition/setPosition 同一套单位）；inset 是宠物在窗里的位置（left/top/width/height），
-   *  主进程拿它把宠物夹在屏幕工作区里 —— 传增量的话窗被夹住时宠物会越拖越落后于光标。
-   *  ⚠️ 必须是**屏幕**位移，不能是 clientX/Y 那种窗内位移：窗正跟着拖拽一起动，
-   *    窗内坐标每帧都已经把「上一帧窗走过的距离」扣掉了，当成绝对位移用就只跟一半
-   *    （实测跟手比 0.50，见 DESIGN.md §9.20）。 */
-  moveWindow: (dx, dy, inset) => ipcRenderer.send("pet:window-move", {
-    dx: Number(dx) || 0,
-    dy: Number(dy) || 0,
-    left: Number(inset && inset.left) || 0,
-    top: Number(inset && inset.top) || 0,
-    width: Number(inset && inset.width) || 0,
-    height: Number(inset && inset.height) || 0,
-  }),
+  /** 拖起来了：告诉主进程「开始搬窗」。
+   *  位移由**主进程**按 `screen.getCursorScreenPoint()` 自己算，渲染进程一个位移都不发 ——
+   *  免得甩得快时光标冲出窗、事件断了就收不到松手那一下（症状：放不下来）/ 被屏边夹住。 */
+  startWindowDrag: () => ipcRenderer.send("pet:window-drag-start"),
   /** 松手（拖完）：主进程记住窗的落点，下次启动还在这儿 */
   endWindowDrag: () => ipcRenderer.send("pet:window-drag-end"),
-  /**
-   * 主进程 → 渲染进程：各显示器的 bounds / workArea（§9.25）。
-   * 拖到屏幕边时靠它算出「窗被夹住了多少」，渲染进程把那份差额挪到宠物在窗里的位置上 ——
-   * 不然宠物会停在离屏边「它在窗里贴着的那条边」那么远，贴不上边。
-   * 只在显示器变化时发（量变才发），拖拽时零开销。
-   * ⚠️ 订阅时**立刻要一份**（pet:displays-get）：did-finish-load 那次推送发生在
-   *   pet.js 的 init **之前**（init 在等 /config.jsonc），光靠推送会漏掉开头这一份 ——
-   *   实测就是这个坑：窗量得出来，可工作区列表一直是空的，贴边滑移全程不触发。
-   */
-  onDisplays: (cb) => {
-    ipcRenderer.on("pet:displays", (_e, list) => cb(Array.isArray(list) ? list : []));
-    ipcRenderer.send("pet:displays-get");
-  },
-  /** 弹右键菜单；info 里的 state/pets 由渲染进程提供（主进程只管菜单本身） */
+
   openMenu: (info) => ipcRenderer.send("pet:menu", info || {}),
   /** 手动说话：交给主进程 → 宿主 /control say → 全窗都看得到 */
   say: (text) => ipcRenderer.send("pet:say-submit", String(text == null ? "" : text)),

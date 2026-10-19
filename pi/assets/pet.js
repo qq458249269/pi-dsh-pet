@@ -733,67 +733,6 @@ var CHAT_MAX = 3;
     return Math.max(0, Math.ceil(maxDist + 2 * margin - 2 * pad));
   }
 
-  /**
-   * 显示器工作区（渲染进程自己的一份，§9.25）。
-   *
-   * 为什么渲染进程也得有一份：拖宠物时「能不能贴到屏幕边」是**两个自由度**的事 ——
-   *   屏幕位置 = 窗的位置 + 宠物在窗里的位置。
-   * 主进程只管第一个（它把整扇窗夹在屏内，§9.23），第二个自由度以前是**死的** ——
-   * 拖拽全程宠物在窗里一动不动。于是窗一被屏幕边夹住，宠物就永远差
-   * 「它在窗里贴着的那条边」那么远：头顶 150、底下 60、左右 32 —— 那「一大块距离」，
-   * 也就是「拖到边上贴不上」。
-   * 修法：主进程把各显示器的工作区推过来（pet:displays，量变时才发），
-   * 渲染进程拿它算出窗被夹住的那份**差额**，把差额挪到宠物在窗里的位置上（见 slideTo）。
-   * 每帧**不新增任何 IPC**，而宠物照旧贴着光标、贴到边时正好贴住。
-   * 拿不到（老主进程 / 没发过来）就退回老行为：窗夹住、宠物停在原地。
-   */
-  var displayList = [];
-  function setDisplays(list) {
-    displayList = (Array.isArray(list) ? list : [])
-      .filter(function (d) {
-        return d && d.workArea && isFinite(Number(d.workArea.x)) && isFinite(Number(d.workArea.width));
-      })
-      .map(function (d) {
-        return { bounds: d.bounds || d.workArea, work: d.workArea };
-      });
-  }
-  /** 等价于主进程的 screen.getDisplayNearestPoint({x,y})：先找含着该点的屏，否则找中心最近的。 */
-  function workAreaNear(x, y) {
-    if (!displayList.length) return null;
-    var px = Number(x) || 0;
-    var py = Number(y) || 0;
-    var best = null;
-    var bestD = Infinity;
-    for (var i = 0; i < displayList.length; i++) {
-      var d = displayList[i];
-      var b = d.bounds || d.work;
-      if (px >= b.x && px < b.x + b.width && py >= b.y && py < b.y + b.height) return d.work;
-      var cx = b.x + b.width / 2;
-      var cy = b.y + b.height / 2;
-      var dd = (px - cx) * (px - cx) + (py - cy) * (py - cy);
-      if (dd < bestD) {
-        bestD = dd;
-        best = d.work;
-      }
-    }
-    return best;
-  }
-  /**
-   * 窗的位置夹进这块工作区：**整扇窗**在屏内（§9.23 的口径，和主进程同一套数 ——
-   * 两边算法不一样的话，窗和宠物就会各夹各的，贴边时差出一截）。
-   * 窗比屏还宽/高时区间会翻过来，这时靠上/靠左摆。
-   */
-  function clampWinToScreen(want, winW, winH, wa) {
-    if (!wa) return { x: Math.round(want.x), y: Math.round(want.y) };
-    var loX = wa.x;
-    var hiX = wa.x + wa.width - winW;
-    var loY = wa.y;
-    var hiY = wa.y + wa.height - winH;
-    return {
-      x: Math.round(loX > hiX ? loX : Math.min(Math.max(want.x, loX), hiX)),
-      y: Math.round(loY > hiY ? loY : Math.min(Math.max(want.y, loY), hiY)),
-    };
-  }
   /** 气泡**定宽**（§9.34）：宽度不再跟文案走 → 折行稳定 → 位置不动、不会自己乱跳。
    *  BUBBLE_W_MAX 是上限（再宽就横跨半个屏，不像「宠物说话」），BUBBLE_W_MIN 防窄窗里夹成一条。 */
   var BUBBLE_W_MAX = 340;
@@ -841,9 +780,9 @@ function topOffsetOf(cfg) {
      * ⚠️ 横向量的是**可见框**宽（§9.27 的 inkW），纵向量的是**舞台**高（stageH）：
      *   两者不是一回事 —— 舞台左右各有 144px 透明边，按舞台宽算就永远贴不上屏边。
      *   返回值也是**可见框**左边（调用方自己减掉 inkOff 才是容器左边）。
-     * ⚠️⚠️ 三个地方**必须**都走这一份（§9.38）：applyPosition（站位/位置记忆恢复）、
-     *   slideTo（拖拽）、clampPos（量完可见框的重夹 + 浏览器里挪容器）。
-     *   漏一个就是「松手时在那儿、下次启动不在那儿」—— §9.28 那一版就是漏了拖拽那两处。
+     * ⚠️⚠️ 两个地方**必须**都走这一份（§9.38）：applyPosition（站位/位置记忆恢复）、
+     *   clampPos（量完可见框的重夹 + 浏览器里挪容器）。
+     *   漏一个就是「松手时在那儿、下次启动不在那儿」—— §9.28 那一版就是漏了一处。
      */
 function stageKeepIn(left, top, inkW, stageH) {
     var W = window.innerWidth;
@@ -1117,12 +1056,14 @@ var api = window.__petElectron__;
 
   /**
    * Electron 里的「拖宠物」和「挪容器」是两回事：
-   *   窗只包住宠物（见 pet-electron.cjs 文件头），所以拖 = 搬窗（moveWin 有值）。
-   *   浏览器里没有窗可搬，就退回「在视口里挪容器」（moveWin 为 null）。
-   * 两个口都在就优先搬窗：漫游/站位已经在窗内完成了，不搬窗用户就没法把宠物
-   * 放到别的显示器上去。
+   *   拖 = **整扇窗跟着系统光标走** —— 渲染进程只在拖起来那一下报一声（startWinDrag），
+   *   位移归主进程（screen.getCursorScreenPoint），松手再报一声。宠物在窗里的相对位置
+   *   全程不动，所以动画落点、气泡位置都不会跟着漂。
+   *   浏览器里没有窗可搬，就退回「在视口里挪容器」（startWinDrag 为 null）。
+   * ⚠️ 别改回「按 pointermove 报位移」：甩得快时光标冲出窗/屏就收不到松手（放不下来），
+   *   而且位移跟着鼠标轮询率走（125~1000Hz）。见 pet-electron.cjs 的 pet:window-drag-start。
    */
-  var moveWin = (window.__petElectron__ && window.__petElectron__.moveWindow) || null;
+  var startWinDrag = (window.__petElectron__ && window.__petElectron__.startWindowDrag) || null;
   var endWinDrag = (window.__petElectron__ && window.__petElectron__.endWindowDrag) || null;
 
 // ========================================================================
@@ -1233,10 +1174,9 @@ var halfW = this.size / 2;
 
     /** 量出更宽的可见框之后重夹一次位置：不动的话，宽出来的那截就在窗外被裁掉了。
         夹取以**角色**可见框当前的位置为入参 ⇒ 角色不跳，只是整只往里挪。
-        ⚠️⚠️ 拖拽期间**一律不跑**（这次重写）：拖着的宠物由 slideTo 按**光标位移**算落点，
-          这里夹的是「上一帧的位置」—— 两边都写 container.style 就是各夹各的：
-          一格一格哆嗦（slideTo 的 slideAt 去重还以为没写过），位置记忆还被中途改写。
-          slideTo 用的也是 inkSafe()，宽出来那截它自己已经算进去了。 */
+        ⚠️⚠️ 拖拽期间**一律不跑**：拖拽是主进程按光标搬**窗**，窗内位置全程不动，
+          这里夹的是容器在窗内的位置 —— 拖拽中跑就是「窗在搬 + 容器又在窗里挪」两份位移，
+          看起来就是宠物一格一格哆嗦，位置记忆也被中途改写。 */
     this.refitInk = function () {
       if (dragState.active) return;
       if (!container.getBoundingClientRect) return;
@@ -1268,10 +1208,10 @@ var halfW = this.size / 2;
      *   —— 样式只能写容器左边。省一次换算的机会，但反过来算错就是「贴边差 144px」，
      *   而那种错看着还挺像正常（就差一点），所以固定成「进可见框、出容器」。
      * ⚠️⚠️ 纵向上下界**只认 stageKeepIn 一份**（§9.35/§9.38）：
-     *   这份夹取是站位恢复（applyPosition）、拖拽（slideTo）、量完可见框（refitInk）
-     *   唯一的口径。下界是头顶那截台子 STAGE_PAD_TOP（150）—— 头顶留不出地方时
+     *   这份夹取是站位恢复（applyPosition）、量完可见框（refitInk）唯一的口径。
+     *   下界是头顶那截台子 STAGE_PAD_TOP（150）—— 头顶留不出地方时
      *   气泡就只能压到宠物头上（用户口径「气泡位置异常下移」）。
-     *   以前 slideTo / clampPos 这里是 **0** 起夹（§9.28「四边都能贴到屏边」那一版），
+     *   以前 clampPos 这里是 **0** 起夹（§9.28「四边都能贴到屏边」那一版），
      *   而 applyPosition 早就改回 150 —— 两份口径不一致的直接后果：拖到屏幕上边松手，
      *   记住的落点是 ry≈0，下次启动（窗重建/位置补发）按 150 一夹，宠物凭空下移一截
      *   （用户口径「位置并非放下的准确位置」）。
@@ -2560,51 +2500,6 @@ halfW: inkHalf, // 漫游道按**可见框**两端夹（§9.27），不是按舞
       }
     };
 
-    // ---- 拖拽搬窗：一帧最多搬一次 ----
-    //
-    // 为什么必须合帧：`pointermove` 的频率是**鼠标轮询率**（125Hz 常见，500/1000Hz 的
-    // 鼠标更常见），不是显示器刷新率。每来一次就 ipc → 主进程 `setPosition` → Windows
-    // 一次 SetWindowPos → DWM 为这扇透明置顶窗重合成一次。1000Hz 时就是每秒 1000 次搬窗：
-    //   ① 窗追不上光标 = 用户说的「**有明显阻力**」（宠物像被拽着走）；
-    //   ② 补上来的帧参差不齐 = 「**抖**」。
-    // 修法：只留**最新**的那一个位置，用 rAF 一帧发一次（显示器刷新率 = 最高上限，
-    // 60Hz 屏就是 60 次/s，而且每次都跟 VSync 对齐，天然不抖）。
-    // ⚠️ 位移仍然是「从按下那下算起」的（不是每帧增量），所以合帧不会累积误差。
-    var moveRaf = 0;
-    var movePending = null;
-    /**
-     * 一帧做两件事：**窗内挪一挪**（slideTo）+ **报一次搬窗**（moveWin）。
-     *
-     * ⚠️⚠️ slideTo 也必须合帧（这次才补上的）：拖到屏幕边时窗被夹住不动，**只有窗内位移在走**
-     *   —— 于是一路 pointermove 都在写 container.style + clampBubbles()。
-     *   而 pointermove 的频率是**鼠标轮询率**（125Hz 常见，500/1000Hz 的鼠标更常见）：
-     *   每来一次就要强制同步布局（clampBubble 里好几个 getBoundingClientRect），
-     *   1000Hz 时渲染进程被布局拖死 ⇒ 画面的帧参差不齐 = 用户说的「拖到边框会抖」。
-     *   （不贴边时 slideTo 0.5px 就早退了，写样式根本没发生，所以只有贴边才抖 —— 对得上症状。）
-     *   合帧之后：每帧至多一次挪动 + 一次夹取，且与 VSync 对齐。
-     * ⚠️ 位移仍然是「从按下那下算起」的（不是每帧增量），所以合帧不会累积误差。
-     */
-    function flushWinMove() {
-      moveRaf = 0;
-      var m = movePending;
-      movePending = null;
-      if (!m) return;
-      // 顺序：先挪窗内位置、后报搬窗 —— 两者用的是同一份 dx/dy，同帧内自洽。
-      slideTo(m.dx, m.dy);
-      if (moveWin) moveWin(m.dx, m.dy, dragState.inset);
-    }
-    function queueWinMove(dx, dy) {
-      movePending = { dx: dx, dy: dy };
-      if (!moveRaf) moveRaf = requestAnimationFrame(flushWinMove);
-    }
-    /** 松手/取消时：把最后一帧必须落地（否则窗会停在上一位置，看着像「拽不动」）。 */
-    function settleWinMove() {
-      if (moveRaf) {
-        cancelAnimationFrame(moveRaf);
-        moveRaf = 0;
-      }
-      flushWinMove();
-    }
 
     /** 事件的**屏幕**坐标（搬窗的位移必须用它算，见 pointermove 里的说明）。
      *  Chromium 的 screenX/Y 与主进程 setPosition 是同一套单位（设备无关像素）。
@@ -2633,82 +2528,24 @@ hit.addEventListener("pointerdown", function (e) {
       dragState = {
         active: true,
         dragging: false,
-        sx: e.clientX,
-        sy: e.clientY,
-        // 按下点的**屏幕**坐标：搬窗的位移拿它算（原因见 pointermove）
+        // 按下点的**屏幕**坐标：只有「有没有真拖起来」拿它算阈值 —— 拖起来之后窗就跟着
+        // 光标走了，clientX/Y 基本不变，拿窗内坐标判阈值永远够不着。
         psx: ps.x,
         psy: ps.y,
+        // 浏览器兜底路径（没有窗可搬）用的：光标相对容器中心
         offX: e.clientX - (r.left + r.width / 2),
         offY: e.clientY - (r.top + r.height / 2),
-        // 宠物在窗里的位置：搬窗时主进程拿它把宠物夹在屏幕工作区里（不让它拖出屏幕）
-        inset: { left: r.left, top: r.top, width: r.width, height: r.height },
-        // 窗左上角的**屏幕**坐标：slideTo 靠它推「窗被屏幕边夹住了多少」（§9.25）。
-        // 口径就是「光标屏幕坐标 − 光标在窗里的坐标」—— 无边框无滚动时 clientX/Y
-        // 就是窗内坐标，所以两者一减就是窗原点。⚠️ 别拿容器的偏移去推（量过的坑）：
-        //   写成 `ps.x - (clientX - r.left)` 等于假设「光标按在容器正中」，用户按住的是
-        //   宠身的哪一块就偏多少（命中框左右各留 10px，按中间就偏 10）。实测偏 10px 时
-        //   贴左边的宠物停在离边 302 而不是 0（而且偏多少取决于按哪儿，看起来像“随机”）。
-        win0: { x: Math.round(ps.x - e.clientX), y: Math.round(ps.y - e.clientY) },
-        // 这次拖拽的窗内基准落点（slideTo 在它之上加差额，pointerup 也不再看 clientX）
-        base: { x: r.left, y: r.top },
-        // 上一帧写进去的窗内偏移：没变就不重排（slideTo 每帧都调）
-        slideAt: null,
       };
     });
 
-    /**
-     * 拖拽时把宠物在**窗里**的位置挪一挪，让它照旧贴着光标，哪怕窗已经被屏幕边夹住（§9.25）。
-     *
-     * 「贴边」是两个自由度：屏幕位置 = 窗的位置 + 宠物在窗里的位置。以前第二个自由度
-     * 全程不动，于是窗一夹住，宠物就差「它在窗里贴着的那条边」那么多 —— 头顶 150、
-     * 底下 60、左右 32（实测），也就是用户说的「拖到边上还差一大块、贴不上」。
-     * 现在：窗照旧整扇夹在屏内（气泡按**窗**夹取，窗在屏内它就必然可见，§9.23），
-     * 窗夹不住的那份**差额**原样加到宠物在窗里的偏移上：
-     *   屏幕上 → 宠物照常 1:1 跟手，贴到边时正好贴住（窗不出屏、宠物不出屏）；
-     *   窗内   → 偏移交给 stageKeepIn 夹（与站位恢复/refitInk **同一份**，§9.38）：
-     *            横向贴到窗边、纵向贴到「头顶台子/窗底」，动画不会被窗边切掉，
-     *            头顶也永远留着气泡那截台子（不然气泡只能盖在头上，见 clampBubble）。
-     * 纯计算：偏移是「光标位移」的函数而不是累加的，来回拖不会漂；窗没被夹时差额恒为 0，
-     * 于是一行 DOM 都不写（老行为逐帧不变）。
-     */
-    function slideTo(dx, dy) {
-      var d = dragState;
-      if (!d.active || !d.win0) return;
-      var winW = window.innerWidth;
-      var winH = window.innerHeight;
-      var want = { x: d.win0.x + dx, y: d.win0.y + dy };
-      // 显示器按**宠物**落点选（与主进程 pet:window-move 同一口径：窗落点 + 宠物在窗里的偏移）
-      var wa = workAreaNear(want.x + d.inset.left + 20, want.y + d.inset.top + 20);
-      var at = clampWinToScreen(want, winW, winH, wa);
-// 横向夹的是**可见框**（§9.27）：d.base.x 是容器左边，art 框左边 = 容器左边 + safe.off。
-      // 夹完减回 safe.off —— 写进样式的仍然是容器左边。窄动画时 safe.off/w 就是角色那一份，
-      // 窗边裁掉的仍是透明边，看不见（§9.28：宽动画时要连它画出来的像素一起保证在窗内）。
-      var safe = inkSafe();
-      var keep = stageKeepIn(d.base.x + safe.off + (want.x - at.x), d.base.y + (want.y - at.y), safe.w, halfH * 2);
-      var left = keep.left - safe.off;
-      var top = keep.top;
-      if (d.slideAt && Math.abs(d.slideAt.x - left) < 0.5 && Math.abs(d.slideAt.y - top) < 0.5) return;
-      d.slideAt = { x: left, y: top };
-      container.style.left = Math.round(left) + "px";
-      container.style.top = Math.round(top) + "px";
-      container.style.right = "auto";
-      container.style.bottom = "auto";
-      clampBubbles(); // 气泡夹的是**窗**：宠物在窗里挪了就得跟着重夹一次
-      pushHitRegion(); // 形状是窗坐标：宠物在窗里动了，形状不跟着动就点不到它了
-    }
-
     hit.addEventListener("pointermove", function (e) {
 if (!dragState.active) return;
-      // 窗只包住宠物（见 pet-electron.cjs 文件头）
-      // 实际是**搬整扇窗**：宠物在窗里的相对位置不动，看起来就是跟着手走。
+      // 窗 = 整扇（见 pet-electron.cjs 文件头）：拖拽期间宠物在窗里的相对位置**不动**，
+      // 位移归主进程按系统光标算，这里只剩「算阈值、换姿势」。
       //
-      // ⚠️⚠️ 位移必须用**屏幕**坐标算（e.screenX - 按下时的 screenX），不能用 clientX：
-      //    clientX/Y 是**窗内**坐标 = 光标屏幕位置 - 窗原点，而窗正跟着拖拽一起动 ——
-      //    也就是说每读到的 clientX 已经把「上一帧窗走过的距离」扣掉了。再拿它算
-      //    「从按下那下算起的位移」，得到的就是 `光标位移 - 窗已走的位移`，于是每次
-      //    只补一半：匀速拖 300px，窗只走 150px（跟手比 0.50，窗还会一格一格哆嗦）。
-      //    这不是滞后，是**每帧只跟上一半**（实测跟手比 0.500，见 DESIGN.md §9.20）。
-      //    屏幕坐标不随窗动，所以才是真正「光标走了多远」。
+      // ⚠️ 阈值必须用**屏幕**坐标（e.screenX - 按下时的 screenX），不能用 clientX：
+      //    clientX/Y 是**窗内**坐标，而窗正跟着光标一起走 —— 拖起来之后它基本不变，
+      //    拿它判阈值永远够不着 DRAG_THRESHOLD（拖拽根本不启动）。
       var p = screenPoint(e);
       var dx = p.x - dragState.psx;
       var dy = p.y - dragState.psy;
@@ -2717,6 +2554,7 @@ if (!dragState.active) return;
         dragState.dragging = true;
         gestureSay("drag", 2600, self);
         self.dragging = true;
+        if (startWinDrag) startWinDrag(); // 拖起来了：后面交给主进程按系统光标搬窗
         self.once = true;
 if (config.animations.drag.length) {
           self.anim = self.grabAnim();
@@ -2724,18 +2562,10 @@ if (config.animations.drag.length) {
           self.switchTo(self.anim, true, { force: true }); // 拖起来了就得立刻换姿势（已预热 → 零延迟硬切）
         }
       }
-      if (moveWin) {
-        // 位移仍然是「从按下那下算起」而不是每帧增量（屏边夹住时增量会让宠物越拖越落后），
-        // 但它现在真的是屏幕上的绝对位移，所以既 1:1 又不累积误差。
-        // 窗被屏幕边夹住的那部分差额，渲染进程自己补到宠物在窗里的位置上（§9.25）——
-        // 不补的话宠物会停在离屏边「它在窗里贴着的那条边」那么远，贴不上边。
-        //
-        // ⚠️⚠️ 两件事（挪窗内位置 + 报搬窗）都**只排队不立即做**（见 flushWinMove）：
-        //   pointermove 的频率跟着鼠标轮询率走（125~1000Hz），逐事件写样式 + 夹气泡
-        //   （全是强制同步布局）会把渲染进程拖死，贴边时帧率不稳 = 「拖到边框会抖」。
-        queueWinMove(dx, dy);
-        return;
-      }
+      // Electron：窗现在**由主进程按系统光标搬**（见 pet:window-drag-start）——
+      // 这边只认阈值、换姿势，pointermove 来了什么都不用做（没有逐帧 IPC，
+      // 也就没了「鼠标轮询率 1000Hz 时渲染进程被布局拖死」那一路）。
+      if (startWinDrag) return;
       // 浏览器里没有窗可搬，退回「在视口里挪容器」：纵向夹取见 clampPos（§9.38，
       // 头顶留 STAGE_PAD_TOP 的台子，气泡才不用压在头上）
       var dp = clampPos(e.clientX - dragState.offX - inkHalf, e.clientY - dragState.offY - halfH);
@@ -2749,11 +2579,7 @@ if (config.animations.drag.length) {
 
     hit.addEventListener("pointerup", function (e) {
       var wasDragging = dragState.dragging;
-      // ⚠️⚠️ 先落地再清标志：flushWinMove → slideTo 开头就是 `if (!dragState.active) return`，
-      //   先清标志的话**松手那一帧整个丢掉**（鼠标 1000Hz 时通常也不差这一帧，但那就变成
-      //   「松手偶尔偏 1~2px」—— 和落点不准是同一条命）。slideTo 也必须跑：
-      //   贴边时窗已经不动了，最后一段全靠窗内位移兑现。
-      settleWinMove();
+      // 先让主进程停表再清标志：窗是主进程按光标搬的，松手得它先停、再记落点
       dragState.active = false;
       dragState.dragging = false;
       if (endWinDrag) endWinDrag(); // 搬完窗：让主进程记住这扇窗落在哪儿
@@ -2771,10 +2597,8 @@ if (config.animations.drag.length) {
         self.justDragged = true;
         setTimeout(function () { self.justDragged = false; }, 100);
         self.dragging = false;
-        // 落点按**容器实际位置**算，不再拿 e.clientX 反推（§9.25）：
-        //   窗被屏幕边夹住时宠物在窗里的位置是被 slideTo 挪过的，
-        //   `clientX − offX` 得到的是「光标该在的地方」，不是宠物真正的落点 ——
-        //   差出来的正好是贴边那一段，存下去下次启动就又「贴不上边」了。
+        // 落点按**容器实际位置**算：宠物在窗里的偏移是常量（拖拽期间窗内不动），
+        // 所以容器位置就是真落点，`clientX − offX` 反而是「光标该在的地方」。
         var W1 = window.innerWidth;
         var H1 = window.innerHeight;
         var rc = container.getBoundingClientRect();
@@ -2792,6 +2616,19 @@ self.customPos = { rx: (rc.left + halfW) / W1, ry: (rc.top + halfH) / H1, w: W1,
     hit.addEventListener("pointercancel", function (e) {
       hit.dispatchEvent(new PointerEvent("pointerup", e));
     });
+
+    // ---- 松手兜底 ----
+    // 窗跟着系统光标跑，指针可能已经甩到窗外/屏外，捕获也可能被系统贴靠、切全屏打断。
+    // 少这几条路就是「松手了宠物还粘在鼠标上」（主进程那边表不停 = 放不下来）。
+    // 走**冒泡**：正常的 pointerup 先到 hit 的处理器，到这里时 active 已清，直接跳过。
+    function releaseDrag() {
+      if (!dragState.active) return;
+      hit.dispatchEvent(new PointerEvent("pointerup", { pointerId: 1, buttons: 0, clientX: 0, clientY: 0 }));
+    }
+    window.addEventListener("pointerup", releaseDrag);
+    window.addEventListener("pointercancel", releaseDrag);
+    window.addEventListener("blur", releaseDrag);
+    hit.addEventListener("lostpointercapture", releaseDrag);
 
     hit.addEventListener("click", function () {
       if (dragState.active || dragState.dragging || self.justDragged) return;
@@ -3448,13 +3285,6 @@ console.log("[pi-dsh-pet] WebSocket disconnected");
     // 窗要开多大：只包住最大的那只宠物 + 头顶气泡 + 横向漫游行程（§9.25）。
     // 拿到配置就报，晚了窗会先按主进程那个 620x560 的默认大小摆一下再跳一下。
     reportWindowSize();
-
-    // 主进程推来的显示器工作区（拖到屏幕边时靠它算出窗被夹住的那份差额，§9.25）。
-    // 主进程在 did-finish-load 和显示器变化时才发，平常零开销。
-    if (window.__petElectron__ && window.__petElectron__.onDisplays) {
-      window.__petElectron__.onDisplays(function (list) { setDisplays(list); });
-    }
-
     // Create pet instances
     var root = document.getElementById("pet-root");
 config.pets.forEach(function (cfg, i) {

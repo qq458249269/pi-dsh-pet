@@ -15,6 +15,8 @@
 
 import Module from "node:module";
 import { readFileSync } from "node:fs";
+import fs from "node:fs";
+import os from "node:os";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { createRequire } from "node:module";
@@ -37,6 +39,7 @@ function check(label, ok, detail = "") {
 /* ---------------- 桩 electron（只需要窗这条路上真用到的东西） ---------------- */
 
 const winOpts = [];
+const wins = []; // FakeBrowserWindow 实例（拖拽那个用例要量窗的位置）
 const ipc = new Map(); // channel -> listener 数组（ipcMain）
 const screenEv = new Map();
 
@@ -67,6 +70,7 @@ class FakeWebContents {
 class FakeBrowserWindow {
 	constructor(opts = {}) {
 		this.opts = opts;
+		wins.push(this); // 测试要拿到实例（拖拽看的就是窗的位置）
 		this.destroyed = false;
 		this.visible = true;
 		this.pos = { x: opts.x || 0, y: opts.y || 0, width: opts.width || 0, height: opts.height || 0 };
@@ -188,6 +192,8 @@ Module._load = function (request, parent, isMain) {
 // 宽限期/重拉节流调到 0：单测里等不了 20s（真值不变，只是让「判死」立刻成立）
 process.env.PI_PET_WINDOW_GRACE_MS = "0";
 process.env.PI_PET_RELAUNCH_GAP_MS = "0";
+// 数据目录也指到临时目录：拖拽松手会写 stage.json，别往真 home 里脏手（pet-electron 认这个变量）
+process.env.PI_PET_HOME = fs.mkdtempSync(path.join(os.tmpdir(), "pi-pet-fused-"));
 const PORT = 47653;
 
 console.log("\n融合开窗（宿主与窗同一个 Electron 进程）…");
@@ -211,6 +217,41 @@ check("关掉这扇窗后不算已关（同进程还在服务）", win.needsRela
 
 const menuCount1 = (ipc.get("pet:menu") || []).length;
 check("右键菜单监听器只挂了一个（不是每开一次窗多一份）", menuCount1 === 1, `pet:menu×${menuCount1}`);
+
+/* ---------------- 拖拽：位移归主进程（系统光标）+ 跨屏不被单块屏夹住 ---------------- */
+// 症状：① 甩得快时松手放不下来（事件断在窗外）；② 跨屏拖不过去（被单块屏夹住）。
+// 两件都是拖拽的实现形态问题，所以在这里用桩光标真跑一遍（不是正则看源码）。
+console.log("\n拖拽（主进程按系统光标搬窗）…");
+{
+	const w = wins[wins.length - 1];
+	const displays = [
+		{ bounds: { x: 0, y: 0, width: 1920, height: 1080 }, workArea: { x: 0, y: 0, width: 1920, height: 1040 } },
+		{ bounds: { x: 1920, y: 0, width: 1920, height: 1080 }, workArea: { x: 1920, y: 0, width: 1920, height: 1040 } },
+	];
+	let cursor = { x: 900, y: 600 };
+	fakeElectron.screen.getAllDisplays = () => displays;
+	fakeElectron.screen.getCursorScreenPoint = () => ({ ...cursor });
+	const emit = (ch, ...a) => (ipc.get(ch) || []).forEach((fn) => fn({}, ...a));
+	const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+	w.setBounds({ x: 500, y: 300, width: 620, height: 560 });
+	check("拖拽开始不发位移也能接住（只报一声「开始」）", typeof ipc.get("pet:window-drag-start")?.[0] === "function");
+	emit("pet:window-drag-start");
+	await sleep(30);
+	check("光标没动 → 窗就不动（不白搬）", w.pos.x === 500 && w.pos.y === 300, `${w.pos.x},${w.pos.y}`);
+
+	cursor = { x: 2900, y: 600 }; // 一下甩到**第二块屏**上（快的能甩到屏外）
+	await sleep(60);
+	check("跨屏能过去（并集口径：不被第一块屏的右边夹住）", w.pos.x === 2500, `x=${w.pos.x}（老口径会夹成 1300）`);
+	check("位移 = 光标位移（1:1，不从窗内坐标算）", w.pos.y === 300);
+
+	cursor = { x: 3800, y: 600 }; // 已经超出并集右边界（3840-620=3220）
+	emit("pet:window-drag-end");
+	check("松手先补一次 tick（采样间隔里那一段不丢）", w.pos.x === 3220, `x=${w.pos.x}`);
+	cursor = { x: 100, y: 100 };
+	await sleep(40);
+	check("松手后表停了（窗不再跟着光标跑 = 放得下）", w.pos.x === 3220 && w.pos.y === 300, `${w.pos.x},${w.pos.y}`);
+}
 
 check("close 关掉窗", win.close() === true && quitCalls === 0, `quit=${quitCalls}`);
 check("关窗不退应用（hide-window 之后 HTTP/WS 服务还在）", quitCalls === 0);
