@@ -1092,6 +1092,9 @@ check("窗一变就重新夹气泡（高度/宽度都变了）", /window\.addEve
 check("横向站位贴边（不许再留常数 STAGE_PAD_X，那截会砍掉漫游行程）", /var loX = 0;/.test(petSrc) && /var hiX = W - inkW;/.test(petSrc) && !/var loX = STAGE_PAD_X/.test(petSrc));
 // 漫游行程 = max(maxDist + 2×margin) − 2×留白，窗宽再加上它：窗太窄时 planMove 直接
 //   return null（动画根本不播），这就是「动画在左右被限制住」。
+// 漫游关着（config 里 moves.actions 空）时不许再留道：留了就是窗里右边那一大块空白
+//   （size 462 实测窗 742 → 526，多出来的 216 = ceil(240 + 2*20 - 2*32)）。
+check("漫游关着就不留道（actions 空 → roamRoom 0）", /var acts = Array\.isArray\(moves\.actions\) \? moves\.actions : \[\];/.test(petSrc) && /if \(!acts\.length\) return 0;/.test(petSrc) && /acts\.forEach\(function \(a\)/.test(petSrc));
 check("窗宽按漫游行程给足（maxDist 走得到，动画不播不了）", /function roamRoom\(sidePad\)/.test(petSrc) && /maxDist = Math\.max\(maxDist, md\)/.test(petSrc) && /margin = Math\.max\(margin, mg\)/.test(petSrc) && /Math\.ceil\(maxDist \+ 2 \* margin - 2 \* pad\)/.test(petSrc) && /var w = maxW \+ sidePad \* 2 \+ roamRoom\(sidePad\)/.test(petSrc));
 // 贴边的那层「窗内滑移」（slideTo）整体拿掉了：拖拽期间宠物在窗里**一点都不动**，
 //   位置固定 ⇒ 动画落点、气泡位置都不会跟着漂。代价：窗被屏幕边夹住时宠物贴不到最边上。

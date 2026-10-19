@@ -712,6 +712,9 @@ var CHAT_MAX = 3;
    * 写死就会出现「配置要 320、窗只给 64」——动画被限制在原地，或者走到窗边被切。
 * 拿不到 moves（配置没到）就按 0 补：先摆着，配置到了会重报窗宽（reportWindowSize）。
    *
+   * ⚠️ 漫游关着（actions 为空）时返回 0：没有 action 就没有落点（tryMove 直接 false），
+   *   道是白留的（§9.40：实测右侧空 216px 就是它）。删掉 moves 整段也算关。
+   *
    * ⚠️ 「动画宽」= **可见框**宽（§9.27 的 inkWidth），不是舞台宽 —— 漫游道也是道，
    *   角色走到道的一头就该贴住窗边，多出来那截透明舞台区不占地也不该算进行程。
    */
@@ -719,10 +722,14 @@ var CHAT_MAX = 3;
     var pad = Math.max(0, Number(sidePad) || 0);
     var moves = (config && config.animations && config.animations.moves) || null;
     if (!moves) return 0;
+    // ⚠️ 漫游关着（moves.actions 空，见 config.jsonc）就**不留道**：tryMove 抽不到 action
+    //   直接 return false，道再宽也没人走 —— 白留的 216px 就是窗里右边那一大块空白。
+    var acts = Array.isArray(moves.actions) ? moves.actions : [];
+    if (!acts.length) return 0;
     var d = moves.default || {};
     var maxDist = Math.max(0, Number(d.maxDist) || 0);
     var margin = Math.max(0, Number(d.margin) || 0);
-    (moves.actions || []).forEach(function (a) {
+    acts.forEach(function (a) {
       var p = (a && a.params) || {};
       var md = Number(p.maxDist);
       var mg = Number(p.margin);
