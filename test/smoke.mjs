@@ -979,7 +979,7 @@ check("preload 三个新口都齐", /setWindowSize/.test(preloadSrc) && /startWi
 //   贴右上角后动画右边离窗边只剩 marginX=24px、左边空 376px，看着就是被窗边切了一角。
 //   修法：左右留白只当「离窗边的余量」（24），窗宽改成**按内容自适应**（动画宽 / 气泡基准宽取大），
 //   真正给足的是**高度**（头顶 150 装气泡），气泡封顶独立走 BUBBLE_W_MAX。
-check("舞台窗 = 高度定死 + 宽度自适应内容（不再有强制窗宽和 200 留白）", /var STAGE_PAD_X = 32/.test(petSrc) && /var BUBBLE_W_MAX = 340/.test(petSrc) && /var w = maxW \+ sidePad \* 2/.test(petSrc) && !/MIN_STAGE_W/.test(petSrc) && !/BUBBLE_BASE_W/.test(petSrc));
+check("舞台窗 = 高度定死 + 宽度 = 舞台宽（左右不留白）", /var STAGE_PAD_X = 0/.test(petSrc) && /var BUBBLE_W_MAX = 340/.test(petSrc) && /var w = maxW \+ sidePad \* 2/.test(petSrc) && !/MIN_STAGE_W/.test(petSrc) && !/BUBBLE_BASE_W/.test(petSrc));
 // 窗不许为气泡撑宽：窗一比「动画 + 余量」宽，气泡（封顶 = 窗宽-16）就比动画宽很多，
 //   居中时必被 clampBubble 推到贴一边（实测 592 宽居中于 462 动画：左探 196 / 右探 16）。
 check("气泡宁窄勿歪（定宽 = min(窗宽-16, 340)）", /Math\.min\(Math\.max\(BUBBLE_W_MIN, Math\.round\(winW\) - 16\), BUBBLE_W_MAX\)/.test(petSrc) && /var BUBBLE_W_MIN = 220/.test(petSrc));
@@ -987,7 +987,7 @@ check("设置高度、自适应宽度：height 优先，width 由 16:9 推（只
 check("高度小于下限也抬（和宽度一个口径：抬，不报错）", /if \(h < MIN_PET_H\) h = MIN_PET_H/.test(petSrc) && /if \(height < MIN_PET_H\)/.test(petSrc));
 // ⚠️ marginX/marginY 现在是**下限**（§9.21）：比留白小的抬到留白。头顶那截是气泡的舞台，
 //   不抬的话贴上边的宠物头顶只有 marginY（实测 100）= 三行字，窗底那截空白一点用没有。
-check("配置里的 marginX/marginY 当留白的下限（不够就抬上去）", /function topOffsetOf\(cfg\)[\s\S]{0,200}Math\.max\(m, STAGE_PAD_TOP\)/.test(petSrc) && /Math\.max\(mX, STAGE_PAD_X\)/.test(petSrc) && /Math\.max\(m, STAGE_PAD_BOTTOM\)/.test(petSrc) && /botPad = Math\.max\(botPad, bottomPadOf\(cfg\)\)/.test(petSrc));
+check("配置里的 marginY 当留白的下限（不够就抬上去）；marginX 不算窗宽（横向居中）", /function topOffsetOf\(cfg\)[\s\S]{0,200}Math\.max\(m, STAGE_PAD_TOP\)/.test(petSrc) && /Math\.max\(m, STAGE_PAD_BOTTOM\)/.test(petSrc) && /botPad = Math\.max\(botPad, bottomPadOf\(cfg\)\)/.test(petSrc) && /sidePad = Math\.max\(sidePad, STAGE_PAD_X\)/.test(petSrc));
 // ⚠️ 窗只报**尺寸**、不动位置：宠物在窗里的偏移是常量，窗左上不动它就不跳。
 //   「按宠物贴住的角挪窗」实测是反的（高度差里只有一部分来自头顶偏移，会挪走宠物、窗挂到屏外）。
 check("改窗只改尺寸，左上角不动（宠物在屏幕上不跳）", /function applyBounds\(width, height\)/.test(elecSrc) && /applyBounds\(w, h\);/.test(elecSrc) && !/applyBounds\([\w, ]+, m\.anchor/.test(elecSrc) && !/cur\.h - height/.test(elecSrc));
@@ -1025,12 +1025,14 @@ check("写完高度/换边重新量几何再算偏移（量的是两条 lane 的
 // ⚠️⚠️ 竖向**只往上夹、绝不往下压**（§9.38）：以前 `if (r.top < 8) wantT = 8` 会把气泡
 //   往下按回窗内 —— 正好落在宠物脸上 = 用户口径「气泡文本框位置异常下移」。竖向偏移只保留
 //   「往窗顶推」这一种；头顶真放不下时封高（overlap 分支），不许挪。
-check("气泡竖向只往上夹（不许往下压到宠物头上，§9.38）", !/wantT = 8/.test(petSrc) && !/if \(r\.top < 8\)/.test(petSrc) && /if \(r\.bottom > H - 8\) wantT = Math\.min\(wantT, H - 8 - r\.height\)/.test(petSrc));
+// ⚠️ 2026-10 用户口径「上方留空太大、拖不上去」：宠物允许贴窗顶（loY = 0），
+//   头顶没台子时气泡**允许往下推到窗内**（否则整条跑出窗、啥也看不见）。
+check("气泡不跑出窗（贴顶时往下推到窗内，不再一律只往上夹）", /if \(r\.bottom > H - 8\) wantT = Math\.min\(wantT, H - 8 - r\.height\)/.test(petSrc) && /if \(wantT < 8\) wantT = 8/.test(petSrc));
 check("头顶放不下时**封高**而不是撤掉封高盖到头上（§9.38）", !/bubbles\[j\]\.style\.removeProperty\("max-height"\)/.test(petSrc) && /var tight = Math\.max\(BUBBLE_MIN_H, roomAbove\)/.test(petSrc));
 // ⚠️⚠️ 纵向夹取**只有一份**（§9.38）：站位恢复 / 拖拽 / 量完可见框重夹 都走 stageKeepIn。
 //   §9.28 那版把拖拽那两处改成 0 起夹、站位却还是 150 ⇒ 拖到屏幕上边松手记住 ry≈0，
 //   下次启动按 150 一夹，宠物凭空下移一截（用户口径「位置并非放下的准确位置」）。
-check("纵向夹取只有一份（两处都走 stageKeepIn，§9.38）", /var loY = STAGE_PAD_TOP/.test(petSrc) && /function stageKeepIn[\s\S]{0,1200}var loY = STAGE_PAD_TOP/.test(petSrc) && /stageKeepIn\(inkLeft - inkOff \+ safe\.off, top, safe\.w, halfH \* 2\)/.test(petSrc) && /stageKeepIn\(cp\.rx \* window\.innerWidth - inkHalf/.test(petSrc) && !/Math\.max\(top, 0\), maxTop/.test(petSrc));
+check("纵向夹取只有一份（两处都走 stageKeepIn）", /var loY = 0;/.test(petSrc) && /function stageKeepIn[\s\S]{0,1200}var loY = 0;/.test(petSrc) && /stageKeepIn\(inkLeft - inkOff \+ safe\.off, top, safe\.w, halfH \* 2\)/.test(petSrc) && /stageKeepIn\(cp\.rx \* window\.innerWidth - inkHalf/.test(petSrc) && !/Math\.max\(top, 0\), maxTop/.test(petSrc));
 check("行数按空间收（空间不够就少几行，而不是把话抽掉）", /Math\.min\(6, Math\.floor\(\(room - 14\) \/ BUBBLE_LINE_H\)\)/.test(petSrc) && /var BUBBLE_LINE_H = 18\.2/.test(petSrc) && /var BUBBLE_MIN_H = 30/.test(petSrc));
 // 「说点什么」输入框是气泡栈里**独立的最后一行**（不再塞在某条消息里，§9.34）：
 //   塞在消息里的话，每来一条新消息就把框顶来顶去，封高时还得给它单独留 44px。
@@ -1145,7 +1147,7 @@ check("窗宽基数是整个舞台（maxStage → w），气泡宽度只按窗�
 // 横向区间走 inkSafe（角色 ∪ 当前动画），不然老落点靠边时宽动画仍被窗边切。
 check("站位比例仍存中心（可见框居中，老位置记忆继续可用）+ 横向按 art 框夹", /stageKeepIn\(cp\.rx \* window\.innerWidth - inkHalf \+ over, cp\.ry \* window\.innerHeight - halfH, safe\.w, halfH \* 2\)/.test(petSrc) && /container\.style\.left = keep\.left - over - inkOff \+ "px"/.test(petSrc) && /var over = inkOff - safe\.off/.test(petSrc) && /self\.customPos\.rx = \(keep\.left \+ inkHalf\) \/ window\.innerWidth/.test(petSrc) && /stageKeepIn\(left, top, inkW, stageH\)/.test(petSrc));
 // 纵向按舞台高算区间（量过，纵向没这问题），但**上下界都是 0**（§9.28）：能贴到屏边。
-check("纵向按舞台高算区间（不改成 inkH），下界给头顶留气泡台子", /var hiY = H - stageH/.test(petSrc) && !/var hiY = H - inkH/.test(petSrc) && /var loY = STAGE_PAD_TOP/.test(petSrc));
+check("纵向按舞台高算区间（不改成 inkH），上界 0（能拖到屏幕顶）", /var hiY = H - stageH/.test(petSrc) && !/var hiY = H - inkH/.test(petSrc) && /var loY = 0;/.test(petSrc));
 // 纵向的**上下界**：§9.28 起四边全 0 起夹 —— 宠物能真的贴到屏幕上/下边。
 //   头顶没有空间时不再封高（那会是一条 24px 的东西，字全裁没），改让气泡盖在头顶上。
 //   底下不用再减 bottomPad：stage 有 translateY(bottomPad)，容器底本来就是脚底。

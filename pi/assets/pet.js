@@ -698,9 +698,22 @@ var CHAT_MAX = 3;
    *   按舞台算的话窗里左右各白留一大块，角色永远离屏边那么远（实测：容器贴到屏边
    *   x=0，可见 ink 还在 x=153）—— 用户口径「左右拉不到很靠边，有一大块距离」。
    */
-  var STAGE_PAD_X = 32;
-  var STAGE_PAD_TOP = 150;
-  var STAGE_PAD_BOTTOM = 60;
+  /**
+   * 舞台窗的留白（§9.24）：窗 = 宠物 + 四边 padding。
+   *
+   * ⚠️ 这三个数是「窗里除了宠物/气泡那一圈」，透明但占屏幕。用户口径
+   *   「上下左右不要占这么大的空白 + 能拖到屏幕边」→ 能砍的都砍了：
+   *   ① 左右 0：窗宽的基数本来就是**整个舞台**（size），而舞台里角色只占中间 37.5%，
+   *      两侧本来就是透明区；再各加 32 就是白加（实测窗 526 而动画只画到 462）。
+   *      marginX 也不再参与窗宽：横向一律居中（§9.26），它在窗里不定位置。
+   *   ② 底下 12：脚底就是容器底（stage 有 translateY 把脚下那截透明区顶下去），
+   *      以前给 60 = 脚下面白空 48px。
+   *   ③ 头顶 90：那是气泡的台子（clampBubble 按头顶真实空间封高），但**不再挡着拖不动**：
+   *      宠物在窗里的纵向区间从 0 起算（见 stageKeepIn），要贴屏幕顶就贴（气泡自适应变矮）。
+   */
+  var STAGE_PAD_X = 0;
+  var STAGE_PAD_TOP = 90;
+  var STAGE_PAD_BOTTOM = 12;
 
   /**
    * 漫游（走路）要的**横向行程**：窗宽里除了动画还得有多少能走的道（§9.25）。
@@ -770,11 +783,9 @@ function topOffsetOf(cfg) {
   /**
      * 夹取时宠物在**窗里**能站的范围。
      *
-     * 纵向 **从 STAGE_PAD_TOP（150）起夹**（§9.35）：头顶那截留给气泡栈。
-     *   中间试过 0 起夹（§9.28），想让宠物能贴到屏顶、气泡改盖头顶 ——
-     *   实测头顶 0 留白时 fitCount() 只给 1 条，多条气泡根本长不起来（用户口径
-     *   「气泡要多个、依次向上滚」）。窗高本来就是 topOff + 宠物 + 脚下留白算的
-     *   （见 stageSize），下界放回 150 不额外占窗内空间。
+   * 纵向从 **0 起夹**（用户口径：上方留空太大、拖不上去）：宠物能贴到窗顶 ⇒
+   *   窗被夹到屏幕边时就能贴到屏幕顶。气泡不再靠「头顶必须空 90」保证 ——
+   *   头顶不够时 clampBubble 封高（少几行），必要时把气泡往下推到窗内，不往外跑。
      *
      * ⚠️ 横向的下界是 **0**（§9.25）：贴边是**屏幕**上的概念，
      *   而窗和宠物的偏移是两个自由度。夹在 32 就等于「永远不许宠物贴到窗边」——
@@ -797,10 +808,9 @@ function stageKeepIn(left, top, inkW, stageH) {
     var loX = 0;
     var hiX = W - inkW;
     if (hiX < loX) loX = hiX = Math.max(0, (W - inkW) / 2);
-    // §9.35：下界回到 STAGE_PAD_TOP —— 头顶那截是气泡的台子。
-    //   改成 0（§9.28）以后记住的落点把宠物钉在窗顶，头顶空间 0 ⇒ fitCount() 只给 1 条，
-    //   多条气泡根本长不起来（用户口径「气泡要多个、依次向上滚」）。
-    var loY = STAGE_PAD_TOP;
+    // 下界是 **0**（用户口径「上方留空太大、拖不上去」）：宠物能贴到窗顶，
+    //   气泡改由 clampBubble 封高 / 往下推（见那边的说明）。
+    var loY = 0;
     var hiY = H - stageH;
     if (hiY < loY) loY = hiY = Math.max(0, (H - stageH) / 2);
     return {
@@ -1697,12 +1707,14 @@ var overlap = roomAbove < BUBBLE_LINE_H * 2;
       var wantT = r.top;
       if (wantL < 8) wantL = 8;
       else if (r.right > W - 8) wantL = W - 8 - r.width;
-      // ⚠️⚠️ 竖向**只往上夹，绝不往下压**（§9.38）：气泡钉在头顶（bottom:100% + margin 10），
-//   唯一合法的竖向偏移是「往窗顶推」。以前还有一个「顶出窗顶就按回 8px」的分支 ——
-//   那是把气泡**往下**推回窗内，正好落在宠物脸上（用户口径「气泡位置异常下移」）。
-      //   现在的做法：站位/拖拽都留 STAGE_PAD_TOP 的台子 ⇒ 头顶永远有地方，
-      //   真到了放不下的时候也是**封高**（上面那个 overlap 分支），不许挪。
-if (r.bottom > H - 8) wantT = Math.min(wantT, H - 8 - r.height);
+      // ⚠️⚠️ 竖向以前**只往上夹，绝不往下压**（§9.38）：气泡钉在头顶（bottom:100% + margin 10），
+      //   唯一合法的竖向偏移是「往窗顶推」—— 因为站位/拖拽都留 STAGE_PAD_TOP 的台子，头顶永远有地方。
+      if (r.bottom > H - 8) wantT = Math.min(wantT, H - 8 - r.height);
+      // 宠物现在能**贴到窗顶**（stageKeepIn 的 loY = 0，用户口径「上方留空太大、拖不上去」），
+      //   头顶就没有台子了 —— 这时气泡不能跑出窗（跑出去就是完全看不见），
+      //   只能往下推到窗内（盖在头顶，§9.27 的 .below 早就删了，不另开一套）。
+      //   上面的封高已经把高度收小到只剩一两行，所以推下来只盖住一小块。
+      if (wantT < 8) wantT = 8;
       var dx = Math.round(wantL - baseL);
       var dy = Math.round(wantT - baseT);
       // 写一样的值没有代价，但每帧都写新值会让浏览器白排一次版
@@ -2910,14 +2922,10 @@ var s = petSizeOf(cfg);
       maxStage = s;
       var pos = (cfg && cfg.position) || {};
       var corner = String(pos.corner || "bottom-right");
-      var mX = Number(pos.marginX);
-      if (!isFinite(mX)) mX = 0;
-      var mY = Number(pos.marginY);
-      if (!isFinite(mY)) mY = 0;
       if (corner.indexOf("top") === 0) topOff = Math.max(topOff, topOffsetOf(cfg));
       else topOff = Math.max(topOff, STAGE_PAD_TOP);
       botPad = Math.max(botPad, bottomPadOf(cfg));
-      sidePad = Math.max(sidePad, Math.max(mX, STAGE_PAD_X));
+      sidePad = Math.max(sidePad, STAGE_PAD_X);
     });
 if (!maxStage) maxStage = 400;
     if (maxStage < MIN_PET_SIZE) maxStage = MIN_PET_SIZE;
