@@ -204,7 +204,7 @@ async function download(url, dest, opts = {}) {
 }
 
 /** 下载到文件（先写 .part 再改名，避免中途断网留下半个 exe 当新版）。永不抛。 */
-function downloadOnce(url, dest, { timeoutMs = 20 * 60 * 1000, redirects = 0 } = {}) {
+function downloadOnce(url, dest, { timeoutMs = 20 * 60 * 1000, redirects = 0, onProgress } = {}) {
 	return new Promise((resolve) => {
 		let settled = false;
 		const done = (v) => { if (!settled) { settled = true; resolve(v); } };
@@ -212,7 +212,7 @@ function downloadOnce(url, dest, { timeoutMs = 20 * 60 * 1000, redirects = 0 } =
 			const loc = res.headers.location;
 			if ([301, 302, 303, 307, 308].includes(res.statusCode) && loc && redirects < 5) {
 				res.resume();
-				resolve(downloadOnce(new URL(loc, url).href, dest, { timeoutMs, redirects: redirects + 1 }));
+				resolve(downloadOnce(new URL(loc, url).href, dest, { timeoutMs, redirects: redirects + 1, onProgress }));
 				return;
 			}
 			if (res.statusCode !== 200) {
@@ -222,6 +222,19 @@ function downloadOnce(url, dest, { timeoutMs = 20 * 60 * 1000, redirects = 0 } =
 			}
 			const tmp = `${dest}.part`;
 			const out = fs.createWriteStream(tmp);
+			// 进度：0.1% 或 500ms 才报一次（每个 chunk 都报 = 一秒几十帧气泡，白烧 UI）
+			const total = Number(res.headers["content-length"]) || 0;
+			let loaded = 0;
+			let lastStep = -1;
+			let lastAt = 0;
+			res.on("data", (d) => {
+				loaded += d.length;
+				const step = total ? Math.floor((loaded / total) * 1000) : 0;
+				if (typeof onProgress !== "function" || (step === lastStep && Date.now() - lastAt < 500)) return;
+				lastStep = step;
+				lastAt = Date.now();
+				try { onProgress({ loaded, total }); } catch { /* 上报进度炸了不该毁掉下载 */ }
+			});
 			res.on("error", () => done({ ok: false, note: "下载中断了（多半是网断），没动原来的 exe" }));
 			out.on("error", (err) => done({ ok: false, note: `写不进 ${path.dirname(dest)}：${err.message}` }));
 			out.on("finish", () => {
@@ -429,7 +442,7 @@ async function check({ fetch = process.env.PI_PET_UPDATE_NO_FETCH !== "1" } = {}
  * 真的去更。返回 {ok, mode, note, restarted?} —— 调用方拿到 ok 之后
  * 自己决定要不要换一扇窗（宿主那边换窗 = 渲染层立刻用上新代码）。
  */
-async function apply() {
+async function apply({ onProgress } = {}) {
 	const info = await detect();
 	if (info.mode === "git") {
 		if (await dirty(info.dir)) {
@@ -472,7 +485,7 @@ async function apply() {
 		// 下到 exe 旁边（同目录才有权限写）。原来那个正在跑、被锁着，只能等退出后再换。
 		const dest = path.resolve(info.exe);
 		const staged = `${dest}.new`;
-		const d = await download(chk.url, staged);
+		const d = await download(chk.url, staged, { onProgress });
 		if (!d.ok) return { ok: false, mode: "portable", note: d.note };
 		swapAfterExit(staged, dest, [process.pid, process.ppid]);
 		return {
@@ -529,7 +542,7 @@ function writeStateFile(home, file, patch) {
  * 返回一个 Promise 便于测试；宿主那边只是 `void` 掉它。所有失败都只走 onNote，
  * **不弹窗** —— 启动时弹窗打断用户，而且这类事天天发生。
  */
-function autoUpdate(home, { log: logFn, onUpdated, delayMs = AUTO_DELAY_MS, gapMs = AUTO_GAP_MS } = {}) {
+function autoUpdate(home, { log: logFn, onUpdated, onProgress, delayMs = AUTO_DELAY_MS, gapMs = AUTO_GAP_MS } = {}) {
 	const note = (s) => {
 		if (logFn) logFn(s);
 	};
@@ -587,7 +600,7 @@ if (!res.hasUpdate) {
 			note(`自动检查更新：有新版（${res.current || res.version} → ${res.latest || "?"}），正在更新…`);
 			let ap;
 			try {
-				ap = await apply();
+				ap = await apply({ onProgress });
 			} catch (err) {
 				note(`自动更新炸了：${err && err.message}`);
 				resolve({ ok: false });

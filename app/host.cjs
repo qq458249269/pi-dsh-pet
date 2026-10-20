@@ -463,12 +463,15 @@ const map = rememberPosition(id, arg.rx, arg.ry, arg.w, arg.h);
 			case "check-update":
 				// 查更新是异步的（要 fetch 远端）：server 那头已经 await 了（见 server.cjs）。
 				// ⚠️ 别用 spawnSync —— 宿主就是这个 HTTP/WS 服务，卡住几分钟等于全机断网。
+				// 气泡给个「在查」：git fetch / npm view 慢起来几十秒，画面上没动静像卡死。
+				bus.say("检查更新中…", 240000);
 				return updater.check().then((r) => {
 					updateInfo = { ...updateInfo, ...updateSummary(r), lastCheck: Date.now() };
 					return updateResult(r, "检查完了");
 				});
 			case "do-update":
-				return updater.apply().then((ap) => {
+				bus.say("更新中…", 1500000);
+				return updater.apply({ onProgress: (p) => bus.say(progressText(p), 10000) }).then((ap) => {
 					if (!ap.ok) return updateResult(ap, "没更成");
 					// 换了渲染层的代码 → 换一扇窗，1.5s 后新代码接管
 					if (ap.changed !== false) {
@@ -491,6 +494,13 @@ error: `未知 action：${action}`,
 						"state | release-lock",
 				};
 		}
+	}
+
+	/** 下载进度 → 气泡文案（保留两位小数：百分比，拿不到总长就报 MB）。 */
+	function progressText({ loaded, total }) {
+		return total > 0
+			? `下载更新 ${((loaded / total) * 100).toFixed(2)}%`
+			: `下载更新 ${(loaded / 1048576).toFixed(2)}MB`;
 	}
 
 	/** 把 updater 的结果拼成控制面回包（菜单/对话框直接吃这个形状）。 */
@@ -618,6 +628,7 @@ error: `未知 action：${action}`,
 	//    app/* 的新代码要等下次 `pi-pet restart`（这点在对话框里也写给用户）。
 	updater.autoUpdate(PATHS.home, {
 		log,
+		onProgress: (p) => bus.say(progressText(p), 10000),
 		onUpdated: () => {
 			log("更新完了 → 换一扇窗（渲染层立刻用上新代码）");
 			win.restart(readCtrl().size || cfg.size, state.port, () => readCtrl().desired !== false);
