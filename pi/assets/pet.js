@@ -1121,23 +1121,27 @@ var asleep = false;    // 冻住了吗（= 一帧都不再产生）
    *  ⚠️ 不因为「已经 asleep」就早退：省电模式下新加一只宠物时，它照样得冻住
    *  （PetCard.sleep/wake 自己幂等，这里只是多走一遍）。
    */
+  /** 冻 / 醒的机械动作（无闸，PetCard.sleep/wake 自己幂等）。
+   *  空闲省电也走这里 —— 它不能受 SLEEP_ENABLED 那道闸拦（见下面的 ③）。 */
+  function setFrozen(v) {
+    asleep = v;
+    for (var i = 0; i < pets.length; i++) {
+      var p = pets[i];
+      if (p && typeof p[v ? "sleep" : "wake"] === "function") p[v ? "sleep" : "wake"]();
+    }
+  }
+
   function goSleep() {
     if (!SLEEP_ENABLED) return;
-    asleep = true;
-    for (var i = 0; i < pets.length; i++) {
-      if (pets[i] && typeof pets[i].sleep === "function") pets[i].sleep();
-    }
+    setFrozen(true);
   }
 
   /** 醒：接着当前这一帧往下放（pause/play 不改 currentTime，不会跳回第一帧）。
    *  省电模式下醒不了 —— 唯一出口是 applyPowerFrame(false)（用户关掉省电）。 */
   function goWake() {
     if (powerSave) return goSleep();
-    asleep = false;
-    for (var i = 0; i < pets.length; i++) {
-      if (pets[i] && typeof pets[i].wake === "function") pets[i].wake();
-    }
-}
+    setFrozen(false);
+  }
 
   // ========================================================================
   // 5. PetCard class (port of pet.ts PetCard component)
@@ -3335,6 +3339,16 @@ if (window.__petElectron__ && window.__petElectron__.onPower) {
       if (document.hidden) goSleep();
       else goWake();
     });
+    // ③ 「Video Wake Lock」：只要有一条 <video> 在放，Chromium 就替我们向系统要
+    //    「显示器别睡」（powercfg /requests 的 DISPLAY 栏挂的就是它）—— 于是屏幕永远
+    //    不休眠。系统那一侧没有开关，唯一解法是**让播放停下来**，所以主进程按
+    //    「用户多久没输入」喊我们冻住。这道闸**不受 SLEEP_ENABLED 拦**：它是对称的
+    //    （一有输入 idle 立刻归零），不会像 visibilitychange 那样醒不回来。
+    if (window.__petElectron__ && window.__petElectron__.onIdle) {
+      window.__petElectron__.onIdle(function (idle) {
+        if (!powerSave) setFrozen(idle);
+      });
+    }
 
 // Connect WebSocket
     connectWs();

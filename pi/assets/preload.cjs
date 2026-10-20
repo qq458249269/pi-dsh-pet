@@ -53,4 +53,7 @@ savePosition: (id, rx, ry, w, h) => ipcRenderer.send("pet:save-position", { id: 
   /** 主进程 → 渲染进程：睡(true) / 醒(false)。
    *  全屏透明置顶窗每一帧都要 DWM 重算整块桌面，所以「看不见的时候别产生帧」。 */
   onPower: (cb) => ipcRenderer.on("pet:power", (_e, sleep) => cb(sleep !== false)),
+  /** 主进程 → 渲染进程：用户 idle（true=该冻住了，显示器才有机会熄）。
+   *  与 onPower 分开是因为它不受 SLEEP_ENABLED / 省电开关的闸约束（见 pet.js 4.7 ③）。 */
+  onIdle: (cb) => ipcRenderer.on("pet:idle", (_e, idle) => cb(idle !== false)),
 });

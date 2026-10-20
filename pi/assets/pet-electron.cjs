@@ -891,6 +891,21 @@ try {
     }
   });
 
+  // ---- 空闲省电：显示器能不能熄，取决于这扇窗有没有在放 <video> ----
+  //
+  // 只要有一条 <video> 在放，Chromium 就替我们向系统要「显示器别睡」
+  // （`powercfg /requests` 的 DISPLAY 栏挂着的 "Video Wake Lock" 就是它），Windows
+  // 于是永远不熄屏 —— 系统侧没有开关，只能让播放停下来。用户多久没碰键鼠，就查多久。
+  // ponytail: 阈值/开关只给环境变量，别造配置项；真要可调再加进 config.jsonc。
+  // 每 5s 无条件发：setFrozen 幂等（见 pet.js），刚建的窗也不用补初始状态。
+  const IDLE_SLEEP_S = Number(process.env.PI_PET_IDLE_SLEEP ?? 60) || 0;
+  if (IDLE_SLEEP_S > 0) {
+    windowTimer(() => {
+      if (win.isDestroyed() || !webContentsSend) return;
+      webContentsSend("pet:idle", powerMonitor.getSystemIdleTime() >= IDLE_SLEEP_S);
+    }, 5000);
+  }
+
   // PI_PET_DEBUG=1：把渲染进程的 console 转到主进程 stderr。
   // 平时窗是 detached + stdio:"ignore" 的，渲染进程报什么都没人看得见，
   // 调 pet.js 时只能靠猜 —— 有了这个开关就能直接看到它抛了什么。

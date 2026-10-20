@@ -1377,6 +1377,23 @@ check(
 	"窗自己一个 userData profile（app.setPath 在 ready 之前）",
 	/app\.setPath\("userData", path\.join\(homeDir\(\), "window-profile"\)\)/.test(petMain)
 );
+// 「Video Wake Lock」：有 <video> 在放，Chromium 就霸着 DISPLAY 不让熄屏。
+// 修法是「用户没输入一阵子就把宠物冻住」，三处得是同一根线（主进程 → preload → pet.js）。
+check(
+	"空闲省电：主进程按系统空闲时长喊醒/睡",
+	/getSystemIdleTime\(\)/.test(petMain) && /"pet:idle"/.test(petMain)
+);
+check(
+	"空闲省电：preload 有 onIdle（通道名对得上）",
+	/onIdle: \(cb\) => ipcRenderer\.on\("pet:idle"/.test(
+		readFileSync(join(ROOT, "pi", "assets", "preload.cjs"), "utf8")
+	)
+);
+const idleSrc = readFileSync(join(ROOT, "pi", "assets", "pet.js"), "utf8");
+check(
+	"空闲省电：渲染进程走 setFrozen（不受 SLEEP_ENABLED 那道闸拦）",
+	/__petElectron__\.onIdle/.test(idleSrc) && /function setFrozen/.test(idleSrc)
+);
 check("stop 返回成功", (await post(PORT, "/control", { action: "shutdown" }, token)).body.ok === true);
 const exitCode = await new Promise((res) => host.on("exit", res));
 check("宿主干净退出", exitCode === 0, `exit=${exitCode}`);
