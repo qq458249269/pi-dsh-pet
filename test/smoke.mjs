@@ -892,7 +892,12 @@ check("check-update 不把宿主带崩（宿主还活着）", (await get(PORT, "
 check("装法认得出来（本仓库是 git 检出）", chk.update.mode === "git", `mode=${chk.update && chk.update.mode}`);
 check("/state 里也带得上一份更新信息", typeof (await get(PORT, "/state", token)).body.state.update === "object");
 
-check("更新只认 --ff-only（不要自动 merge）", /pull", "--ff-only/.test(updSrc));
+// 用 merge --ff-only 而不是 pull：pull 会去直连 github（国内连不上）。关键是**必须** ff-only，
+// 也就是任何 pull/merge 调用都得带 --ff-only，不许出现会真合并的调用。
+check(
+	"更新只认 --ff-only（不要自动 merge）",
+	/"merge", "--ff-only"/.test(updSrc) && !/"(?:pull|merge)", (?!"--ff-only")/.test(updSrc),
+);
 check("工作区脏就拒绝自动更（别冲掉用户的本地改动）", /dirty\(info\.dir\)[\s\S]{0,1200}有本地改动/.test(updSrc));
 // 同一个脏东西的维护版：提示里得说清“怎么处理”。脏的根子大多数不是用户手改的，
 // 而是 npm run sync 把开发那份推进去拓脏的（sync 把文件写进那个检出 → 更新器拒绝自动更）。
