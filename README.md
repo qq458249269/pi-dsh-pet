@@ -628,8 +628,8 @@ PI_PET_TOPMODE=1|2|3         # screen-saver 层级 / 不置顶定时顶 / 不透
 
 | 装法 | 怎么更 | 自动 |
 |------|--------|------|
-| git 检出（pi 扩展装法、`git clone`） | `git fetch` 比远端 → `git pull --ff-only` | ✅ 全自动 |
-| npm 全局装 | 查 registry → `npm i -g pi-dsh-pet@latest` | ✅ 全自动 |
+| git 检出（pi 扩展装法、`git clone`） | 镜像 `git fetch` 比远端 → `git merge --ff-only @{u}` | ✅ 全自动 |
+| npm 全局装 | 查 registry → `npm i -g pi-dsh-pet@latest`（都带 `--registry=npmmirror`） | ✅ 全自动 |
 | **单文件 exe（portable）** | 问 GitHub Releases 的 latest tag → 把新 exe 下到同目录，**退出后自动覆盖**（正在跑的 exe 是锁着的）。认法：env `PORTABLE_EXECUTABLE_FILE`（electron-builder 的启动器塞的）。自动更新只查不下载，125MB 不偷着下 | ⚠️ 只查 |
 | npm 非全局装 / 解压即用 / asar 打包版 | **只报告当前版本和该去哪儿手动更**，不代劳 | ❌ |
 
@@ -645,7 +645,15 @@ PI_PET_UPDATE=check       # 只查不装
 PI_PET_UPDATE_NO_FETCH=1  # 查也不联网，只比本地已有的远端 ref（看「我落后几个提交」）
 PI_PET_UPDATE_GAP_MS=…    # 自动检查的最小间隔（默认 6h）
 PI_PET_UPDATE_DELAY_MS=…  # 启动后等多久再查（默认 12s，别跟起窗抢 IO）
+PI_PET_GH_PROXY=…         # GitHub 代理前缀，逗号分隔（默认 ghfast.top,gh-proxy.com）；=off 只用直连
+PI_PET_NPM_REGISTRY=…     # npm 镜像（默认 registry.npmmirror.com）；="" 只用官方
 ```
+
+**国内加速**：GitHub 直连常年几十 KB/s，所以 `git fetch` / GitHub API / portable 的 exe 下载
+都是给 URL 加代理前缀（`https://ghfast.top/https://github.com/...`），代理挂了自动退下一个，
+最后一个永远是直连。git 那条只做 `fetch`，落地仍走本地 `git merge --ff-only @{u}` ——
+ref 还是写回 `origin/main`，你的 git 配置一个字不用改。npm 同理：镜像上查不到（刚发布还没同步）
+就回官方 registry。
 
 ## 待机节奏（动画被切一半 / 待机太短）
 

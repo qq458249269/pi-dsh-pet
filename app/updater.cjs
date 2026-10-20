@@ -26,6 +26,13 @@
  * 更新完**宿主进程自己不会换代码**（它是 detached 的，没人负责再拉起它），
  * 所以调用方要自己换一扇窗：渲染层（pet.js / pet.css）立刻就是新的，
  * 宿主层（app/*）要等下次 `pi-pet restart`。
+ *
+ * 国内加速：GitHub 直连在国内常年几十 KB/s，三档全部走镜像 ——
+ *   git fetch / GitHub API / exe 下载给 URL 加代理前缀（ghfast.top、gh-proxy.com，
+ *   挂了自动退下一个，最后一个永远是直连）；npm 加 `--registry=npmmirror`，
+ *   镜像上没有（新发布还没同步）再回官方 registry。
+ *   开关：`PI_PET_GH_PROXY=https://xx,https://yy` / `=off` 只用直连；
+ *        `PI_PET_NPM_REGISTRY=…` / `=""` 只用官方。
  */
 
 "use strict";
@@ -39,6 +46,23 @@ const { spawn } = require("node:child_process");
 const PKG_ROOT = path.resolve(__dirname, "..");
 /** portable 那一档问的仓库（跟 package.json 的 repository 同一家，不另配） */
 const REPO = "qq458249269/pi-dsh-pet";
+
+const NPM = process.platform === "win32" ? "npm.cmd" : "npm";
+
+/** 国内镜像前缀（顺序即尝试顺序）。`PI_PET_GH_PROXY=off` 关掉。 */
+const GH_PROXIES = (process.env.PI_PET_GH_PROXY ?? "https://ghfast.top,https://gh-proxy.com")
+	.split(",")
+	.map((s) => s.trim().replace(/\/+$/, ""))
+	.filter((s) => s && s !== "off");
+/** npm 镜像。`PI_PET_NPM_REGISTRY=""` 只用官方 registry。 */
+const NPM_REGISTRY = process.env.PI_PET_NPM_REGISTRY ?? "https://registry.npmmirror.com";
+
+/** GitHub URL → 依次尝试的 URL（镜像在前、直连兜底）。非 GitHub 的原样一条。 */
+function mirrorUrls(url) {
+	const u = String(url || "");
+	if (!/github(usercontent)?\.com/i.test(u)) return [u];
+	return [...GH_PROXIES.map((p) => `${p}/${u}`), u];
+}
 
 /** 跑一条命令。**永不抛**：找不到 git / 超时 / 非零退出都变成返回值，
  *  更新失败只是「没更成」，绝不能把宿主带崩（它是那个 HTTP 服务）。 */
@@ -100,9 +124,18 @@ let npmRoot = null;
 /** npm 的全局 node_modules 路径（拿不到就 null = 不敢替用户跑 npm i -g）。 */
 async function globalNodeModules() {
 	if (npmRoot !== null) return npmRoot;
-	const r = await run(process.platform === "win32" ? "npm.cmd" : "npm", ["root", "-g"], { timeoutMs: 20000 });
+	const r = await npmRun(["root", "-g"], 20000);
 	npmRoot = r && r.code === 0 && r.stdout ? path.resolve(r.stdout) : "";
 	return npmRoot;
+}
+
+/** npm 先走国内 registry，镜像答不上（新发布还没同步 / 镜像挂了）再回官方。 */
+async function npmRun(args, timeoutMs) {
+	if (NPM_REGISTRY) {
+		const m = await run(NPM, [...args, `--registry=${NPM_REGISTRY}`], { timeoutMs });
+		if (m && m.code === 0) return m;
+	}
+	return await run(NPM, args, { timeoutMs });
 }
 
 /**
@@ -127,8 +160,18 @@ function cmpVersion(a, b) {
 	return 0;
 }
 
+/** GET 一个 URL，撞镜像：按 mirrorUrls 顺序试，第一个 200 的赢；全挂了返回最后一次结果。永不抛。 */
+async function get(url, opts = {}) {
+	let last = null;
+	for (const u of mirrorUrls(url)) {
+		last = await getOnce(u, opts);
+		if (last && last.status === 200) return last;
+	}
+	return last;
+}
+
 /** GET 一个 URL（跟进重定向）。**永不抛**：更新查不到只是「没查到」。 */
-function get(url, { timeoutMs = 20000, redirects = 0 } = {}) {
+function getOnce(url, { timeoutMs = 20000, redirects = 0 } = {}) {
 	return new Promise((resolve) => {
 		let settled = false;
 		const done = (v) => { if (!settled) { settled = true; resolve(v); } };
@@ -150,8 +193,18 @@ function get(url, { timeoutMs = 20000, redirects = 0 } = {}) {
 	});
 }
 
+/** 下载到文件，撞镜像（同 get）。永不抛。 */
+async function download(url, dest, opts = {}) {
+	let last = null;
+	for (const u of mirrorUrls(url)) {
+		last = await downloadOnce(u, dest, opts);
+		if (last.ok) return last;
+	}
+	return last;
+}
+
 /** 下载到文件（先写 .part 再改名，避免中途断网留下半个 exe 当新版）。永不抛。 */
-function download(url, dest, { timeoutMs = 20 * 60 * 1000, redirects = 0 } = {}) {
+function downloadOnce(url, dest, { timeoutMs = 20 * 60 * 1000, redirects = 0 } = {}) {
 	return new Promise((resolve) => {
 		let settled = false;
 		const done = (v) => { if (!settled) { settled = true; resolve(v); } };
@@ -159,7 +212,7 @@ function download(url, dest, { timeoutMs = 20 * 60 * 1000, redirects = 0 } = {})
 			const loc = res.headers.location;
 			if ([301, 302, 303, 307, 308].includes(res.statusCode) && loc && redirects < 5) {
 				res.resume();
-				resolve(download(new URL(loc, url).href, dest, { timeoutMs, redirects: redirects + 1 }));
+				resolve(downloadOnce(new URL(loc, url).href, dest, { timeoutMs, redirects: redirects + 1 }));
 				return;
 			}
 			if (res.statusCode !== 200) {
@@ -266,6 +319,36 @@ async function dirty(dir) {
 	return r.stdout.length > 0;
 }
 
+/** 这个检出跟谁走：{remote, branch, url}。拿不到就 null（自己 clone 的 / detached HEAD）。 */
+async function upstream(dir) {
+	const r = await run("git", ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"], { cwd: dir, timeoutMs: 8000 });
+	const name = r && r.code === 0 ? r.stdout.trim() : "";
+	if (!name || name.includes("@{") || name.endsWith("/")) return null;
+	const i = name.indexOf("/");
+	const remote = i > 0 ? name.slice(0, i) : "origin";
+	const branch = i > 0 ? name.slice(i + 1) : name;
+	const u = await run("git", ["remote", "get-url", remote], { cwd: dir, timeoutMs: 8000 });
+	return { remote, branch, url: u && u.code === 0 ? u.stdout.trim() : "" };
+}
+
+/**
+ * fetch，走镜像。代理只是给 URL 加前缀，所以 ref 得显式写：
+ * `git fetch <url> +refs/heads/X:refs/remotes/<remote>/X` —— 写回原来的 remote ref，
+ * 后面 `@{u}` / `git pull` 照旧认 origin/main，用户不用改任何 git 配置。
+ */
+async function gitFetch(dir, { timeoutMs = 45000 } = {}) {
+	const up = await upstream(dir);
+	if (!up || !up.url) return await run("git", ["fetch", "--quiet", "--prune"], { cwd: dir, timeoutMs });
+	let last = null;
+	for (const url of mirrorUrls(up.url)) {
+		const refspec = `+refs/heads/${up.branch}:refs/remotes/${up.remote}/${up.branch}`;
+		const r = await run("git", ["fetch", "--quiet", "--prune", url, refspec], { cwd: dir, timeoutMs });
+		if (r && r.code === 0) return r;
+		last = { code: -1, stdout: "", stderr: (r && (r.stderr || r.stdout)) || "git 没跑起来" };
+	}
+	return last;
+}
+
 /**
  * 查有没有新版。**只读**（git 只 fetch，不动工作区），所以可以随时调。
  * 返回 {ok, hasUpdate, mode, version, current, latest, behind, note}
@@ -279,9 +362,9 @@ async function check({ fetch = process.env.PI_PET_UPDATE_NO_FETCH !== "1" } = {}
 	const info = await detect();
 	if (info.mode === "git") {
 		if (fetch) {
-			const f = await run("git", ["fetch", "--quiet", "--prune"], { cwd: info.dir, timeoutMs: 45000 });
-			if (!f || (f.code !== 0 && f.code !== -2)) {
-				return { ...info, ok: false, hasUpdate: false, note: "git fetch 失败（多半是没网），先按当前版本继续跑" };
+			const f = await gitFetch(info.dir);
+			if (!f || f.code !== 0) {
+				return { ...info, ok: false, hasUpdate: false, note: "git fetch 失败（镜像和直连都没通，多半是没网），先按当前版本继续跑" };
 			}
 		}
 		const ref = await remoteRef(info.dir);
@@ -302,9 +385,7 @@ async function check({ fetch = process.env.PI_PET_UPDATE_NO_FETCH !== "1" } = {}
 		};
 	}
 	if (info.mode === "npm") {
-		const r = await run(process.platform === "win32" ? "npm.cmd" : "npm", ["view", info.name, "version"], {
-			timeoutMs: 30000,
-		});
+		const r = await npmRun(["view", info.name, "version"], 30000);
 		if (!r || r.code !== 0 || !r.stdout) {
 			return { ...info, ok: false, hasUpdate: false, note: "问不到 npm registry（没网/没 npm），先按当前版本继续跑" };
 		}
@@ -368,7 +449,9 @@ async function apply() {
 			};
 		}
 		const before = await shortSha(info.dir, "HEAD");
-		const r = await run("git", ["pull", "--ff-only", "--quiet"], { cwd: info.dir, timeoutMs: 120000 });
+		// 先镜像 fetch，再本地 --ff-only merge（不用 pull：pull 自己会去问 github 直连）
+		const f = await gitFetch(info.dir, { timeoutMs: 120000 });
+		const r = f && f.code === 0 ? await run("git", ["merge", "--ff-only", "--quiet", "@{u}"], { cwd: info.dir, timeoutMs: 60000 }) : f;
 		if (!r || r.code !== 0) {
 			const why = (r && (r.stderr || r.stdout)) || "git 没跑起来";
 			return { ok: false, mode: "git", note: `拉不下来：${why.split("\n")[0]}` };
@@ -402,9 +485,7 @@ async function apply() {
 		};
 	}
 	if (info.mode === "npm" && info.global) {
-		const r = await run(process.platform === "win32" ? "npm.cmd" : "npm", ["install", "-g", `${info.name}@latest`], {
-			timeoutMs: 240000,
-		});
+		const r = await npmRun(["install", "-g", `${info.name}@latest`], 240000);
 		if (!r || r.code !== 0) {
 			const why = (r && (r.stderr || r.stdout)) || "npm 没跑起来";
 			return { ok: false, mode: "npm", note: `npm 装失败：${why.split("\n").slice(-1)[0]}` };
@@ -540,4 +621,4 @@ function readUpdateInfo(home) {
 	};
 }
 
-module.exports = { detect, check, apply, autoUpdate, readUpdateInfo, cmpVersion, PKG_ROOT };
+module.exports = { detect, check, apply, autoUpdate, readUpdateInfo, cmpVersion, mirrorUrls, PKG_ROOT };
